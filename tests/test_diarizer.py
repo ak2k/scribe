@@ -23,7 +23,7 @@ from scribe.diarizer import (
     parse_output,
 )
 from scribe.errors import ExternalServiceError, ToolMissingError
-from tests.child_env_cases import DROPPED, KEPT, TOKENS
+from tests.child_env_cases import ALL_BUT_THE_WORKER, DROPPED, KEPT, TOKENS
 from tests.diarizer_fakes import FFMPEG, TOKEN, UVX, FakeWorker, answer, found
 
 if TYPE_CHECKING:
@@ -133,6 +133,16 @@ def test_both_children_are_given(
     decode_names, worker_names = _child_names(tmp_path, name, str(tmp_path), monkeypatch)
 
     assert name in decode_names & worker_names
+
+
+@pytest.mark.parametrize("name", ALL_BUT_THE_WORKER)
+def test_the_decode_and_not_the_worker_is_given(
+    name: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    decode_names, worker_names = _child_names(tmp_path, name, "1", monkeypatch)
+
+    assert name in decode_names
+    assert name not in worker_names
 
 
 def test_the_worker_marks_its_failures_as_this_module_reads_them() -> None:

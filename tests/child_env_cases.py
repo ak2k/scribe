@@ -27,6 +27,9 @@ DROPPED = (
 )
 # Where the worker alone looks for the Hugging Face token.
 TOKENS = ("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN", "HF_TOKEN_PATH")
+# Hugging Face's opt-out of sending a token no call names, which would keep the
+# worker's gated download from sending the one it is granted.
+ALL_BUT_THE_WORKER = ("HF_HUB_DISABLE_IMPLICIT_TOKEN",)
 # Every name the children are given by name, every proxy name in either case,
 # and one name under each prefix whose names pass.
 KEPT = (
@@ -46,7 +49,6 @@ KEPT = (
     "SSL_CERT_DIR",
     "HTTP_TIMEOUT",
     "TRANSFORMERS_OFFLINE",
-    "HF_HUB_DISABLE_IMPLICIT_TOKEN",
     "UV_NO_HF_TOKEN",
     "DO_NOT_TRACK",
     "DISABLE_TELEMETRY",

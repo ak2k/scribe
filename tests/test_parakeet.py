@@ -20,7 +20,7 @@ from scribe.cli import app
 from scribe.errors import ExternalServiceError
 from scribe.parakeet import DEFAULT_TIMEOUT_S, ParakeetMlx, parse_output
 from scribe.schema import Engine, Source, Transcript, Word
-from tests.child_env_cases import DROPPED, KEPT, TOKENS
+from tests.child_env_cases import ALL_BUT_THE_WORKER, DROPPED, KEPT, TOKENS
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -162,7 +162,7 @@ def test_the_child_is_not_given(name: str, tmp_path: Path, monkeypatch: pytest.M
     assert name not in names
 
 
-@pytest.mark.parametrize("name", KEPT)
+@pytest.mark.parametrize("name", [*KEPT, *ALL_BUT_THE_WORKER])
 def test_the_child_is_given(name: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv(name, str(tmp_path))
     fake = FakeParakeet()
