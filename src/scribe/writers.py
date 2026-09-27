@@ -22,7 +22,8 @@ _MS_PER_MINUTE = 60_000
 _MS_PER_SECOND = 1000
 
 
-def _clock(seconds: float) -> str:
+def hms(seconds: float) -> str:
+    """Format `seconds` as HH:MM:SS, the fraction dropped; hours are never cut to two digits."""
     whole = int(seconds)
     hours, rest = divmod(whole, _SECONDS_PER_HOUR)
     minutes, secs = divmod(rest, _SECONDS_PER_MINUTE)
@@ -48,7 +49,7 @@ def to_markdown(transcript: Transcript) -> str:
 
     """
     return "".join(
-        f"**{turn.speaker}** [{_clock(turn.start)}]\n{turn.text}\n\n" for turn in transcript.turns
+        f"**{turn.speaker}** [{hms(turn.start)}]\n{turn.text}\n\n" for turn in transcript.turns
     )
 
 

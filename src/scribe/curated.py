@@ -17,6 +17,7 @@ from pydantic import AfterValidator, ConfigDict, Json, TypeAdapter, ValidationEr
 from scribe.cleanup import turn_label
 from scribe.errors import InputValidationError
 from scribe.schema import FiniteFloat
+from scribe.writers import hms
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -24,9 +25,6 @@ if TYPE_CHECKING:
 
     from scribe.cleanup import CleanupRequest
     from scribe.schema import Engine, Turn
-
-_SECONDS_PER_HOUR = 3600
-_SECONDS_PER_MINUTE = 60
 
 
 def _ordered(span: tuple[float, float]) -> tuple[float, float]:
@@ -91,12 +89,6 @@ def read_front(path: Path) -> str:
         raise InputValidationError(f"cannot read --front {path}: {exc}") from exc
 
 
-def _clock(seconds: int) -> str:
-    hours, rest = divmod(seconds, _SECONDS_PER_HOUR)
-    minutes, secs = divmod(rest, _SECONDS_PER_MINUTE)
-    return f"{hours:02d}:{minutes:02d}:{secs:02d}"
-
-
 def _touches(turn: Turn, start: float, end: float) -> bool:
     # A fill of words timed with no length is a point. On the boundary of two
     # turns it marks both: a note too many costs a reader less than recovered
@@ -116,7 +108,7 @@ def _note(turn: Turn, ranges: Sequence[tuple[float, float]]) -> str:
     high = min(max(end for _, end in touched), turn.end)
     return (
         "[Includes speech recovered by a second transcription pass, "
-        f"{_clock(math.floor(low))}\N{EN DASH}{_clock(math.ceil(high))}.] "
+        f"{hms(math.floor(low))}\N{EN DASH}{hms(math.ceil(high))}.] "
     )
 
 
@@ -144,7 +136,7 @@ def render_curated(
 
     """
     blocks = [
-        f"**{turn_label(request, turn)} | {_clock(math.floor(turn.start))}**\n"
+        f"**{turn_label(request, turn)} | {hms(math.floor(turn.start))}**\n"
         f"{_note(turn, ranges)}{text}"
         for turn, text in kept
     ]
