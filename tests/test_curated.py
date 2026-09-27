@@ -101,6 +101,13 @@ def _noted(start: float, end: float, ranges: list[Span]) -> str:
         pytest.param(
             (10.0, 20.0), [(11.0, 12.0), (17.5, 18.2)], ("00:00:11", "00:00:19"), id="union"
         ),
+        # Ranges the turn does not touch never widen its note.
+        pytest.param(
+            (10.0, 20.0),
+            [(1.0, 5.0), (12.0, 15.0), (25.0, 30.0)],
+            ("00:00:12", "00:00:15"),
+            id="untouched-ranges",
+        ),
         pytest.param((10.0, 20.0), [(14.5, 14.5)], ("00:00:14", "00:00:15"), id="point-inside"),
         pytest.param((10.0, 20.0), [(20.0, 20.0)], ("00:00:20", "00:00:20"), id="point-at-end"),
         pytest.param((10.0, 20.0), [(10.0, 10.0)], ("00:00:10", "00:00:10"), id="point-at-start"),
