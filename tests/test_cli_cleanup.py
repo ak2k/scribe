@@ -1522,6 +1522,11 @@ def test_the_front_file_opens_the_reading_copy_byte_for_byte(
             id="copy-is-out",
         ),
         pytest.param(
+            ["--curated", "{dir}/Transcript_Two_Speakers.clean.md"],
+            "is the same file as --out",
+            id="copy-is-out-but-for-case",
+        ),
+        pytest.param(
             ["--curated", "{dir}/transcript_two_speakers.cleanup.json"],
             "is the same file as sidecar",
             id="copy-is-sidecar",

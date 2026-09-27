@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import tempfile
+import unicodedata
 from dataclasses import dataclass
 from itertools import combinations
 from pathlib import Path
@@ -17,14 +18,30 @@ if TYPE_CHECKING:
 
 
 def _same_file(first: Path, second: Path) -> bool:
-    # Comparing resolved paths misses a hard link and a case-only difference on
-    # a case-insensitive volume; only a path that does not exist yet needs it.
     # Resolved first: an output named through a directory not yet created, as
     # in `new/..`, exists once that detour is gone.
     first, second = first.resolve(), second.resolve()
+    # Existing paths ask the filesystem, which sees through a hard link and a
+    # case-only difference on a case-insensitive volume.
+    if first.exists() and second.exists():
+        return first.samefile(second)
+    # A path not yet created can only be compared by name. A case- or
+    # normalization-insensitive volume, the macOS default, takes names that
+    # differ only in case or Unicode form for one file, so those count as one:
+    # on a case-sensitive volume that refuses a pair it could have written,
+    # which costs a rename, where missing it loses an output.
+    same_name = _folded(first.name) == _folded(second.name)
+    return same_name and _same_directory(first.parent, second.parent)
+
+
+def _same_directory(first: Path, second: Path) -> bool:
     if first.exists() and second.exists():
         return first.samefile(second)
     return first == second
+
+
+def _folded(name: str) -> str:
+    return unicodedata.normalize("NFC", name).casefold()
 
 
 @dataclass(frozen=True)

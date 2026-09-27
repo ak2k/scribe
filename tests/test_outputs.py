@@ -66,6 +66,42 @@ def test_two_outputs_that_are_one_file_are_refused(tmp_path: Path) -> None:
         )
 
 
+@pytest.mark.parametrize(
+    ("first", "second"),
+    [
+        pytest.param("Talk.clean.md", "talk.clean.md", id="case"),
+        pytest.param(
+            "caf\N{LATIN SMALL LETTER E WITH ACUTE}.md",
+            "cafe\N{COMBINING ACUTE ACCENT}.md",
+            id="normalization",
+        ),
+    ],
+)
+def test_two_new_outputs_named_alike_but_for_case_or_form_are_refused(
+    tmp_path: Path, first: str, second: str
+) -> None:
+    # A case- and normalization-insensitive volume, the macOS default, holds
+    # these as one file, so the later write would replace the earlier.
+    with pytest.raises(InputValidationError, match=r"--curated .* is the same file as --out"):
+        plan_outputs(
+            {"--out": tmp_path / first, "--curated": tmp_path / second},
+            {"the input": _input(tmp_path)},
+        )
+
+
+def test_new_outputs_named_alike_in_two_directories_are_planned(tmp_path: Path) -> None:
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    outputs = {
+        "--out": tmp_path / "a" / "Talk.clean.md",
+        "--curated": tmp_path / "b" / "talk.clean.md",
+    }
+
+    plan = plan_outputs(outputs, {"the input": _input(tmp_path)})
+
+    assert dict(plan.paths) == outputs
+
+
 def test_an_output_in_a_missing_directory_is_refused(tmp_path: Path) -> None:
     with pytest.raises(InputValidationError, match="not a directory"):
         plan_outputs({"--out": tmp_path / "typo" / "out.md"}, {"the input": _input(tmp_path)})
