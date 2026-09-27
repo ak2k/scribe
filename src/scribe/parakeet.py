@@ -169,8 +169,17 @@ _CHILD_NAMES = frozenset(
         # Older names uv and Hugging Face still read for a timeout and for offline.
         "HTTP_TIMEOUT",
         "TRANSFORMERS_OFFLINE",
-        # Stops Hugging Face sending a saved token where none is needed; it holds no token.
+        # Opt-outs a user set on purpose, none holding a secret: of Hugging Face
+        # sending a saved token where none is needed, of uv sending one, of telemetry.
         "HF_HUB_DISABLE_IMPLICIT_TOKEN",
+        "UV_NO_HF_TOKEN",
+        "DO_NOT_TRACK",
+        "DISABLE_TELEMETRY",
+        # Caps a user set on the CPU threads the numeric libraries start.
+        "OMP_NUM_THREADS",
+        "OPENBLAS_NUM_THREADS",
+        "VECLIB_MAXIMUM_THREADS",
+        "MKL_NUM_THREADS",
         # The tool's model cache. Its other PARAKEET_* settings override the
         # decoding and sentence defaults, which the recorded engine would then misdescribe.
         "PARAKEET_CACHE_DIR",
