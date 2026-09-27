@@ -85,8 +85,9 @@ Exit 2 is a bad input or a backend failure. `--max-budget-usd` is the ceiling fo
 call, and there is one call per chunk, with a floor near $0.10 a call.
 
 `--curated PATH` also writes a reading copy of the same words, each turn as
-`**Speaker | HH:MM:SS**` over its cleaned text; a turn holding words the
-cross-check filled in opens with a bracketed note of when. `--front FILE` puts
+`**Speaker | HH:MM:SS**` over its cleaned text; a turn holding words a fill
+pass inserted (the cross-check or `scribe fill`) opens with a bracketed note of
+when. `--front FILE` puts
 that file's text, exactly as written, at the top of the reading copy, above a
 `---` rule.
 
