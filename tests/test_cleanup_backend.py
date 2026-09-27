@@ -190,17 +190,25 @@ def test_the_system_prompt_file_is_absolute_and_readable_during_the_call() -> No
     assert not prompt_file.exists()
 
 
+_DISABLES = (
+    "CLAUDE_CODE_DISABLE_AUTO_MEMORY",
+    "CLAUDE_CODE_DISABLE_CLAUDE_MDS",
+    "CLAUDE_CODE_DISABLE_CRON",
+)
+
+
 def test_the_three_environment_variables_reach_the_cli() -> None:
     recorder = Recorder(_fixture("claude_p_success.json"))
 
     ClaudeCliBackend(run=recorder.run).complete(SYSTEM, USER)
 
-    assert recorder.env["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] == "1"
-    assert recorder.env["CLAUDE_CODE_DISABLE_CLAUDE_MDS"] == "1"
-    assert recorder.env["CLAUDE_CODE_DISABLE_CRON"] == "1"
+    # Bound first: an assert over the environment itself would print its values.
+    flags = {name: recorder.env.get(name) for name in _DISABLES}
+    names = set(recorder.env)
+    assert flags == dict.fromkeys(_DISABLES, "1")
     # The rest of the environment still goes through: the CLI authenticates on
     # the user's subscription, not on a key this process holds.
-    assert "PATH" in recorder.env
+    assert "PATH" in names
     assert recorder.kwargs["text"] is True
     assert recorder.kwargs["capture_output"] is True
     assert recorder.kwargs["check"] is False
@@ -380,9 +388,10 @@ def test_the_api_key_and_the_nesting_marker_never_reach_the_cli(
     _backend(script).complete(SYSTEM, USER)
 
     env = script.calls[0][1]
-    assert "ANTHROPIC_API_KEY" not in env
-    assert "CLAUDECODE" not in env
-    assert env["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] == "1"
+    names, memory = set(env), env.get("CLAUDE_CODE_DISABLE_AUTO_MEMORY")
+    assert "ANTHROPIC_API_KEY" not in names
+    assert "CLAUDECODE" not in names
+    assert memory == "1"
 
 
 def test_the_user_environment_reaches_the_cli_unchanged(
@@ -396,8 +405,9 @@ def test_the_user_environment_reaches_the_cli_unchanged(
     _backend(script).complete(SYSTEM, USER)
 
     env = script.calls[0][1]
-    for name in ("ANTHROPIC_BASE_URL", "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CONFIG_DIR"):
-        assert env[name] == f"users-own-{name}"
+    names = ("ANTHROPIC_BASE_URL", "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CONFIG_DIR")
+    given = {name: env.get(name) for name in names}
+    assert given == {name: f"users-own-{name}" for name in names}
 
 
 def test_resolve_finds_claude_before_any_call() -> None:

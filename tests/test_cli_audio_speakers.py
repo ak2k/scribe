@@ -244,9 +244,10 @@ def test_the_token_reaches_the_worker_only_through_its_environment(
     assert result.exit_code == 0, result.output
     # The decode and the worker, so the checks below look at real spawns.
     assert len(fake.calls) == 2
-    decode_env, worker_env = fake.envs
-    assert worker_env["HF_TOKEN"] == TOKEN
-    assert "HF_TOKEN" not in decode_env
+    # Bound first: an assert over an environment itself would print its values.
+    decode_names, worker_token = set(fake.envs[0]), fake.envs[1].get("HF_TOKEN")
+    assert worker_token == TOKEN
+    assert "HF_TOKEN" not in decode_names
     assert not any(TOKEN in part for argv in fake.calls for part in argv)
     assert TOKEN not in result.output
     assert not any(TOKEN.encode() in request for request in fake.requests)

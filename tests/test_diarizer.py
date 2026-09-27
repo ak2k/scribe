@@ -23,6 +23,7 @@ from scribe.diarizer import (
     parse_output,
 )
 from scribe.errors import ExternalServiceError, ToolMissingError
+from tests.child_env_cases import DROPPED, KEPT, TOKENS
 from tests.diarizer_fakes import FFMPEG, TOKEN, UVX, FakeWorker, answer, found
 
 if TYPE_CHECKING:
@@ -80,10 +81,11 @@ def test_the_run_decodes_the_audio_then_runs_the_pinned_worker(
         "revision": REVISION,
         "intervals": [[1.0, 4.0], [2.5, 5.0]],
     }
-    # The token reaches the worker only through its environment.
-    decode_env, worker_env = fake.envs
-    assert worker_env["HF_TOKEN"] == TOKEN
-    assert "HF_TOKEN" not in decode_env
+    # The token reaches the worker only through its environment. Bound first: an
+    # assert over an environment itself would print its values.
+    decode_names, worker_token = set(fake.envs[0]), fake.envs[1].get("HF_TOKEN")
+    assert worker_token == TOKEN
+    assert "HF_TOKEN" not in decode_names
     assert not any(TOKEN in part for argv in fake.calls for part in argv)
     assert TOKEN.encode() not in fake.requests[0]
     assert fake.timeouts == [DEFAULT_TIMEOUT_S, DEFAULT_TIMEOUT_S]
@@ -96,71 +98,41 @@ def test_the_run_decodes_the_audio_then_runs_the_pinned_worker(
     )
 
 
-# Keys scribe's own backends read, a path to a key file, and a token under a
-# prefix whose other names pass.
-_SECRETS = (
-    "XAI_API_KEY",
-    "GEMINI_API_KEY",
-    "ANTHROPIC_API_KEY",
-    "HONCHO_API_KEY",
-    "SOPS_AGE_KEY_FILE",
-    "UV_PUBLISH_TOKEN",
-)
-# What the children need to run and to find, or fetch, their packages and weights.
-_NEEDED = (
-    "PATH",
-    "HOME",
-    "USER",
-    "LOGNAME",
-    "TMPDIR",
-    "TEMP",
-    "LANG",
-    "LC_ALL",
-    "XDG_CACHE_HOME",
-    "XDG_CONFIG_HOME",
-    "XDG_DATA_HOME",
-    "XDG_CONFIG_DIRS",
-    "HF_HOME",
-    "HF_HUB_CACHE",
-    "HF_HUB_DISABLE_IMPLICIT_TOKEN",
-    "TRANSFORMERS_OFFLINE",
-    "UV_CACHE_DIR",
-    "UV_INDEX_URL",
-    "HTTP_TIMEOUT",
-    "PARAKEET_CACHE_DIR",
-    "PYTORCH_ENABLE_MPS_FALLBACK",
-    "https_proxy",
-    "HTTPS_PROXY",
-    "SSL_CERT_FILE",
-)
-
-
-def test_only_the_worker_gets_the_hugging_face_token_and_no_child_gets_other_secrets(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    for name in _SECRETS:
-        monkeypatch.setenv(name, "secret")
-    # Set by a `uv run` parent; no child reads it.
-    monkeypatch.setenv("VIRTUAL_ENV", str(tmp_path))
-    for name in _NEEDED:
-        monkeypatch.setenv(name, str(tmp_path))
-    granted = {
-        "HF_TOKEN": TOKEN,
-        "HUGGING_FACE_HUB_TOKEN": TOKEN,
-        "HF_TOKEN_PATH": str(tmp_path / "token"),
-    }
-    for name, value in granted.items():
-        monkeypatch.setenv(name, value)
+def _child_names(
+    tmp_path: Path, name: str, value: str, monkeypatch: pytest.MonkeyPatch
+) -> tuple[set[str], set[str]]:
+    """Run the decode and the worker with `name` set; return the names each was given."""
+    monkeypatch.setenv(name, value)
     fake = FakeWorker()
-
     _backend(fake).diarize(_audio(tmp_path), [(1.0, 4.0)])
-
     decode_env, worker_env = fake.envs
-    assert {name: worker_env.get(name) for name in granted} == granted
-    assert not granted.keys() & decode_env.keys()
-    for env in fake.envs:
-        assert not {*_SECRETS, "VIRTUAL_ENV"} & env.keys()
-        assert {name: env.get(name) for name in _NEEDED} == dict.fromkeys(_NEEDED, str(tmp_path))
+    return set(decode_env), set(worker_env)
+
+
+@pytest.mark.parametrize("name", DROPPED)
+def test_no_child_is_given(name: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    decode_names, worker_names = _child_names(tmp_path, name, "secret", monkeypatch)
+
+    assert name not in decode_names | worker_names
+
+
+@pytest.mark.parametrize("name", TOKENS)
+def test_only_the_worker_is_given(
+    name: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    decode_names, worker_names = _child_names(tmp_path, name, "secret", monkeypatch)
+
+    assert name in worker_names
+    assert name not in decode_names
+
+
+@pytest.mark.parametrize("name", KEPT)
+def test_both_children_are_given(
+    name: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    decode_names, worker_names = _child_names(tmp_path, name, str(tmp_path), monkeypatch)
+
+    assert name in decode_names & worker_names
 
 
 def test_the_worker_marks_its_failures_as_this_module_reads_them() -> None:

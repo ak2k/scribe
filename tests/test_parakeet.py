@@ -20,6 +20,7 @@ from scribe.cli import app
 from scribe.errors import ExternalServiceError
 from scribe.parakeet import DEFAULT_TIMEOUT_S, ParakeetMlx, parse_output
 from scribe.schema import Engine, Source, Transcript, Word
+from tests.child_env_cases import DROPPED, KEPT, TOKENS
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -142,62 +143,39 @@ def test_the_child_runs_the_pinned_tool_with_its_own_defaults(
     pinned += ["--model", "mlx-community/parakeet-tdt-0.6b-v3", "--output-format", "json"]
     assert argv == [*pinned, "--output-dir", str(fake.workdir), "--output-template", argv[-1]]
     assert fake.timeout == DEFAULT_TIMEOUT_S
-    assert "PARAKEET_MAX_WORDS" not in fake.env
-    assert fake.env["PARAKEET_CACHE_DIR"] == str(tmp_path)
-    assert int(fake.env["COLUMNS"]) >= 1000
+    # Bound first: an assert over the environment itself would print its values.
+    names, cache, columns = set(fake.env), fake.env.get("PARAKEET_CACHE_DIR"), fake.env["COLUMNS"]
+    assert "PARAKEET_MAX_WORDS" not in names
+    assert cache == str(tmp_path)
+    assert int(columns) >= 1000
     assert not fake.workdir.exists()
 
 
-# Keys scribe's own backends read, paths to key files, and tokens under
-# prefixes whose other names pass.
-_SECRETS = (
-    "XAI_API_KEY",
-    "GEMINI_API_KEY",
-    "ANTHROPIC_API_KEY",
-    "HONCHO_API_KEY",
-    "SOPS_AGE_KEY_FILE",
-    "UV_PUBLISH_TOKEN",
-    "HF_TOKEN",
-    "HUGGING_FACE_HUB_TOKEN",
-    "HF_TOKEN_PATH",
-)
-# What the child needs to run and to find, or fetch, its package and weights.
-_NEEDED = (
-    "PATH",
-    "HOME",
-    "USER",
-    "LOGNAME",
-    "TMPDIR",
-    "TEMP",
-    "LANG",
-    "LC_ALL",
-    "XDG_CACHE_HOME",
-    "XDG_CONFIG_HOME",
-    "XDG_DATA_HOME",
-    "XDG_CONFIG_DIRS",
-    "HF_HOME",
-    "HF_HUB_CACHE",
-    "HF_HUB_DISABLE_IMPLICIT_TOKEN",
-    "TRANSFORMERS_OFFLINE",
-    "UV_CACHE_DIR",
-    "HTTP_TIMEOUT",
-    "PARAKEET_CACHE_DIR",
-    "MLX_METAL_FAST_SYNCH",
-    "https_proxy",
-    "HTTPS_PROXY",
-    "SSL_CERT_FILE",
-)
+@pytest.mark.parametrize("name", [*DROPPED, *TOKENS])
+def test_the_child_is_not_given(name: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(name, "secret")
+    fake = FakeParakeet()
+
+    _backend(fake).transcribe(_audio(tmp_path), source=SOURCE)
+
+    names = set(fake.env)
+    assert name not in names
 
 
-def test_no_secret_reaches_the_child_and_what_it_needs_does(
+@pytest.mark.parametrize("name", KEPT)
+def test_the_child_is_given(name: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(name, str(tmp_path))
+    fake = FakeParakeet()
+
+    _backend(fake).transcribe(_audio(tmp_path), source=SOURCE)
+
+    names = set(fake.env)
+    assert name in names
+
+
+def test_the_index_url_reaches_the_child_with_its_credentials(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    for name in _SECRETS:
-        monkeypatch.setenv(name, "secret")
-    # Set by a `uv run` parent; no child reads it.
-    monkeypatch.setenv("VIRTUAL_ENV", str(tmp_path))
-    for name in _NEEDED:
-        monkeypatch.setenv(name, str(tmp_path))
     # uv resolves through it, credentials and all.
     index = "https://user:pass@index.invalid/simple"
     monkeypatch.setenv("UV_INDEX_URL", index)
@@ -205,9 +183,8 @@ def test_no_secret_reaches_the_child_and_what_it_needs_does(
 
     _backend(fake).transcribe(_audio(tmp_path), source=SOURCE)
 
-    assert not {*_SECRETS, "VIRTUAL_ENV"} & fake.env.keys()
-    assert {name: fake.env.get(name) for name in _NEEDED} == dict.fromkeys(_NEEDED, str(tmp_path))
-    assert fake.env["UV_INDEX_URL"] == index
+    given = fake.env.get("UV_INDEX_URL")
+    assert given == index
 
 
 _pieces = st.text(alphabet="ab. \t", max_size=4)
