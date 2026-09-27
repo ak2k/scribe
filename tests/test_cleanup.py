@@ -24,6 +24,7 @@ from scribe.cleanup import (
     render_system_prompt,
     render_user_prompt,
     strip_speaker_labels,
+    turn_label,
     verify_numbers,
 )
 from scribe.errors import InputValidationError
@@ -755,6 +756,38 @@ def test_ids_number_every_turn_of_the_recording_from_one() -> None:
     assert result.text == "A: one two\n\nB: three.\n\nB: four five six seven.\n\nA: eight\n"
 
 
+def test_each_turn_that_left_a_line_is_kept_with_its_text() -> None:
+    # Both pieces of the cut turn keep its times; the emptied turn leaves no
+    # pair, as it leaves no line.
+    backend = FakeBackend(
+        mutate=lambda reply: reply.replace(">um uh<", "><").replace(
+            ">three.<", ">Three.\n\nAnd more.<"
+        )
+    )
+    specs: list[Spec] = [
+        ("A", "one two"),
+        ("B", "three. four five six seven."),
+        ("A", "um uh"),
+        ("B", "eight"),
+    ]
+    request = _request(specs, speaker_key={"A": "Ann Lee"})
+
+    result = clean(request, backend, max_words=4)
+
+    assert [(turn.speaker, turn.start, text) for turn, text in result.kept] == [
+        ("A", 0.0, "one two"),
+        ("B", 1.0, "Three.\n\nAnd more."),
+        ("B", 1.0, "four five six seven."),
+        ("B", 3.0, "eight"),
+    ]
+    assert result.emptied_turns == 1
+    assert (
+        result.text
+        == "\n\n".join(f"{turn_label(request, turn)}: {text}" for turn, text in result.kept) + "\n"
+    )
+    assert result.text.startswith("Ann Lee: one two\n\nB: Three.\n\nAnd more.\n\nB: four")
+
+
 _WORDS = st.lists(st.text(alphabet="abcdefg", min_size=1, max_size=4), min_size=1, max_size=3)
 _TEXT = _WORDS.map(" ".join)
 
@@ -793,6 +826,11 @@ def test_a_chunk_comes_back_whole_from_its_reply_or_whole_as_said(
         + "\n"
     )
     assert result.truncated_chunks == ([] if well_formed else [0])
+    request = _request(turns)
+    assert (
+        result.text
+        == "\n\n".join(f"{turn_label(request, turn)}: {text}" for turn, text in result.kept) + "\n"
+    )
 
 
 def _tail_after(first: list[Spec]) -> str:

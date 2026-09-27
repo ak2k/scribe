@@ -200,6 +200,9 @@ class CleanResult(BaseModel):
     # Speaker labels a well-formed reply wrote inside a turn, dropped: the
     # input names the speaker.
     stripped_labels: int = 0
+    # Each turn that left a line, with that line's text, in order. A turn cut
+    # to fit a chunk is kept once per piece, each piece with the turn's times.
+    kept: tuple[tuple[Turn, str], ...] = ()
 
     @property
     def chunks(self) -> int:
@@ -312,7 +315,7 @@ def render_user_prompt(
 
     """
     body = "\n\n".join(
-        f'<t id={turn_id} speaker="{_escape(_label(request, turn), quote=True)}">'
+        f'<t id={turn_id} speaker="{_escape(turn_label(request, turn), quote=True)}">'
         f"{_escape(turn.text)}</t>"
         for turn_id, turn in enumerate(request.turns, start=first_id)
     )
@@ -321,7 +324,8 @@ def render_user_prompt(
     return f"{body}\n"
 
 
-def _label(request: CleanupRequest, turn: Turn) -> str:
+def turn_label(request: CleanupRequest, turn: Turn) -> str:
+    """The label `turn` is written under: its speaker, renamed by the relabel key."""
     return request.speaker_key.get(turn.speaker, turn.speaker)
 
 
@@ -517,8 +521,9 @@ def clean(
 
     Returns:
         The joined cleaned text, one `Completion` per chunk, each chunk whose
-        reply was set aside with the first rule that reply broke, and what the
-        well-formed replies returned empty or labeled. A set-aside chunk is
+        reply was set aside with the first rule that reply broke, what the
+        well-formed replies returned empty or labeled, and each turn that
+        left a line, with that line's text. A set-aside chunk is
         reported, not retried: re-splitting it is the caller's decision.
 
     Raises:
@@ -536,6 +541,7 @@ def clean(
     malformed: list[MalformedChunk] = []
     emptied = 0
     stripped = 0
+    kept: list[tuple[Turn, str]] = []
     lines: list[str] = []
     prior_tail: str | None = None
     first_id = 1
@@ -555,11 +561,9 @@ def clean(
         else:
             malformed.append(MalformedChunk(chunk=index, cause=reply))
             texts = [_paragraphs(turn.text) for turn in chunk]
-        chunk_lines = [
-            f"{_label(request, turn)}: {text}"
-            for turn, text in zip(chunk, texts, strict=True)
-            if text
-        ]
+        chunk_kept = [(turn, text) for turn, text in zip(chunk, texts, strict=True) if text]
+        chunk_lines = [f"{turn_label(request, turn)}: {text}" for turn, text in chunk_kept]
+        kept += chunk_kept
         lines += chunk_lines
         prior_tail = _prior_tail("\n\n".join(chunk_lines), labels)
     return CleanResult(
@@ -568,6 +572,7 @@ def clean(
         malformed_chunks=malformed,
         emptied_turns=emptied,
         stripped_labels=stripped,
+        kept=tuple(kept),
     )
 
 
