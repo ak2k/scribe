@@ -542,7 +542,6 @@ def clean(
     emptied = 0
     stripped = 0
     kept: list[tuple[Turn, str]] = []
-    lines: list[str] = []
     prior_tail: str | None = None
     first_id = 1
     for index, chunk in enumerate(chunk_turns(request.turns, max_words=max_words)):
@@ -564,10 +563,9 @@ def clean(
         chunk_kept = [(turn, text) for turn, text in zip(chunk, texts, strict=True) if text]
         chunk_lines = [f"{turn_label(request, turn)}: {text}" for turn, text in chunk_kept]
         kept += chunk_kept
-        lines += chunk_lines
         prior_tail = _prior_tail("\n\n".join(chunk_lines), labels)
     return CleanResult(
-        text="\n\n".join(lines) + "\n",
+        text="\n\n".join(f"{turn_label(request, turn)}: {text}" for turn, text in kept) + "\n",
         completions=completions,
         malformed_chunks=malformed,
         emptied_turns=emptied,
