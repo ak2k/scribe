@@ -147,7 +147,7 @@ def run_in_own_group(
 # third-party code, so the keys scribe's own backends read stay out of it.
 _CHILD_NAMES = frozenset(
     {
-        # Where executables are (uv's interpreters, the tool's ffmpeg), whose they are, the locale.
+        # Where executables are (uv's interpreters, the tool's ffmpeg), the user, the locale.
         "PATH",
         "HOME",
         "USER",
@@ -157,8 +157,8 @@ _CHILD_NAMES = frozenset(
         "TMPDIR",
         "TEMP",
         "TMP",
-        # The defaults under which uv and Hugging Face keep caches, and uv its
-        # interpreters and config: without them a run downloads everything again.
+        # The roots uv and Hugging Face put their caches under, and uv its
+        # interpreters and config: dropping one that is set downloads it all again.
         "XDG_CACHE_HOME",
         "XDG_DATA_HOME",
         "XDG_CONFIG_HOME",
