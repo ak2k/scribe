@@ -192,8 +192,8 @@ _PROXIES = frozenset({"http_proxy", "https_proxy", "all_proxy", "no_proxy"})
 # UV_INDEX_URL passes with any password in it, as uv needs it; UV_INDEX_<NAME>_PASSWORD does not.
 _CHILD_PREFIXES = ("LC_", "UV_", "HF_", "HUGGINGFACE_", "MLX_", "PYTORCH_")
 # uv settings neither child uses that could hand the tool a secret: a file uv
-# loads into the tool's environment.
-_WITHHELD = ("UV_ENV_FILE",)
+# loads into the tool's environment, and where and as whom to upload a package.
+_WITHHELD = ("UV_ENV_FILE", "UV_PUBLISH_")
 # A name holding one of these words holds a credential, or says where or how to
 # get one, whatever its prefix. An OIDC setting without the ID token it goes
 # with makes Hugging Face's client fail every call.
