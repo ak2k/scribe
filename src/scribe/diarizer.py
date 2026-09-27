@@ -21,7 +21,7 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 
 from scribe.attribution import Speech
 from scribe.errors import ExternalServiceError, ToolMissingError
-from scribe.parakeet import child_env, run_in_own_group
+from scribe.parakeet import TOKENLESS, child_env, run_in_own_group
 from scribe.schema import FiniteFloat
 
 if TYPE_CHECKING:
@@ -224,7 +224,9 @@ class PyannoteDiarizer:
             )
             # Absolute, so a colon in a relative name is not read as a protocol.
             decode = [tools.ffmpeg, "-nostdin", "-v", "error", "-i", str(audio.absolute()), "-vn"]
-            self._spawn([*decode, "-ac", "1", "-ar", _RATE, str(wav)], "ffmpeg", child_env())
+            self._spawn(
+                [*decode, "-ac", "1", "-ar", _RATE, str(wav)], "ffmpeg", child_env(*TOKENLESS)
+            )
             request.write_text(
                 json.dumps(
                     {

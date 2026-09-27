@@ -169,9 +169,8 @@ _CHILD_NAMES = frozenset(
         # Older names uv and Hugging Face still read for a timeout and for offline.
         "HTTP_TIMEOUT",
         "TRANSFORMERS_OFFLINE",
-        # Opt-outs a user set on purpose, none holding a secret: of Hugging Face
-        # sending a saved token where none is needed, of uv sending one, of telemetry.
-        "HF_HUB_DISABLE_IMPLICIT_TOKEN",
+        # Opt-outs a user set on purpose, none holding a secret: of uv sending a
+        # Hugging Face token, of telemetry.
         "UV_NO_HF_TOKEN",
         "DO_NOT_TRACK",
         "DISABLE_TELEMETRY",
@@ -200,6 +199,11 @@ _WITHHELD = ("UV_ENV_FILE", "UV_PUBLISH_")
 _SECRET_WORDS = frozenset(
     {"TOKEN", "PASSWORD", "SECRET", "KEY", "CREDENTIAL", "CREDENTIALS", "OIDC"}
 )
+# Granted to each child that needs no Hugging Face token: the user's opt-out of
+# sending a token on a call that names none. The TOKEN in its name keeps it from
+# the diarizer's worker, which names none for its gated model and so, given
+# this, would send none and be refused.
+TOKENLESS = ("HF_HUB_DISABLE_IMPLICIT_TOKEN",)
 
 
 def _needed(name: str) -> bool:
@@ -216,7 +220,7 @@ def child_env(*granted: str) -> dict[str, str]:
 
 
 def _env() -> dict[str, str]:
-    env = child_env()
+    env = child_env(*TOKENLESS)
     env["COLUMNS"] = _COLUMNS
     return env
 
