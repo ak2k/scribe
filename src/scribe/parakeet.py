@@ -181,9 +181,12 @@ _PROXIES = frozenset({"http_proxy", "https_proxy", "all_proxy", "no_proxy"})
 # Settings under the tools' own prefixes: the locale's categories, uv's, Hugging
 # Face's, and the GPU runtimes' (memory limits, CPU fallback).
 _CHILD_PREFIXES = ("LC_", "UV_", "HF_", "HUGGINGFACE_", "MLX_", "PYTORCH_")
-# A name holding one of these words holds a credential or says where one is,
-# whatever its prefix.
-_SECRET_WORDS = frozenset({"TOKEN", "PASSWORD", "SECRET", "KEY", "CREDENTIAL", "CREDENTIALS"})
+# A name holding one of these words holds a credential, or says where or how to
+# get one, whatever its prefix. An OIDC setting without the ID token it goes
+# with makes Hugging Face's client fail every call.
+_SECRET_WORDS = frozenset(
+    {"TOKEN", "PASSWORD", "SECRET", "KEY", "CREDENTIAL", "CREDENTIALS", "OIDC"}
+)
 
 
 def _needed(name: str) -> bool:
