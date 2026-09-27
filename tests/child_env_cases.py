@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 # Keys scribe's own backends read, a key file's path, what only a `uv run`
-# parent sets, a file uv would load into the tool's environment, and for each
-# word that marks a credential, a name holding it under a prefix whose other
-# names pass.
+# parent sets, a file uv would load into the tool's environment, where and as
+# whom uv would upload a package, and for each word that marks a credential, a
+# name holding it under a prefix whose other names pass.
 DROPPED = (
     "XAI_API_KEY",
     "GEMINI_API_KEY",
@@ -14,6 +14,8 @@ DROPPED = (
     "SOPS_AGE_KEY_FILE",
     "VIRTUAL_ENV",
     "UV_ENV_FILE",
+    "UV_PUBLISH_URL",
+    "UV_PUBLISH_USERNAME",
     "UV_PUBLISH_TOKEN",
     "UV_INDEX_CORP_PASSWORD",
     "HF_X_SECRET",
