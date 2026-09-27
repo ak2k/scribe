@@ -1,0 +1,71 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      # uv path — runs for everyone
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Set up Python
+        run: uv python install
+
+      - name: Install deps
+        run: uv sync --frozen
+
+      - name: Inner loop (uv)
+        run: make check
+
+      # Hermetic regression matrix for the pre-push gate + guarded installer
+      # (make/nix are PATH-shimmed inside the script — no nix needed here).
+      - name: Gate probes
+        run: ./scripts/check-gate.sh
+
+      # nix path — only if the user kept flake.nix
+      - name: Install Nix
+        if: ${{ hashFiles('flake.nix') != '' }}
+        uses: cachix/install-nix-action@v30
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - name: Inner loop (nix develop)
+        if: ${{ hashFiles('flake.nix') != '' }}
+        run: nix develop -c make check
+
+      # Proves the uv2nix wiring resolves end-to-end: project + deps build
+      # under pure Nix (no uv at build time). Catches lockfile drift and
+      # missing build-backend overrides early.
+      - name: Build venv (nix)
+        if: ${{ hashFiles('flake.nix') != '' }}
+        run: nix build .#default --print-build-logs
+
+      # Runs every `checks.${system}.*` from flake.nix (see there for the
+      # current set — nix hygiene, shell lint, gate matrix, and the test
+      # suite inside the uv2nix closure, which catches native-linking
+      # failures the wheels-based uv path above can't see). Also re-evaluates
+      # devShells/packages/inputs as a smoke test.
+      - name: Flake check
+        if: ${{ hashFiles('flake.nix') != '' }}
+        run: nix flake check --print-build-logs

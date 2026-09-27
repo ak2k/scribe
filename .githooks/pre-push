@@ -1,0 +1,105 @@
+#!/usr/bin/env bash
+# Faithful pre-push gate: run what CI gates on. NB the gate checks the WORKING
+# TREE; CI checks the pushed commits — the NOTEs below call out every
+# divergence (dirty tree, untracked files, pushing a non-HEAD ref) instead of
+# hiding it. The fast inner loop (raw uv) uses prebuilt wheels and can pass
+# while the Nix-built closure (CI's `nix flake check`) fails on
+# native-linking or lockfile drift — that is the gap this hook closes.
+#
+# Armed by the devShell shellHook via .githooks/install (guarded — see that
+# script); bypass wording below in $BYPASS.
+set -euo pipefail
+
+BYPASS="bypass: 'git push --no-verify' or 'SCRIBE_SKIP_PREPUSH=1 git push'"
+
+case "${SCRIBE_SKIP_PREPUSH:-}" in
+1 | true | yes)
+  echo "pre-push: skipped (SCRIBE_SKIP_PREPUSH set)" >&2
+  exit 0
+  ;;
+esac
+
+cd "$(git rev-parse --show-toplevel)"
+
+# git feeds "<local-ref> <local-sha> <remote-ref> <remote-sha>" per ref on
+# stdin. Only ref DELETIONS (all-zero local sha, any hash algorithm) push no
+# code — tag pushes DO transfer their commits, so they are gated like
+# branches. No stdin records (a manual invocation) runs the full gate.
+refs=$(cat)
+pushing=""
+head_mismatch=""
+head=$(git rev-parse --quiet --verify "HEAD^{commit}" 2>/dev/null) || true
+while read -r _ local_sha remote_ref _; do
+  [ -n "$local_sha" ] || continue
+  case "$local_sha" in
+  *[!0]*) ;;     # contains a non-zero digit → something is being pushed
+  *) continue ;; # all-zero OID → ref deletion
+  esac
+  pushing=1
+  # The gate can only vouch for HEAD's tree — note when pushing anything else.
+  if pushed=$(git rev-parse --quiet --verify "$local_sha^{commit}" 2>/dev/null) &&
+    [ -n "$head" ] && [ "$pushed" != "$head" ]; then
+    head_mismatch="$remote_ref"
+  fi
+done <<<"$refs"
+if [ -n "$refs" ] && [ -z "$pushing" ]; then
+  echo "pre-push: only ref deletions — skipping the gate"
+  exit 0
+fi
+if [ -z "$refs" ]; then
+  echo "pre-push: no ref list on stdin (manual invocation) — running the full gate"
+fi
+
+# Divergence NOTEs: dirty tracked files are seen by BOTH local gates but not
+# by CI; untracked files are seen by `make check` but invisible to `nix flake
+# check` (the flake source is git-tracked files only) and to CI; a non-HEAD
+# push means CI tests a commit this gate never looked at. A failing probe is
+# reported as such — never silently classified.
+if [ -n "$head_mismatch" ]; then
+  echo "pre-push: NOTE — pushing a ref that is not HEAD (e.g. $head_mismatch); the gate checks HEAD's tree, CI checks the pushed commits" >&2
+fi
+dirty_status=0
+git diff --quiet && git diff --cached --quiet || dirty_status=$?
+if [ "$dirty_status" -eq 1 ]; then
+  echo "pre-push: NOTE — working tree is dirty; the gate checks the tree, CI checks the pushed commits" >&2
+elif [ "$dirty_status" -gt 1 ]; then
+  echo "pre-push: NOTE — could not inspect the working tree (git diff exit $dirty_status)" >&2
+fi
+if untracked=$(git ls-files --others --exclude-standard); then
+  if [ -n "$untracked" ]; then
+    echo "pre-push: NOTE — untracked files exist; nix flake check and CI cannot see them" >&2
+  fi
+else
+  echo "pre-push: NOTE — could not inspect untracked files (git ls-files failed)" >&2
+fi
+
+# The gates need the dev toolchain; report a missing environment as such, not
+# as a gate failure.
+if ! command -v make >/dev/null 2>&1 || ! command -v uv >/dev/null 2>&1; then
+  echo "pre-push: make/uv not on PATH — enter the dev shell (nix develop) first, or $BYPASS" >&2
+  exit 1
+fi
+
+# uv inner loop (ruff + basedpyright + pytest) — the fast, always-available gate.
+echo "pre-push › make check (uv inner loop)"
+make check || {
+  status=$?
+  echo "pre-push: make check FAILED — fix it, or $BYPASS" >&2
+  exit "$status"
+}
+
+# Nix-faithful gate: statix + nixfmt + shellcheck + the test suite inside the
+# uv2nix closure (catches native-linking failures + flake-formatting the uv
+# path can't see). Guarded on flake.nix existing — the template's nix layer is
+# opt-in and deleting it must not break pushes.
+# NB `nix flake check` does NOT typecheck — `make check` above covers that.
+if [ -f flake.nix ] && command -v nix >/dev/null 2>&1; then
+  echo "pre-push › nix flake check (may build the closure — minutes when cold)"
+  nix flake check --print-build-logs || {
+    status=$?
+    echo "pre-push: nix flake check FAILED — fix it, or $BYPASS" >&2
+    exit "$status"
+  }
+elif [ -f flake.nix ]; then
+  echo "pre-push: nix not found — skipping the Nix-faithful gate (CI's nix job covers it on PRs and main)" >&2
+fi

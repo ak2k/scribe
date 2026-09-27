@@ -1,0 +1,86 @@
+#!/bin/sh
+# Arm the tracked pre-push gate: point core.hooksPath at .githooks — only when
+# that is provably safe. core.hooksPath REPLACES .git/hooks wholesale (it would
+# silently disable git-lfs / pre-commit / husky hooks), so every guard here
+# refuses rather than arms on ambiguity, and every refusal prints the manual
+# command. Invoked by the devShell shellHook as
+#   sh <store>/.githooks/install <store>/.githooks/pre-push
+# — a separate process, so the interactive shell's options (errexit, pipefail,
+# zsh nomatch) cannot alter control flow here. Runs standalone too:
+#   sh .githooks/install
+set -u
+
+MANUAL="git config --local core.hooksPath .githooks"
+
+note() { printf '%s\n' "$*" >&2; }
+refuse() {
+  note "🪝 pre-push gate NOT armed: $1 — to arm: $MANUAL"
+  exit 0
+}
+
+# Operate from the repo toplevel: git pathspecs are CWD-relative, and entering
+# the dev shell from a subdirectory must behave identically to the root.
+top=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
+cd "$top" || exit 0
+
+# The marker must be a TRACKED, regular, executable file — a foreign repo that
+# happens to contain its own .githooks/pre-push (or a symlink to a payload
+# outside the repo) is not ours.
+git ls-files --error-unmatch -- .githooks/pre-push >/dev/null 2>&1 || exit 0
+[ -f .githooks/pre-push ] && [ ! -L .githooks/pre-push ] && [ -x .githooks/pre-push ] || exit 0
+
+# Flake-identity check: arm only when this repo's hook IS the invoking flake's
+# hook ($1 = the flake's store copy). `nix develop <other-template-url>` run
+# from inside some unrelated repo must not arm that repo's own hook machinery.
+# Skipped when run standalone (no $1): the human invocation is its own consent.
+if [ "$#" -ge 1 ] && ! cmp -s .githooks/pre-push "$1"; then
+  refuse "this repo's .githooks/pre-push is not the one this dev shell ships"
+fi
+
+# Refuse when a hooksPath convention exists at ANY scope (a global convention
+# pointing at a not-yet-populated dir must not be silently shadowed). git
+# config exits 1 for "unset" — anything else is an inspection failure.
+current=$(git config --get core.hooksPath 2>/dev/null)
+config_status=$?
+armed=""
+if [ "$config_status" -eq 0 ]; then
+  if [ "$current" = ".githooks" ]; then
+    armed=1
+  else
+    origin=$(git config --show-origin --get core.hooksPath 2>/dev/null | cut -f1)
+    [ -n "$origin" ] || origin="unknown origin"
+    refuse "core.hooksPath is already '$current' ($origin)"
+  fi
+elif [ "$config_status" -ne 1 ]; then
+  refuse "could not inspect git config (exit $config_status)"
+fi
+
+if [ -z "${armed:-}" ]; then
+  # Refuse when .git/hooks contains any real hook (file or symlink; a stray
+  # directory is not a hook). A missing hooks dir means no hooks — safe. A
+  # failing probe refuses: never arm on uncertainty.
+  hooks_dir=$(git rev-parse --git-path hooks 2>/dev/null) || refuse "could not resolve the hooks dir"
+  if [ -d "$hooks_dir" ]; then
+    existing=$(find "$hooks_dir" -maxdepth 1 \( -type f -o -type l \) ! -name '*.sample' -print -quit 2>/dev/null) ||
+      refuse "could not inspect $hooks_dir"
+    if [ -n "$existing" ]; then
+      refuse "existing hook $existing would be disabled"
+    fi
+  fi
+  git config --local core.hooksPath .githooks 2>/dev/null ||
+    refuse "'git config' write failed (read-only or locked .git/config?)"
+fi
+
+note "🪝 pre-push gate: armed (bypass: git push --no-verify or SCRIBE_SKIP_PREPUSH=1 git push)"
+
+# The --local write lives in the SHARED repo config: a linked worktree whose
+# branch lacks .githooks/pre-push resolves to a missing hooks dir and has NO
+# hooks at all. Diagnose enumeration failure instead of hiding it.
+if wt_list=$(git worktree list --porcelain 2>/dev/null); then
+  wt_count=$(printf '%s\n' "$wt_list" | grep -c '^worktree ') || wt_count=1
+  if [ "$wt_count" -gt 1 ]; then
+    note "🪝 note: $wt_count worktrees share this hook config — a worktree whose branch lacks .githooks/pre-push has NO pre-push hook"
+  fi
+else
+  note "🪝 note: could not enumerate worktrees; if you use linked worktrees, ones without .githooks/pre-push have NO pre-push hook"
+fi

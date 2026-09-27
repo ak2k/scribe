@@ -1,0 +1,39 @@
+name: gitleaks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: gitleaks-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # gitleaks needs full history to scan commit-by-commit
+
+      - name: Install gitleaks
+        run: |
+          set -euo pipefail
+          # Update version and sha256 TOGETHER — the hash is this artifact's
+          # line in gitleaks_${version}_checksums.txt on the release page. A
+          # swapped release asset then fails the checksum instead of running.
+          version=8.21.2
+          sha256=5bc41815076e6ed6ef8fbecc9d9b75bcae31f39029ceb55da08086315316e3ba
+          curl -sSL -o /tmp/gitleaks.tgz \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${version}/gitleaks_${version}_linux_x64.tar.gz"
+          echo "${sha256}  /tmp/gitleaks.tgz" | sha256sum -c -
+          tar -xz -C /usr/local/bin -f /tmp/gitleaks.tgz gitleaks
+
+      - name: Scan
+        run: gitleaks detect --source . --redact --no-banner -v

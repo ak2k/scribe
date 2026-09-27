@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "source": {
+    "kind": "audio",
+    "ref": "numbers.mp3",
+    "sha256": null
+  },
+  "engine": {
+    "name": "xai-stt",
+    "model": "grok-voice-transcribe-2.0",
+    "params": {}
+  },
+  "language": "en",
+  "duration": 37.5,
+  "text": "Good morning, um, let us start at 10:30 as planned. Sure. The total came to $1,234.56 for the quarter. And the uptake, you know, the uptake was 45.5% across the pilot. Right, so we, we carry that into 2026 and review it then. Agreed. I will send the notes after this call.",
+  "words": [],
+  "turns": [
+    {
+      "speaker": "Speaker 1",
+      "start": 0.0,
+      "end": 7.4,
+      "text": "Good morning, um, let us start at 10:30 as planned."
+    },
+    {
+      "speaker": "Speaker 2",
+      "start": 7.6,
+      "end": 15.2,
+      "text": "Sure. The total came to $1,234.56 for the quarter."
+    },
+    {
+      "speaker": "Speaker 1",
+      "start": 15.4,
+      "end": 24.1,
+      "text": "And the uptake, you know, the uptake was 45.5% across the pilot."
+    },
+    {
+      "speaker": "Speaker 2",
+      "start": 24.3,
+      "end": 32.0,
+      "text": "Right, so we, we carry that into 2026 and review it then."
+    },
+    {
+      "speaker": "Speaker 1",
+      "start": 32.2,
+      "end": 37.5,
+      "text": "Agreed. I will send the notes after this call."
+    }
+  ]
+}
