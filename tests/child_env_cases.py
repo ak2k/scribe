@@ -18,6 +18,8 @@ DROPPED = (
     "UV_API_KEY",
     "MLX_X_CREDENTIAL",
     "PYTORCH_X_CREDENTIALS",
+    # Without the ID token it goes with, Hugging Face's client fails every call.
+    "HF_OIDC_RESOURCE",
 )
 # Where the worker alone looks for the Hugging Face token.
 TOKENS = ("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN", "HF_TOKEN_PATH")
