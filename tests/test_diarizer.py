@@ -110,17 +110,28 @@ _SECRETS = (
 _NEEDED = (
     "PATH",
     "HOME",
+    "USER",
+    "LOGNAME",
     "TMPDIR",
+    "TEMP",
     "LANG",
+    "LC_ALL",
     "XDG_CACHE_HOME",
     "XDG_CONFIG_HOME",
     "XDG_DATA_HOME",
+    "XDG_CONFIG_DIRS",
     "HF_HOME",
     "HF_HUB_CACHE",
+    "HF_HUB_DISABLE_IMPLICIT_TOKEN",
+    "TRANSFORMERS_OFFLINE",
     "UV_CACHE_DIR",
+    "UV_INDEX_URL",
+    "HTTP_TIMEOUT",
     "PARAKEET_CACHE_DIR",
     "PYTORCH_ENABLE_MPS_FALLBACK",
     "https_proxy",
+    "HTTPS_PROXY",
+    "SSL_CERT_FILE",
 )
 
 
@@ -129,20 +140,24 @@ def test_only_the_worker_gets_the_hugging_face_token_and_no_child_gets_other_sec
 ) -> None:
     for name in _SECRETS:
         monkeypatch.setenv(name, "secret")
-    # uv would look for an interpreter there before resolving its own.
+    # Set by a `uv run` parent; no child reads it.
     monkeypatch.setenv("VIRTUAL_ENV", str(tmp_path))
     for name in _NEEDED:
         monkeypatch.setenv(name, str(tmp_path))
-    monkeypatch.setenv("HF_TOKEN", TOKEN)
-    monkeypatch.setenv("HF_TOKEN_PATH", str(tmp_path / "token"))
+    granted = {
+        "HF_TOKEN": TOKEN,
+        "HUGGING_FACE_HUB_TOKEN": TOKEN,
+        "HF_TOKEN_PATH": str(tmp_path / "token"),
+    }
+    for name, value in granted.items():
+        monkeypatch.setenv(name, value)
     fake = FakeWorker()
 
     _backend(fake).diarize(_audio(tmp_path), [(1.0, 4.0)])
 
     decode_env, worker_env = fake.envs
-    assert worker_env["HF_TOKEN"] == TOKEN
-    assert worker_env["HF_TOKEN_PATH"] == str(tmp_path / "token")
-    assert not {"HF_TOKEN", "HF_TOKEN_PATH"} & decode_env.keys()
+    assert {name: worker_env.get(name) for name in granted} == granted
+    assert not granted.keys() & decode_env.keys()
     for env in fake.envs:
         assert not {*_SECRETS, "VIRTUAL_ENV"} & env.keys()
         assert {name: env.get(name) for name in _NEEDED} == dict.fromkeys(_NEEDED, str(tmp_path))

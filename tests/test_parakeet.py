@@ -158,22 +158,34 @@ _SECRETS = (
     "SOPS_AGE_KEY_FILE",
     "UV_PUBLISH_TOKEN",
     "HF_TOKEN",
+    "HUGGING_FACE_HUB_TOKEN",
     "HF_TOKEN_PATH",
 )
 # What the child needs to run and to find, or fetch, its package and weights.
 _NEEDED = (
     "PATH",
     "HOME",
+    "USER",
+    "LOGNAME",
     "TMPDIR",
+    "TEMP",
     "LANG",
+    "LC_ALL",
     "XDG_CACHE_HOME",
     "XDG_CONFIG_HOME",
     "XDG_DATA_HOME",
+    "XDG_CONFIG_DIRS",
     "HF_HOME",
     "HF_HUB_CACHE",
+    "HF_HUB_DISABLE_IMPLICIT_TOKEN",
+    "TRANSFORMERS_OFFLINE",
     "UV_CACHE_DIR",
+    "HTTP_TIMEOUT",
     "PARAKEET_CACHE_DIR",
+    "MLX_METAL_FAST_SYNCH",
     "https_proxy",
+    "HTTPS_PROXY",
+    "SSL_CERT_FILE",
 )
 
 
@@ -182,16 +194,20 @@ def test_no_secret_reaches_the_child_and_what_it_needs_does(
 ) -> None:
     for name in _SECRETS:
         monkeypatch.setenv(name, "secret")
-    # uv would look for an interpreter there before resolving its own.
+    # Set by a `uv run` parent; no child reads it.
     monkeypatch.setenv("VIRTUAL_ENV", str(tmp_path))
     for name in _NEEDED:
         monkeypatch.setenv(name, str(tmp_path))
+    # uv resolves through it, credentials and all.
+    index = "https://user:pass@index.invalid/simple"
+    monkeypatch.setenv("UV_INDEX_URL", index)
     fake = FakeParakeet()
 
     _backend(fake).transcribe(_audio(tmp_path), source=SOURCE)
 
     assert not {*_SECRETS, "VIRTUAL_ENV"} & fake.env.keys()
     assert {name: fake.env.get(name) for name in _NEEDED} == dict.fromkeys(_NEEDED, str(tmp_path))
+    assert fake.env["UV_INDEX_URL"] == index
 
 
 _pieces = st.text(alphabet="ab. \t", max_size=4)

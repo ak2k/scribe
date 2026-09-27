@@ -143,14 +143,64 @@ def run_in_own_group(
     return subprocess.CompletedProcess(argv, process.returncode, stdout, stderr)
 
 
-def _env() -> dict[str, str]:
-    # These override the tool's decoding and sentence defaults, which the
-    # recorded engine would then misdescribe; the cache location changes nothing.
-    env = {
-        key: value
-        for key, value in os.environ.items()
-        if not key.startswith("PARAKEET_") or key == "PARAKEET_CACHE_DIR"
+# The part of scribe's environment a uvx child reads and needs. The child runs
+# third-party code, so the keys scribe's own backends read stay out of it.
+_CHILD_NAMES = frozenset(
+    {
+        # Where executables are (uv's interpreters, the tool's ffmpeg), whose they are, the locale.
+        "PATH",
+        "HOME",
+        "USER",
+        "LOGNAME",
+        "LANG",
+        # Temporary files, in the order Python's tempfile tries them.
+        "TMPDIR",
+        "TEMP",
+        "TMP",
+        # The defaults under which uv and Hugging Face keep caches, and uv its
+        # interpreters and config: without them a run downloads everything again.
+        "XDG_CACHE_HOME",
+        "XDG_DATA_HOME",
+        "XDG_CONFIG_HOME",
+        "XDG_CONFIG_DIRS",
+        # The CAs a download trusts.
+        "SSL_CERT_FILE",
+        "SSL_CERT_DIR",
+        # Older names uv and Hugging Face still read for a timeout and for offline.
+        "HTTP_TIMEOUT",
+        "TRANSFORMERS_OFFLINE",
+        # Stops Hugging Face sending a saved token where none is needed; it holds no token.
+        "HF_HUB_DISABLE_IMPLICIT_TOKEN",
+        # The tool's model cache. Its other PARAKEET_* settings override the
+        # decoding and sentence defaults, which the recorded engine would then misdescribe.
+        "PARAKEET_CACHE_DIR",
     }
+)
+# Downloads go through these; uv reads each name in either case.
+_PROXIES = frozenset({"http_proxy", "https_proxy", "all_proxy", "no_proxy"})
+# Settings under the tools' own prefixes: the locale's categories, uv's, Hugging
+# Face's, and the GPU runtimes' (memory limits, CPU fallback).
+_CHILD_PREFIXES = ("LC_", "UV_", "HF_", "HUGGINGFACE_", "MLX_", "PYTORCH_")
+# A name holding one of these words holds a credential or says where one is,
+# whatever its prefix.
+_SECRET_WORDS = frozenset({"TOKEN", "PASSWORD", "SECRET", "KEY", "CREDENTIAL", "CREDENTIALS"})
+
+
+def _needed(name: str) -> bool:
+    if name in _CHILD_NAMES:
+        return True
+    if _SECRET_WORDS.intersection(name.upper().split("_")):
+        return False
+    return name.lower() in _PROXIES or name.startswith(_CHILD_PREFIXES)
+
+
+def child_env(*granted: str) -> dict[str, str]:
+    """Return what of this process's environment a uvx child needs, and the `granted` names."""
+    return {key: value for key, value in os.environ.items() if key in granted or _needed(key)}
+
+
+def _env() -> dict[str, str]:
+    env = child_env()
     env["COLUMNS"] = _COLUMNS
     return env
 

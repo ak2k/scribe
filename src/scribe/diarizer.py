@@ -8,7 +8,6 @@ every platform the flake targets.
 from __future__ import annotations
 
 import json
-import os
 import platform
 import shutil
 import subprocess
@@ -22,7 +21,7 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 
 from scribe.attribution import Speech
 from scribe.errors import ExternalServiceError, ToolMissingError
-from scribe.parakeet import run_in_own_group
+from scribe.parakeet import child_env, run_in_own_group
 from scribe.schema import FiniteFloat
 
 if TYPE_CHECKING:
@@ -44,6 +43,10 @@ EXCLUDE_NEWER = "2026-09-24T00:00:00Z"
 # downloads ~960 MB of packages and weights, which a slow link stretches.
 DEFAULT_TIMEOUT_S = 3600.0
 DIMENSION = 256
+# Where the worker's Hugging Face client looks for the token the gated model
+# needs. No other child is given these; a token saved on disk by `hf auth login`
+# stays readable to any of them.
+_TOKEN = ("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN", "HF_TOKEN_PATH")
 # How the worker marks the one line that names its own failure.
 FAILED = "scribe-diarize: "
 _RATE = "16000"
@@ -188,9 +191,11 @@ class PyannoteDiarizer:
             raise ToolMissingError("ffmpeg is not on PATH; the diarizer reads the audio with it")
         return Tools(uvx, ffmpeg)
 
-    def _spawn(self, argv: list[str], what: str) -> subprocess.CompletedProcess[str]:
+    def _spawn(
+        self, argv: list[str], what: str, env: dict[str, str]
+    ) -> subprocess.CompletedProcess[str]:
         try:
-            completed = self._run(argv, env=dict(os.environ), timeout=self.timeout_s)
+            completed = self._run(argv, env=env, timeout=self.timeout_s)
         except subprocess.TimeoutExpired as exc:
             raise ExternalServiceError(
                 f"{what} did not finish within {self.timeout_s:g} s"
@@ -219,7 +224,7 @@ class PyannoteDiarizer:
             )
             # Absolute, so a colon in a relative name is not read as a protocol.
             decode = [tools.ffmpeg, "-nostdin", "-v", "error", "-i", str(audio.absolute()), "-vn"]
-            self._spawn([*decode, "-ac", "1", "-ar", _RATE, str(wav)], "ffmpeg")
+            self._spawn([*decode, "-ac", "1", "-ar", _RATE, str(wav)], "ffmpeg", child_env())
             request.write_text(
                 json.dumps(
                     {
@@ -237,7 +242,7 @@ class PyannoteDiarizer:
             with resources.as_file(resources.files("scribe") / "diarize_worker.py") as worker:
                 # -P keeps the worker's own directory, which holds scribe's modules, off its path.
                 argv = [*pins, "python", "-P", str(worker), str(request), str(out)]
-                completed = self._spawn(argv, "the diarizer")
+                completed = self._spawn(argv, "the diarizer", child_env(*_TOKEN))
             try:
                 raw = out.read_bytes()
             except OSError:
