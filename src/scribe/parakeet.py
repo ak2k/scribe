@@ -189,6 +189,7 @@ _CHILD_NAMES = frozenset(
 _PROXIES = frozenset({"http_proxy", "https_proxy", "all_proxy", "no_proxy"})
 # Settings under the tools' own prefixes: the locale's categories, uv's, Hugging
 # Face's, and the GPU runtimes' (memory limits, CPU fallback).
+# UV_INDEX_URL passes with any password in it, as uv needs it; UV_INDEX_<NAME>_PASSWORD does not.
 _CHILD_PREFIXES = ("LC_", "UV_", "HF_", "HUGGINGFACE_", "MLX_", "PYTORCH_")
 # A name holding one of these words holds a credential, or says where or how to
 # get one, whatever its prefix. An OIDC setting without the ID token it goes
