@@ -112,11 +112,11 @@ def _note(turn: Turn, ranges: Sequence[tuple[float, float]]) -> str:
         return ""
     # The note covers the whole turn, not a place in it: cleanup rewrites
     # words, so no position inside a turn survives it.
-    start = max(min(start for start, _ in touched), turn.start)
-    end = min(max(end for _, end in touched), turn.end)
+    low = max(min(start for start, _ in touched), turn.start)
+    high = min(max(end for _, end in touched), turn.end)
     return (
         "[Includes speech recovered by a second transcription pass, "
-        f"{_clock(math.floor(start))}\N{EN DASH}{_clock(math.ceil(end))}.] "
+        f"{_clock(math.floor(low))}\N{EN DASH}{_clock(math.ceil(high))}.] "
     )
 
 
