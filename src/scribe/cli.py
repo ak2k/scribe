@@ -34,6 +34,7 @@ from scribe.cleanup import (
     verify_numbers,
 )
 from scribe.coverage import describe, fill_holes, moved, possible_drop
+from scribe.curated import fill_ranges, read_front, render_curated
 from scribe.diarizer import MODEL, PACKAGE, REVISION, VERSION, PyannoteDiarizer
 from scribe.errors import AppError, ExternalServiceError, InputValidationError
 from scribe.fidelity import check_fidelity
@@ -820,6 +821,14 @@ def cleanup(
     out: Path | None = typer.Option(
         None, "--out", help="Markdown to write. Default: INPUT's stem plus .clean.md, beside it."
     ),
+    curated: Path | None = typer.Option(
+        None,
+        "--curated",
+        help="Also write a reading copy here: each turn under its speaker and start time.",
+    ),
+    front: Path | None = typer.Option(
+        None, "--front", help="File whose text opens the --curated copy, copied as written."
+    ),
     model: str = typer.Option(
         DEFAULT_CLEANUP_MODEL, "--model", help="Model the cleanup backend is asked for."
     ),
@@ -875,6 +884,8 @@ def cleanup(
     # stdout carries only the output path; unconfigured, structlog prints there.
     configure()
     try:
+        if front is not None and curated is None:
+            raise InputValidationError("--front needs --curated")
         transcript = _turns_input(input_path)
         request = CleanupRequest(
             turns=transcript.turns,
@@ -886,6 +897,10 @@ def cleanup(
             ),
             context=context,
         )
+        front_text = None if front is None else read_front(front)
+        # Only the reading copy reads the fill record, so a malformed one fails
+        # only a run that writes it.
+        ranges = [] if curated is None else fill_ranges(transcript.engine, input_path)
         destination = _clean_destination(input_path, out)
         # Planned before a backend call is paid for. The input transcript is a
         # paid transcription's output and nothing else holds a copy.
@@ -894,7 +909,12 @@ def cleanup(
             inputs["the --speakers-file"] = speakers_file
         if glossary_file is not None:
             inputs["the --glossary-file"] = glossary_file
-        plan = plan_outputs({"--out": destination, "sidecar": _sidecar(destination)}, inputs)
+        if front is not None:
+            inputs["the --front file"] = front
+        outputs = {"--out": destination, "sidecar": _sidecar(destination)}
+        if curated is not None:
+            outputs["--curated"] = curated
+        plan = plan_outputs(outputs, inputs)
         prove_writable(plan)
         backend = ClaudeCliBackend(model=model, max_budget_usd=max_budget_usd)
         result = clean(request, backend, max_words=chunk_words)
@@ -915,6 +935,10 @@ def cleanup(
         )
         _write_text(plan["--out"], header + result.text)
         _write_sidecar(plan["sidecar"], result, diff, fidelity, backend)
+        # Rendered from the kept turns, not from the markdown: a turn's text
+        # can hold blank lines, so the markdown does not split back into turns.
+        if curated is not None:
+            _write_text(plan["--curated"], render_curated(request, result.kept, ranges, front_text))
     except AppError as exc:
         _fail(exc)
 

@@ -1252,3 +1252,390 @@ def test_speakers_renamed_by_the_key_are_not_moves(
     fidelity = _fidelity(tmp_path, "transcript_two_speakers")
     assert fidelity["moved_words"] == 0
     assert fidelity["content_edit_words"] == 0
+
+
+def _with_fill_ranges(path: Path, recorded: str) -> None:
+    transcript = Transcript.load(path)
+    engine = transcript.engine.model_copy(update={"params": {"fill_ranges": recorded}})
+    transcript.model_copy(update={"engine": engine}).dump(path)
+
+
+def _without_generated_at(document: bytes) -> bytes:
+    lines = document.splitlines(keepends=True)
+    kept = [line for line in lines if not line.startswith(b"generated_at: ")]
+    assert len(lines) - len(kept) == 1
+    return b"".join(kept)
+
+
+def _snapshot(directory: Path) -> dict[str, bytes | None]:
+    return {
+        path.name: path.read_bytes() if path.is_file() else None for path in directory.iterdir()
+    }
+
+
+_TALK_CLEANED = (
+    "---\n"
+    'title: "transcript_two_speakers"\n'
+    'source_kind: "audio"\n'
+    'source_ref: "fixture.mp3"\n'
+    'stt_engine: "xai-stt"\n'
+    'stt_model: "grok-voice-transcribe-2.0"\n'
+    'cleanup_backend: "fake-backend"\n'
+    'cleanup_model: "opus"\n'
+    f'cleanup_prompt_version: "{CLEANUP_PROMPT_VERSION}"\n'
+    "speakers: {}\n"
+    "numbers_checked: 0\n"
+    "numbers_missing: []\n"
+    "numbers_reduced: []\n"
+    "numbers_added: []\n"
+    "---\n"
+    "Speaker 1: Okay, ready? Yes, let us start with the agenda items.\n\n"
+    "Speaker 2: The first item is the budget. Right. We can review the numbers after lunch.\n\n"
+    "Speaker 1: That works for me and I will send notes.\n\n"
+    "Speaker 2: Great, so we are done for today.\n"
+)
+_TALK_SIDECAR = f"""\
+{{
+  "backend": "fake-backend",
+  "model": "opus",
+  "prompt_version": "{CLEANUP_PROMPT_VERSION}",
+  "chunks": 1,
+  "truncated_chunks": [],
+  "malformed_chunks": [],
+  "emptied_turns": 0,
+  "stripped_labels": 0,
+  "completions": [
+    {{
+      "model": "opus",
+      "output_tokens": 44,
+      "stop_reason": "end_turn",
+      "is_error": false
+    }}
+  ],
+  "numbers_checked": 0,
+  "numbers_missing": [],
+  "numbers_reduced": [],
+  "numbers_added": [],
+  "fidelity": {{
+    "words_checked": 40,
+    "moved_words": 0,
+    "moved_spans": [],
+    "content_edit_words": 0,
+    "content_edits_per_1000": 0.0,
+    "content_spans": []
+  }}
+}}
+"""
+
+
+@pytest.mark.parametrize(
+    "recorded",
+    [
+        pytest.param(None, id="no-fill"),
+        pytest.param("[[7.2, 9.4]]", id="fill"),
+        # Read only for the reading copy, so not an error without one.
+        pytest.param("[[9.4, 7.2]]", id="malformed-fill"),
+    ],
+)
+def test_without_a_reading_copy_the_outputs_are_as_they_were(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, recorded: str | None
+) -> None:
+    patch_backend(monkeypatch)
+    staged = _staged(tmp_path)
+    if recorded is not None:
+        _with_fill_ranges(staged, recorded)
+
+    result = runner.invoke(app, ["cleanup", str(staged)])
+
+    assert result.exit_code == 0, result.output
+    assert sorted(path.name for path in tmp_path.iterdir()) == [
+        "transcript_two_speakers.clean.md",
+        "transcript_two_speakers.cleanup.json",
+        TALK,
+    ]
+    document = (tmp_path / "transcript_two_speakers.clean.md").read_bytes()
+    assert _without_generated_at(document) == _TALK_CLEANED.encode()
+    sidecar = (tmp_path / "transcript_two_speakers.cleanup.json").read_bytes()
+    assert sidecar == _TALK_SIDECAR.encode()
+
+
+@pytest.mark.parametrize(
+    ("name", "mutate", "code"),
+    [
+        pytest.param(TALK, None, 0, id="faithful"),
+        pytest.param(NUMBERS, _drop_2026, 3, id="number-dropped"),
+        pytest.param(TALK, _moves_a_sentence, 3, id="speaker-moved"),
+    ],
+)
+def test_the_reading_copy_changes_no_other_output_and_no_exit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    mutate: Callable[[str], str] | None,
+    code: int,
+) -> None:
+    patch_backend(monkeypatch, mutate=mutate)
+    staged = _staged(tmp_path, name)
+    _with_fill_ranges(staged, "[[7.2, 9.4]]")
+    front = tmp_path / "front.md"
+    front.write_bytes(b"Board meeting\n")
+    copy = tmp_path / "with" / "t.curated.md"
+    runs: dict[str, tuple[int, str, bytes, bytes]] = {}
+    for run, extra in [("without", []), ("with", ["--curated", str(copy), "--front", str(front)])]:
+        out = tmp_path / run / "t.clean.md"
+        out.parent.mkdir()
+        result = runner.invoke(app, ["cleanup", str(staged), "--out", str(out), *extra])
+        runs[run] = (
+            result.exit_code,
+            result.stderr,
+            _without_generated_at(out.read_bytes()),
+            (out.parent / "t.cleanup.json").read_bytes(),
+        )
+
+    assert runs["with"] == runs["without"]
+    assert runs["without"][0] == code
+    assert copy.read_bytes().startswith(b"Board meeting\n\n---\n\n**Speaker 1 | 00:00:0")
+
+
+def test_the_reading_copy_is_the_front_then_each_turn_under_its_label_and_start(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    patch_backend(monkeypatch)
+    staged = _staged(tmp_path)
+    _with_fill_ranges(staged, "[[7.2, 9.4]]")
+    front = tmp_path / "front.md"
+    front.write_bytes(b"# Board meeting\n\nAttendees: Ann Lee, Bo Chen")
+    copy = tmp_path / "t.curated.md"
+
+    result = runner.invoke(
+        app,
+        [
+            "cleanup",
+            str(staged),
+            "--speaker",
+            "Speaker 1=Ann Lee",
+            "--curated",
+            str(copy),
+            "--front",
+            str(front),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert copy.read_text(encoding="utf-8") == (
+        "# Board meeting\n\nAttendees: Ann Lee, Bo Chen\n"
+        "\n---\n\n"
+        "**Ann Lee | 00:00:00**\n"
+        "Okay, ready? Yes, let us start with the agenda items.\n\n"
+        "**Speaker 2 | 00:00:06**\n"
+        "[Includes speech recovered by a second transcription pass, "
+        "00:00:07\N{EN DASH}00:00:10.] "
+        "The first item is the budget. Right. We can review the numbers after lunch.\n\n"
+        "**Ann Lee | 00:00:18**\n"
+        "That works for me and I will send notes.\n\n"
+        "**Speaker 2 | 00:00:24**\n"
+        "Great, so we are done for today.\n"
+    )
+    # The copy is written last, and the path printed is still the markdown's.
+    assert result.stdout.strip() == str(tmp_path / "transcript_two_speakers.clean.md")
+
+
+@pytest.mark.parametrize(
+    "recorded",
+    [pytest.param(None, id="no-fill"), pytest.param("[]", id="empty-fill")],
+)
+def test_no_turn_is_noted_without_a_fill(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, recorded: str | None
+) -> None:
+    patch_backend(monkeypatch)
+    staged = _staged(tmp_path)
+    if recorded is not None:
+        _with_fill_ranges(staged, recorded)
+    copy = tmp_path / "t.curated.md"
+
+    result = runner.invoke(app, ["cleanup", str(staged), "--curated", str(copy)])
+
+    assert result.exit_code == 0, result.output
+    text = copy.read_text(encoding="utf-8")
+    assert text.startswith("**Speaker 1 | 00:00:00**\nOkay, ready?")
+    assert text.count("\n**Speaker") == 3
+    assert "[" not in text
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        pytest.param("Zoë and Łukasz\n".encode(), id="non-ascii"),
+        pytest.param(b"Board meeting", id="no-final-newline"),
+        pytest.param(b"Board meeting\r\nAttendees\r\n", id="crlf"),
+        pytest.param(b"\xef\xbb\xbfBoard meeting\n", id="bom"),
+    ],
+)
+def test_the_front_file_opens_the_reading_copy_byte_for_byte(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, raw: bytes
+) -> None:
+    patch_backend(monkeypatch)
+    staged = _staged(tmp_path)
+    front = tmp_path / "front.md"
+    front.write_bytes(raw)
+    copy = tmp_path / "t.curated.md"
+
+    result = runner.invoke(
+        app, ["cleanup", str(staged), "--curated", str(copy), "--front", str(front)]
+    )
+
+    assert result.exit_code == 0, result.output
+    written = copy.read_bytes()
+    assert written[: len(raw)] == raw
+    rule = b"\n---\n\n" if raw.endswith(b"\n") else b"\n\n---\n\n"
+    assert written[len(raw) :].startswith(rule + b"**Speaker 1 | 00:00:00**\n")
+
+
+@pytest.mark.parametrize(
+    ("args", "message"),
+    [
+        pytest.param(["--front", "{front}"], "--front needs --curated", id="no-copy"),
+        pytest.param(
+            ["--curated", "{dir}/t.curated.md", "--front", "{dir}/absent.md"],
+            "cannot read --front",
+            id="front-missing",
+        ),
+        pytest.param(
+            ["--curated", "{dir}/t.curated.md", "--front", "{latin}"],
+            "cannot read --front",
+            id="front-not-utf-8",
+        ),
+        pytest.param(
+            ["--curated", "{dir}/t.curated.md", "--front", "{dir}"],
+            "cannot read --front",
+            id="front-a-directory",
+        ),
+        pytest.param(["--curated", "{input}"], "is the input transcript", id="copy-is-input"),
+        pytest.param(
+            ["--curated", "{front}", "--front", "{front}"],
+            "is the --front file",
+            id="copy-is-front",
+        ),
+        pytest.param(
+            ["--curated", "{dir}/transcript_two_speakers.clean.md"],
+            "is the same file as --out",
+            id="copy-is-out",
+        ),
+        pytest.param(
+            ["--curated", "{dir}/transcript_two_speakers.cleanup.json"],
+            "is the same file as sidecar",
+            id="copy-is-sidecar",
+        ),
+        pytest.param(["--curated", "{dir}"], "is a directory", id="copy-a-directory"),
+        pytest.param(
+            ["--curated", "{dir}/typo/t.curated.md"], "not a directory", id="copy-dir-missing"
+        ),
+    ],
+)
+def test_a_bad_reading_copy_option_exits_two_before_any_backend(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, args: list[str], message: str
+) -> None:
+    made = patch_backend(monkeypatch)
+    staged = _staged(tmp_path)
+    front = tmp_path / "front.md"
+    front.write_bytes(b"Board meeting\n")
+    latin = tmp_path / "latin.md"
+    latin.write_bytes("Zoë\n".encode("latin-1"))
+    before = _snapshot(tmp_path)
+    paths = {"dir": str(tmp_path), "front": str(front), "latin": str(latin), "input": str(staged)}
+
+    result = runner.invoke(app, ["cleanup", str(staged), *(arg.format(**paths) for arg in args)])
+
+    assert result.exit_code == 2
+    assert len(result.output.strip().splitlines()) == 1
+    assert message in result.output
+    assert made == []
+    assert _snapshot(tmp_path) == before
+
+
+@pytest.mark.parametrize(
+    "recorded",
+    [
+        pytest.param("[[9.4, 7.2]]", id="reversed"),
+        pytest.param('[[7.2, "9.4"]]', id="quoted"),
+        pytest.param("[[7.2, 9.4]", id="not-json"),
+    ],
+)
+def test_a_malformed_fill_record_exits_two_before_any_backend(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, recorded: str
+) -> None:
+    made = patch_backend(monkeypatch)
+    staged = _staged(tmp_path)
+    _with_fill_ranges(staged, recorded)
+    before = _snapshot(tmp_path)
+
+    result = runner.invoke(
+        app, ["cleanup", str(staged), "--curated", str(tmp_path / "t.curated.md")]
+    )
+
+    assert result.exit_code == 2
+    assert len(result.output.strip().splitlines()) == 1
+    assert "has a malformed fill_ranges" in result.output
+    assert made == []
+    assert _snapshot(tmp_path) == before
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root writes through any mode bits")
+def test_a_read_only_reading_copy_is_refused_before_any_call(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    made = patch_backend(monkeypatch)
+    staged = _staged(tmp_path)
+    copy = tmp_path / "t.curated.md"
+    copy.write_text("kept\n", encoding="utf-8")
+    copy.chmod(0o444)
+    try:
+        result = runner.invoke(app, ["cleanup", str(staged), "--curated", str(copy)])
+    finally:
+        copy.chmod(0o644)
+
+    assert result.exit_code == 2
+    assert "cannot write" in result.output
+    assert made == []
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["t.curated.md", TALK]
+    assert copy.read_text(encoding="utf-8") == "kept\n"
+
+
+def test_a_backend_failure_writes_no_reading_copy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    patch_backend(monkeypatch, fail_with=ExternalServiceError("claude -p exited 1: nope"))
+    staged = _staged(tmp_path)
+
+    result = runner.invoke(
+        app, ["cleanup", str(staged), "--curated", str(tmp_path / "t.curated.md")]
+    )
+
+    assert result.exit_code == 2
+    assert len(result.output.strip().splitlines()) == 1
+    assert list(tmp_path.iterdir()) == [staged]
+
+
+def test_a_reading_copy_that_cannot_be_written_exits_two_after_the_other_outputs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    copy = tmp_path / "t.curated.md"
+
+    def respond(user: str) -> str:
+        # Taken after the outputs were proven writable, as another process could.
+        copy.mkdir(exist_ok=True)
+        return keyed_reply(user)
+
+    patch_backend(monkeypatch, respond=respond)
+    staged = _staged(tmp_path)
+
+    result = runner.invoke(app, ["cleanup", str(staged), "--curated", str(copy)])
+
+    assert result.exit_code == 2
+    assert "Traceback" not in result.output
+    assert len(result.output.strip().splitlines()) == 1
+    assert f"cannot write {copy}" in result.output
+    document = (tmp_path / "transcript_two_speakers.clean.md").read_bytes()
+    assert _without_generated_at(document) == _TALK_CLEANED.encode()
+    sidecar = (tmp_path / "transcript_two_speakers.cleanup.json").read_bytes()
+    assert sidecar == _TALK_SIDECAR.encode()
