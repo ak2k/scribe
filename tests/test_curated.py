@@ -68,6 +68,8 @@ def test_no_kept_turn_is_a_copy_of_one_newline() -> None:
         pytest.param("Board meeting", id="no-final-newline"),
         pytest.param("Board meeting\r\nAttendees: Zoë\r\n", id="crlf"),
         pytest.param("\N{ZERO WIDTH NO-BREAK SPACE}Board meeting\n\n", id="bom"),
+        # A lone CR is not a line end here: the rule still needs its newline.
+        pytest.param("Board meeting\r", id="lone-cr"),
     ],
 )
 def test_the_front_opens_the_copy_verbatim_above_a_rule(front: str) -> None:
