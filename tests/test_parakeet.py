@@ -148,6 +148,52 @@ def test_the_child_runs_the_pinned_tool_with_its_own_defaults(
     assert not fake.workdir.exists()
 
 
+# Keys scribe's own backends read, paths to key files, and tokens under
+# prefixes whose other names pass.
+_SECRETS = (
+    "XAI_API_KEY",
+    "GEMINI_API_KEY",
+    "ANTHROPIC_API_KEY",
+    "HONCHO_API_KEY",
+    "SOPS_AGE_KEY_FILE",
+    "UV_PUBLISH_TOKEN",
+    "HF_TOKEN",
+    "HF_TOKEN_PATH",
+)
+# What the child needs to run and to find, or fetch, its package and weights.
+_NEEDED = (
+    "PATH",
+    "HOME",
+    "TMPDIR",
+    "LANG",
+    "XDG_CACHE_HOME",
+    "XDG_CONFIG_HOME",
+    "XDG_DATA_HOME",
+    "HF_HOME",
+    "HF_HUB_CACHE",
+    "UV_CACHE_DIR",
+    "PARAKEET_CACHE_DIR",
+    "https_proxy",
+)
+
+
+def test_no_secret_reaches_the_child_and_what_it_needs_does(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    for name in _SECRETS:
+        monkeypatch.setenv(name, "secret")
+    # uv would look for an interpreter there before resolving its own.
+    monkeypatch.setenv("VIRTUAL_ENV", str(tmp_path))
+    for name in _NEEDED:
+        monkeypatch.setenv(name, str(tmp_path))
+    fake = FakeParakeet()
+
+    _backend(fake).transcribe(_audio(tmp_path), source=SOURCE)
+
+    assert not {*_SECRETS, "VIRTUAL_ENV"} & fake.env.keys()
+    assert {name: fake.env.get(name) for name in _NEEDED} == dict.fromkeys(_NEEDED, str(tmp_path))
+
+
 _pieces = st.text(alphabet="ab. \t", max_size=4)
 _spans = st.floats(min_value=0, max_value=5)
 

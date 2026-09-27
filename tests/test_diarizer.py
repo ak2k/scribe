@@ -81,7 +81,9 @@ def test_the_run_decodes_the_audio_then_runs_the_pinned_worker(
         "intervals": [[1.0, 4.0], [2.5, 5.0]],
     }
     # The token reaches the worker only through its environment.
-    assert all(env["HF_TOKEN"] == TOKEN for env in fake.envs)
+    decode_env, worker_env = fake.envs
+    assert worker_env["HF_TOKEN"] == TOKEN
+    assert "HF_TOKEN" not in decode_env
     assert not any(TOKEN in part for argv in fake.calls for part in argv)
     assert TOKEN.encode() not in fake.requests[0]
     assert fake.timeouts == [DEFAULT_TIMEOUT_S, DEFAULT_TIMEOUT_S]
@@ -92,6 +94,58 @@ def test_the_run_decodes_the_audio_then_runs_the_pinned_worker(
         speech=(Speech(0.0, 2.0, "SPEAKER_00"),),
         embeddings=((0.5,) * DIMENSION, (0.5,) * DIMENSION),
     )
+
+
+# Keys scribe's own backends read, a path to a key file, and a token under a
+# prefix whose other names pass.
+_SECRETS = (
+    "XAI_API_KEY",
+    "GEMINI_API_KEY",
+    "ANTHROPIC_API_KEY",
+    "HONCHO_API_KEY",
+    "SOPS_AGE_KEY_FILE",
+    "UV_PUBLISH_TOKEN",
+)
+# What the children need to run and to find, or fetch, their packages and weights.
+_NEEDED = (
+    "PATH",
+    "HOME",
+    "TMPDIR",
+    "LANG",
+    "XDG_CACHE_HOME",
+    "XDG_CONFIG_HOME",
+    "XDG_DATA_HOME",
+    "HF_HOME",
+    "HF_HUB_CACHE",
+    "UV_CACHE_DIR",
+    "PARAKEET_CACHE_DIR",
+    "PYTORCH_ENABLE_MPS_FALLBACK",
+    "https_proxy",
+)
+
+
+def test_only_the_worker_gets_the_hugging_face_token_and_no_child_gets_other_secrets(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    for name in _SECRETS:
+        monkeypatch.setenv(name, "secret")
+    # uv would look for an interpreter there before resolving its own.
+    monkeypatch.setenv("VIRTUAL_ENV", str(tmp_path))
+    for name in _NEEDED:
+        monkeypatch.setenv(name, str(tmp_path))
+    monkeypatch.setenv("HF_TOKEN", TOKEN)
+    monkeypatch.setenv("HF_TOKEN_PATH", str(tmp_path / "token"))
+    fake = FakeWorker()
+
+    _backend(fake).diarize(_audio(tmp_path), [(1.0, 4.0)])
+
+    decode_env, worker_env = fake.envs
+    assert worker_env["HF_TOKEN"] == TOKEN
+    assert worker_env["HF_TOKEN_PATH"] == str(tmp_path / "token")
+    assert not {"HF_TOKEN", "HF_TOKEN_PATH"} & decode_env.keys()
+    for env in fake.envs:
+        assert not {*_SECRETS, "VIRTUAL_ENV"} & env.keys()
+        assert {name: env.get(name) for name in _NEEDED} == dict.fromkeys(_NEEDED, str(tmp_path))
 
 
 def test_the_worker_marks_its_failures_as_this_module_reads_them() -> None:
