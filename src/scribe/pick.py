@@ -117,9 +117,15 @@ def _without_fillers(tokens: Sequence[str]) -> list[str]:
     return kept
 
 
-def _without_stutters(tokens: Sequence[str]) -> list[str]:
-    """Drop a word said twice running, a false start the next word begins, and a repeated pair."""
+def _without_stutters(tokens: Sequence[str], own: range | None = None) -> list[str]:
+    """Drop a word said twice running, a false start the next word begins, and a repeated pair.
+
+    Given `own`, a false start and the word it begins must both be among those
+    tokens: "not" and "no" before a matched "note" would otherwise both drop,
+    and two different readings compare the same.
+    """
     kept = list(tokens)
+    mine = [own is None or index in own for index in range(len(kept))]
     while True:
         repeat = next(
             (
@@ -127,14 +133,16 @@ def _without_stutters(tokens: Sequence[str]) -> list[str]:
                 for index in range(len(kept) - 1)
                 if kept[index] == kept[index + 1]
                 or (
-                    len(kept[index]) >= _FALSE_START_LETTERS
+                    mine[index]
+                    and mine[index + 1]
+                    and len(kept[index]) >= _FALSE_START_LETTERS
                     and kept[index + 1].startswith(kept[index])
                 )
             ),
             None,
         )
         if repeat is not None:
-            del kept[repeat]
+            del kept[repeat], mine[repeat]
             continue
         pair = next(
             (
@@ -146,7 +154,7 @@ def _without_stutters(tokens: Sequence[str]) -> list[str]:
         )
         if pair is None:
             return kept
-        del kept[pair : pair + 2]
+        del kept[pair : pair + 2], mine[pair : pair + 2]
 
 
 def _folded(token: str) -> str:
@@ -156,15 +164,28 @@ def _folded(token: str) -> str:
     return "".join(char for char in decomposed if not unicodedata.combining(char))
 
 
-def _normalized(text: str) -> list[str]:
-    """Return the tokens two readings are compared by: what was said, not how it was written."""
+def _spoken(text: str) -> list[str]:
     tokens = norm_tokens(digitize(text.replace("%", " percent")))
     expanded = [
         part
         for token in tokens
         for part in _CONTRACTIONS.get(token, _ORDINALS.get(token, token)).split()
     ]
-    return [_folded(token) for token in _without_stutters(_without_fillers(expanded))]
+    return _without_fillers(expanded)
+
+
+def _normalized(text: str) -> list[str]:
+    """Return the tokens two readings are compared by: what was said, not how it was written."""
+    return [_folded(token) for token in _without_stutters(_spoken(text))]
+
+
+def _in_context(said: Sequence[str], before: Sequence[str], after: Sequence[str]) -> list[str]:
+    """Normalize a reading with the matched tokens around it, so a number can span its edge."""
+    tokens = _spoken(" ".join([*before, *said, *after]))
+    # Tokens cannot be traced through `digitize`, so the neighbors' are counted
+    # apart: off only where a number or a filler pair sits at an edge.
+    own = range(len(_spoken(" ".join(before))), len(tokens) - len(_spoken(" ".join(after))))
+    return [_folded(token) for token in _without_stutters(tokens, own)]
 
 
 def _same(first: Sequence[str], second: Sequence[str]) -> bool:
@@ -291,10 +312,7 @@ def find_spots(transcript: Sequence[Word], reference: Sequence[Word]) -> list[Sp
         if not _normalized(" ".join(said)) or not _normalized(" ".join(heard)):
             continue
         before, after = aligned.context(start, stop)
-        if not _same(
-            _normalized(" ".join([*before, *said, *after])),
-            _normalized(" ".join([*before, *heard, *after])),
-        ):
+        if not _same(_in_context(said, before, after), _in_context(heard, before, after)):
             spots.append(spot)
     return spots
 

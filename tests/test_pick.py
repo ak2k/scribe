@@ -167,6 +167,46 @@ def test_readings_in_another_script_that_differ_are_a_spot(
     assert find_spots(_said(*said), _said(*heard)) == [Spot(range(2, 3), range(2, 3))]
 
 
+@pytest.mark.parametrize(
+    ("said", "heard"),
+    [
+        (("please", "do", "not", "note", "that"), ("please", "do", "no", "note", "that")),
+        (("we", "read", "his", "history", "today"), ("we", "read", "hi", "history", "today")),
+        (("we", "go", "now", "nowhere", "fast"), ("we", "go", "no", "nowhere", "fast")),
+        # Neither reading begins the next word.
+        (("we", "do", "not", "go", "there"), ("we", "do", "no", "go", "there")),
+    ],
+    ids=["not-note", "his-history", "now-nowhere", "not-go"],
+)
+def test_readings_that_each_begin_the_matched_word_after_them_are_a_spot(
+    said: tuple[str, ...], heard: tuple[str, ...]
+) -> None:
+    assert find_spots(_said(*said), _said(*heard)) == [Spot(range(2, 3), range(2, 3))]
+
+
+@pytest.mark.parametrize(
+    ("transcript", "reference"),
+    [
+        # "that" said twice, once in the spot and once in the matched word before it.
+        (
+            _timed(("so", 0.0, 0.4), ("that", 1.0, 1.4), ("that", 2.0, 2.4), ("is", 3.0, 3.4)),
+            _timed(("so", 0.0, 0.4), ("that", 1.0, 1.4), ("is", 2.0, 2.4), ("is", 3.0, 3.4)),
+        ),
+        # A false start that is the spot's first word, of the word after it in the spot.
+        (
+            _timed(("so", 0.0, 0.4), ("th", 1.0, 1.1), ("that's", 1.2, 1.6), ("fine", 2.0, 2.4)),
+            _timed(("so", 0.0, 0.4), ("that", 1.0, 1.3), ("is", 1.3, 1.6), ("fine", 2.0, 2.4)),
+        ),
+    ],
+    ids=["repeat", "false-start"],
+)
+def test_a_stutter_at_a_spots_edge_is_still_no_spot(
+    transcript: list[Word], reference: list[Word]
+) -> None:
+    assert find_spots(transcript, reference) == []
+    assert find_spots(reference, transcript) == []
+
+
 def test_runs_one_long_word_joins_are_one_spot() -> None:
     # Two runs, each widened to the whole of one four-token word, overlap.
     transcript = _timed(("go", 0.0, 0.3), ("alpha-beta-gamma-delta", 1.0, 1.8), ("now", 3.0, 3.3))
