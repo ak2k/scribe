@@ -10,7 +10,8 @@ from hypothesis import strategies as st
 
 from scribe.pick import Spot, find_spots
 from scribe.schema import Word
-from scribe.vote import align_words
+from scribe.vote import TOLERANCE_S, align_words
+from tests.pick_fakes import heard_early_at_an_edge, heard_late
 
 
 def _said(*texts: str, speaker: int | None = 0) -> list[Word]:
@@ -297,6 +298,28 @@ def test_a_word_only_one_side_heard_between_two_widened_spots_stays_out_of_them(
     assert find_spots(said, heard) == [Spot(range(1), range(2)), Spot(range(2, 3), range(2, 4))]
 
 
+@pytest.mark.parametrize("lag", [0.8, 3.0, 5.5])
+def test_one_word_heard_otherwise_among_words_heard_late_is_a_spot_of_that_word(lag: float) -> None:
+    said, heard = heard_late(lag)
+
+    assert find_spots(said, heard) == [Spot(range(6, 7), range(6, 7))]
+
+
+def test_words_heard_early_beside_a_word_heard_otherwise_stay_out_of_its_spot() -> None:
+    said, heard = heard_early_at_an_edge()
+
+    assert find_spots(said, heard) == [Spot(range(10, 11), range(10, 11))]
+
+
+def test_a_word_is_paired_with_the_same_word_near_it_not_one_said_later() -> None:
+    # Pairing the reference's "the" with the transcript's second one costs as
+    # many edits, and would ask about "cat" where the reference heard "the cap".
+    said = _said("so", "the", "dog", "ran", "the", "cat")
+    heard = _said("so", "the", "cap")
+
+    assert find_spots(said, heard) == [Spot(range(2, 6), range(2, 3))]
+
+
 _VOCAB = [
     *["the", "cat", "hat", "um", "it's", "it is", "twenty", "20", "sat", "e-mail", "Cat,", ""],
     "cat-the-hat-sat",
@@ -341,3 +364,30 @@ def test_a_transcript_against_itself_holds_no_spot(texts: list[str]) -> None:
     words = _said(*texts)
 
     assert find_spots(words, words) == []
+
+
+def _late(words: list[Word], lag: float) -> list[Word]:
+    return [
+        Word(text=word.text, start=word.start + lag, end=word.end + lag, speaker=word.speaker)
+        for word in words
+    ]
+
+
+@given(st.lists(st.sampled_from(_VOCAB), max_size=12), st.sampled_from([0.8, 2.0, 5.0]))
+def test_a_transcript_against_itself_heard_late_holds_no_spot(texts: list[str], lag: float) -> None:
+    words = _said(*texts)
+
+    assert find_spots(words, _late(words, lag)) == []
+
+
+@given(_pairs(), st.sampled_from([0.0, 0.8, 3.0]))
+def test_the_picks_alignment_substitutes_only_words_within_tolerance(
+    pair: tuple[list[Word], list[Word]], lag: float
+) -> None:
+    said, heard = pair[0], _late(pair[1], lag)
+
+    for kind, mine, theirs in align_words(said, heard, far_matches=True):
+        if kind == "sub":
+            assert mine is not None and theirs is not None
+            first, second = said[mine], heard[theirs]
+            assert max(first.start - second.end, second.start - first.end) <= TOLERANCE_S

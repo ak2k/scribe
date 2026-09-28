@@ -109,12 +109,18 @@ def _gap(first: _Token, second: _Token) -> float:
     return max(0.0, first.start - second.end, second.start - first.end)
 
 
-def _align(ref: Sequence[_Token], hyp: Sequence[_Token]) -> list[_Step]:
+def _align(
+    ref: Sequence[_Token], hyp: Sequence[_Token], *, far_matches: bool = False
+) -> list[_Step]:
     """Align by edit distance, pairing two tokens only within TOLERANCE_S of each other.
 
     Row r covers the hypothesis tokens from BAND_S before reference token r to
     BAND_S after the token that follows it, widened so that neither edge of the
     band moves backward. `hyp` must be in start order.
+
+    With `far_matches`, two tokens of the same text also pair farther apart,
+    anywhere in the band; among the alignments with the fewest edits, the one
+    with the fewest such far pairs is kept.
     """
     rows, cols = len(ref), len(hyp)
     starts = [token.start for token in hyp]
@@ -130,7 +136,10 @@ def _align(ref: Sequence[_Token], hyp: Sequence[_Token]) -> list[_Step]:
         high[row] = max(high[row - 1], bisect.bisect_right(starts, ahead.end + BAND_S))
         low[row] = max(low[row - 1], min(near, high[row - 1]))
     high[rows] = cols
-    costs: list[dict[int, int]] = [{col: col for col in range(low[0], high[0] + 1)}]
+    # A far pair costs 1 and an edit more than every far pair there can be, so
+    # far pairs only break ties; without them this is the plain edit count.
+    edit = rows + cols + 1 if far_matches else 1
+    costs: list[dict[int, int]] = [{col: col * edit for col in range(low[0], high[0] + 1)}]
     moves: list[dict[int, _Kind]] = [{col: "ins" for col in range(low[0], high[0] + 1)}]
     for row in range(1, rows + 1):
         token, above = ref[row - 1], costs[row - 1]
@@ -140,16 +149,18 @@ def _align(ref: Sequence[_Token], hyp: Sequence[_Token]) -> list[_Step]:
             # Every cell is reachable: a row starts inside the row above, and a
             # column past that row's end follows the cell to its left.
             best: tuple[int, _Kind] = (
-                (above[col] + 1, "del") if col in above else (cost[col - 1] + 1, "ins")
+                (above[col] + edit, "del") if col in above else (cost[col - 1] + edit, "ins")
             )
-            if col - 1 in above and _gap(token, hyp[col - 1]) <= TOLERANCE_S:
+            if col - 1 in above:
                 same = hyp[col - 1].text == token.text
-                paired = above[col - 1] + (0 if same else 1)
-                # A tie with a deletion or an insertion pairs the tokens instead.
-                if paired <= best[0]:
-                    best = (paired, "match" if same else "sub")
-            if col - 1 in cost and cost[col - 1] + 1 < best[0]:
-                best = (cost[col - 1] + 1, "ins")
+                near = _gap(token, hyp[col - 1]) <= TOLERANCE_S
+                if near or (same and far_matches):
+                    paired = above[col - 1] + ((0 if near else 1) if same else edit)
+                    # A tie with a deletion or an insertion pairs the tokens instead.
+                    if paired <= best[0]:
+                        best = (paired, "match" if same else "sub")
+            if col - 1 in cost and cost[col - 1] + edit < best[0]:
+                best = (cost[col - 1] + edit, "ins")
             cost[col], move[col] = best
         costs.append(cost)
         moves.append(move)
@@ -171,12 +182,17 @@ def _align(ref: Sequence[_Token], hyp: Sequence[_Token]) -> list[_Step]:
 
 
 def align_words(
-    backbone: Sequence[Word], hypothesis: Sequence[Word]
+    backbone: Sequence[Word], hypothesis: Sequence[Word], *, far_matches: bool = False
 ) -> list[tuple[_Kind, int | None, int | None]]:
     """Align two word lists token by token, as the vote aligns a hypothesis to its backbone.
 
     Each side's words are split by `norm_tokens`, and every token is consumed
     by exactly one step, in order. `hypothesis` must be in start order.
+
+    With `far_matches`, which the vote never passes, two tokens of the same
+    text also pair farther apart than TOLERANCE_S, anywhere in the band, while
+    a substitution still pairs only tokens within it; the fewest edits decide,
+    then the fewest such far pairs.
 
     Returns:
         One (kind, backbone word, hypothesis word) per step, in order, each
@@ -190,7 +206,7 @@ def align_words(
             None if step.kind == "ins" else backbone_tokens[step.ref].word,
             None if step.kind == "del" else hypothesis_tokens[step.hyp].word,
         )
-        for step in _align(backbone_tokens, hypothesis_tokens)
+        for step in _align(backbone_tokens, hypothesis_tokens, far_matches=far_matches)
     ]
 
 

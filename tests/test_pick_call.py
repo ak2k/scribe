@@ -22,7 +22,16 @@ from scribe.pick import (
 )
 from scribe.schema import Engine, Transcript, Word
 from scribe.speakers import render
-from tests.pick_fakes import answering, choosing, marks, numbered, transcript, unsure
+from tests.pick_fakes import (
+    answering,
+    choosing,
+    heard_early_at_an_edge,
+    heard_late,
+    marks,
+    numbered,
+    transcript,
+    unsure,
+)
 from tests.speakers_fakes import FakeSpeakerBackend, target_of
 
 if TYPE_CHECKING:
@@ -199,6 +208,25 @@ def test_a_word_only_the_transcript_heard_survives_a_reference_pick_one_word_awa
     picking = pick_readings(said, heard, backend)
 
     assert _texts(picking.transcript) == ["please", "lovely", "cat", "slept"]
+
+
+@pytest.mark.parametrize(
+    ("case", "changed"),
+    [(heard_late(0.8), 6), (heard_early_at_an_edge(), 10)],
+    ids=["late", "early-at-an-edge"],
+)
+def test_a_reference_pick_keeps_every_word_both_heard_alike_as_it_was(
+    case: tuple[list[Word], list[Word]], changed: int
+) -> None:
+    said, heard = case
+    backend = FakeSpeakerBackend(reply=answering(choosing({heard[changed].text})))
+
+    picking = pick_readings(transcript(said), transcript(heard, engine="parakeet-mlx"), backend)
+
+    words = picking.transcript.words
+    assert [word.text for word in words] == [word.text for word in heard]
+    assert words[:changed] + words[changed + 1 :] == said[:changed] + said[changed + 1 :]
+    assert words[changed].speaker == said[changed].speaker
 
 
 def test_the_result_records_the_pick_in_its_params() -> None:

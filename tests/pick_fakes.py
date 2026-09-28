@@ -52,6 +52,54 @@ def transcript(
     )
 
 
+def heard_late(lag: float) -> tuple[list[Word], list[Word]]:
+    """Twelve words two a second, and the same words heard `lag` s later, "cat" (6) as "hat"."""
+    texts = [
+        "the",
+        "quick",
+        "brown",
+        "fox",
+        "jumps",
+        "over",
+        "cat",
+        "lazy",
+        "dog",
+        "and",
+        "runs",
+        "away",
+    ]
+    said = [
+        Word(text=text, start=index * 0.5, end=index * 0.5 + 0.2, speaker=index // 3 % 2)
+        for index, text in enumerate(texts)
+    ]
+    heard = [
+        Word(
+            text="hat" if word.text == "cat" else word.text,
+            start=word.start + lag,
+            end=word.end + lag,
+        )
+        for word in said
+    ]
+    return said, heard
+
+
+def heard_early_at_an_edge() -> tuple[list[Word], list[Word]]:
+    """Sixteen words a second apart, a new speaker from w10; heard with w10 as "SUB".
+
+    The reference hears w8 to w11 a second early, held back so no start steps back.
+    """
+    said = [
+        Word(text=f"w{index}", start=float(index), end=index + 0.3, speaker=int(index >= 10))
+        for index in range(16)
+    ]
+    heard: list[Word] = []
+    for index, word in enumerate(said):
+        early = word.start - 1.0 if 8 <= index <= 11 else word.start
+        start = max(early, heard[-1].start) if heard else early
+        heard.append(Word(text="SUB" if index == 10 else word.text, start=start, end=start + 0.3))
+    return said, heard
+
+
 def numbered(count: int, changed: dict[int, str] | None = None) -> list[Word]:
     """`count` words a second, w0 to w{count-1}, every tenth ending a sentence; some replaced."""
     swapped = changed or {}

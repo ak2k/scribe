@@ -1,7 +1,8 @@
 """Pick, where two transcripts of one recording disagree, which reading was said.
 
 A spot is where the transcript's words and a reference's differ in what was
-said. The two are aligned token by token as the vote aligns them; a spot starts
+said. The two are aligned token by token as the vote aligns them, save that
+tokens of the same text pair however far apart the band allows; a spot starts
 as a maximal run of unmatched steps holding tokens of both sides, such runs
 MERGE_GAP matched steps apart or fewer joined: words only one side heard are
 the fill's to handle, so a run of them is never joined into a spot. It then
@@ -227,7 +228,9 @@ class _Alignment:
 
     @classmethod
     def of(cls, transcript: Sequence[Word], reference: Sequence[Word]) -> _Alignment:
-        steps = align_words(transcript, reference)
+        # Paired only within TOLERANCE_S, words a reference heard a second late
+        # would go unmatched, and picking its reading would retime words both heard.
+        steps = align_words(transcript, reference, far_matches=True)
         # align_words consumes each transcript token once, in order.
         tokens = iter([token for word in transcript for token in norm_tokens(word.text)])
         matched: list[str | None] = []
