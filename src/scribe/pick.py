@@ -23,7 +23,7 @@ import math
 import random
 import re
 import unicodedata
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from itertools import pairwise
 from typing import TYPE_CHECKING, Literal, Protocol
 
@@ -35,7 +35,7 @@ from scribe.errors import AppError
 from scribe.schema import Word
 from scribe.speakers import DEFAULT_CONCURRENCY, SpeakerBackend, ask_all, cut_points, render
 from scribe.spoken_numbers import digitize
-from scribe.vote import FILLERS, align_words, first_decrease, norm_tokens
+from scribe.vote import FILLERS, align_words, first_decrease, nearest, norm_tokens
 
 if TYPE_CHECKING:
     from collections.abc import Collection, Sequence
@@ -61,104 +61,35 @@ MERGE_GAP = 1
 # a repeat or a number across the spot's edge collapses as it does inside.
 CONTEXT_TOKENS = 2
 
+# fmt: off
 _CONTRACTIONS = {
-    "gonna": "going to",
-    "wanna": "want to",
-    "gotta": "got to",
-    "hafta": "have to",
-    "kinda": "kind of",
-    "sorta": "sort of",
-    "lemme": "let me",
-    "gimme": "give me",
-    "dunno": "do not know",
-    "cause": "because",
-    "cuz": "because",
-    "coz": "because",
-    "cos": "because",
-    "ya": "you",
-    "y'all": "you all",
-    "it's": "it is",
-    "that's": "that is",
-    "there's": "there is",
-    "here's": "here is",
-    "what's": "what is",
-    "who's": "who is",
-    "where's": "where is",
-    "how's": "how is",
-    "he's": "he is",
-    "she's": "she is",
-    "let's": "let us",
-    "i'm": "i am",
-    "we're": "we are",
-    "they're": "they are",
-    "you're": "you are",
-    "i've": "i have",
-    "we've": "we have",
-    "you've": "you have",
-    "they've": "they have",
-    "i'll": "i will",
-    "we'll": "we will",
-    "you'll": "you will",
-    "they'll": "they will",
-    "it'll": "it will",
-    "that'll": "that will",
-    "he'll": "he will",
-    "she'll": "she will",
-    "i'd": "i would",
-    "we'd": "we would",
-    "you'd": "you would",
-    "they'd": "they would",
-    "he'd": "he would",
-    "she'd": "she would",
-    "it'd": "it would",
-    "that'd": "that would",
-    "don't": "do not",
-    "doesn't": "does not",
-    "didn't": "did not",
-    "can't": "can not",
-    "cannot": "can not",
-    "won't": "will not",
-    "wouldn't": "would not",
-    "shouldn't": "should not",
-    "couldn't": "could not",
-    "isn't": "is not",
-    "aren't": "are not",
-    "wasn't": "was not",
-    "weren't": "were not",
-    "haven't": "have not",
-    "hasn't": "has not",
-    "hadn't": "had not",
-    "ain't": "is not",
-    "there're": "there are",
-    "what're": "what are",
-    "gotcha": "got you",
-    "alright": "all right",
-    "ok": "okay",
-    "k": "okay",
-    "yeah": "yes",
-    "yep": "yes",
-    "yup": "yes",
-    "yea": "yes",
-    "yah": "yes",
-    "nope": "no",
-    "nah": "no",
-    "til": "until",
-    "till": "until",
-    "em": "them",
+    "gonna": "going to", "wanna": "want to", "gotta": "got to", "hafta": "have to",
+    "kinda": "kind of", "sorta": "sort of", "lemme": "let me", "gimme": "give me",
+    "dunno": "do not know", "cause": "because", "cuz": "because", "coz": "because",
+    "cos": "because", "ya": "you", "y'all": "you all", "it's": "it is", "that's": "that is",
+    "there's": "there is", "here's": "here is", "what's": "what is", "who's": "who is",
+    "where's": "where is", "how's": "how is", "he's": "he is", "she's": "she is",
+    "let's": "let us", "i'm": "i am", "we're": "we are", "they're": "they are",
+    "you're": "you are", "i've": "i have", "we've": "we have", "you've": "you have",
+    "they've": "they have", "i'll": "i will", "we'll": "we will", "you'll": "you will",
+    "they'll": "they will", "it'll": "it will", "that'll": "that will", "he'll": "he will",
+    "she'll": "she will", "i'd": "i would", "we'd": "we would", "you'd": "you would",
+    "they'd": "they would", "he'd": "he would", "she'd": "she would", "it'd": "it would",
+    "that'd": "that would", "don't": "do not", "doesn't": "does not", "didn't": "did not",
+    "can't": "can not", "cannot": "can not", "won't": "will not", "wouldn't": "would not",
+    "shouldn't": "should not", "couldn't": "could not", "isn't": "is not", "aren't": "are not",
+    "wasn't": "was not", "weren't": "were not", "haven't": "have not", "hasn't": "has not",
+    "hadn't": "had not", "ain't": "is not", "there're": "there are", "what're": "what are",
+    "gotcha": "got you", "alright": "all right", "ok": "okay", "k": "okay", "yeah": "yes",
+    "yep": "yes", "yup": "yes", "yea": "yes", "yah": "yes", "nope": "no", "nah": "no",
+    "til": "until", "till": "until", "em": "them",
 }
 # `digitize` leaves ordinals as written, so "1st" and "first" would differ.
 _ORDINALS = {
-    "1st": "first",
-    "2nd": "second",
-    "3rd": "third",
-    "4th": "fourth",
-    "5th": "fifth",
-    "6th": "sixth",
-    "7th": "seventh",
-    "8th": "eighth",
-    "9th": "ninth",
-    "10th": "tenth",
+    "1st": "first", "2nd": "second", "3rd": "third", "4th": "fourth", "5th": "fifth",
+    "6th": "sixth", "7th": "seventh", "8th": "eighth", "9th": "ninth", "10th": "tenth",
 }
+# fmt: on
 _FILLERS = FILLERS | {"uhm", "umm", "uhh", "mhm", "mmhmm", "er", "erm", "ah", "oh", "like"}
 _FILLER_PAIRS = frozenset({("you", "know"), ("i", "mean"), ("mm", "hmm"), ("uh", "huh")})
 # A one-letter token ("a" before "about") is a word too often to be a false start.
@@ -606,11 +537,6 @@ def _user(words: Sequence[Word], start: int, end: int, marks: dict[int, tuple[in
     )
 
 
-def _nearest(words: Sequence[Word], at: float) -> Word:
-    # min keeps the first of equals, so a tie goes to the earlier word.
-    return min(words, key=lambda word: min(abs(word.start - at), abs(word.end - at)))
-
-
 def _apply(
     transcript: Sequence[Word],
     reference: Sequence[Word],
@@ -641,12 +567,13 @@ def _apply(
         replaced = transcript[spot.transcript.start : spot.transcript.stop]
         for word in reference[spot.reference.start : spot.reference.stop]:
             start = min(max(word.start, low), high)
+            closest = nearest(replaced, word.start)
             words.append(
                 Word(
                     text=word.text,
                     start=start,
                     end=max(word.end, start),
-                    speaker=_nearest(replaced, word.start).speaker,
+                    speaker=None if closest is None else closest.speaker,
                 )
             )
         index = spot.transcript.stop
@@ -760,7 +687,7 @@ def pick_readings(
 
     words = _apply(said, heard, spots, picked)
     engine = reference.engine
-    failed = [chunk for chunk in chunks if chunk.reason is not None]
+    picking = Picking(transcript, tuple(spots), tuple(picked), tuple(chunks))
     params = transcript.engine.params | {
         "pick_model": backend.model,
         "pick_prompt_version": PICK_PROMPT_VERSION,
@@ -771,7 +698,7 @@ def pick_readings(
         "pick_unsure": picked.count("unsure"),
         "pick_failed": picked.count("failed"),
         "pick_chunks": len(chunks),
-        "pick_chunks_failed": len(failed),
+        "pick_chunks_failed": len(picking.failed),
         "pick_record": json.dumps(
             [
                 [
@@ -785,8 +712,9 @@ def pick_readings(
             ]
         ),
     }
-    return Picking(
-        transcript.model_copy(
+    return replace(
+        picking,
+        transcript=transcript.model_copy(
             update={
                 "engine": transcript.engine.model_copy(update={"params": params}),
                 "text": _joined(words),
@@ -794,7 +722,4 @@ def pick_readings(
                 "turns": [],
             }
         ),
-        tuple(spots),
-        tuple(picked),
-        tuple(chunks),
     )

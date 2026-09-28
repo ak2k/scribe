@@ -244,7 +244,8 @@ def _insertable(token: _Token, unpaired: dict[str, list[float]]) -> bool:
     return token.text not in FILLERS and not _near(unpaired.get(token.text, []), token.start)
 
 
-def _nearest(neighbors: Sequence[Word], at: float) -> Word | None:
+def nearest(neighbors: Sequence[Word], at: float) -> Word | None:
+    """Return the word nearest `at` by either end, the earlier of equals; None if none."""
     # min keeps the first of equals, so a tie goes to the earlier neighbor.
     return min(
         neighbors, key=lambda word: min(abs(word.start - at), abs(word.end - at)), default=None
@@ -376,7 +377,7 @@ class _Ballot:
         for index, members in by_word.items():
             source = self.primary[index]
             whole = len(members) == len(norm_tokens(source.text))
-            nearest = _nearest(neighbors, source.start)
+            closest = nearest(neighbors, source.start)
             words.append(
                 Word(
                     text=source.text
@@ -384,7 +385,7 @@ class _Ballot:
                     else " ".join(self.primary_tokens[member].text for member in members),
                     start=source.start,
                     end=source.end,
-                    speaker=None if nearest is None else nearest.speaker,
+                    speaker=None if closest is None else closest.speaker,
                 )
             )
         return words
