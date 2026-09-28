@@ -184,6 +184,23 @@ def test_a_reading_put_in_between_two_equally_near_words_takes_the_earlier_speak
     assert picking.transcript.words[1] == Word(text="hip", start=1.5, end=1.6, speaker=1)
 
 
+def test_a_word_only_the_transcript_heard_survives_a_reference_pick_one_word_away() -> None:
+    said = transcript(_said(("please", 0), ("lovely", 0), ("cat", 0), ("sat", 0)))
+    heard = transcript(
+        [
+            Word(text="please", start=0.0, end=0.4),
+            Word(text="cat", start=2.0, end=2.4),
+            Word(text="slept", start=3.0, end=3.4),
+        ],
+        engine="parakeet-mlx",
+    )
+    backend = FakeSpeakerBackend(reply=answering(choosing({"slept"})))
+
+    picking = pick_readings(said, heard, backend)
+
+    assert _texts(picking.transcript) == ["please", "lovely", "cat", "slept"]
+
+
 def test_the_result_records_the_pick_in_its_params() -> None:
     said, heard = _cat_and_mat()
     said = said.model_copy(

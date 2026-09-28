@@ -2,12 +2,13 @@
 
 A spot is where the transcript's words and a reference's differ in what was
 said. The two are aligned token by token as the vote aligns them; a spot starts
-as a maximal run of unmatched steps, runs MERGE_GAP matched steps apart or
-fewer joined, and only a run holding tokens of both sides counts: words only
-one side heard are the fill's to handle. It then widens until it holds whole
-words on both sides. A spot whose readings match once numbers, contractions,
-fillers, stutters, order, spacing and accents are set aside, or where one side
-holds only fillers, is not a disagreement worth asking about.
+as a maximal run of unmatched steps holding tokens of both sides, such runs
+MERGE_GAP matched steps apart or fewer joined: words only one side heard are
+the fill's to handle, so a run of them is never joined into a spot. It then
+widens until it holds whole words on both sides. A spot whose readings match
+once numbers, contractions, fillers, stutters, order, spacing and accents are
+set aside, or where one side holds only fillers, is not a disagreement worth
+asking about.
 
 A model is shown the transcript around each spot, both readings marked in
 place, and picks one of the two or neither; it is never asked for words of its
@@ -237,16 +238,22 @@ class _Alignment:
         return cls(matched, said, heard, _extents(said), _extents(heard))
 
     def _runs(self) -> list[tuple[int, int]]:
-        """Return each maximal run of unmatched steps, those MERGE_GAP apart or fewer joined."""
+        """Return each maximal run of unmatched steps."""
         runs: list[tuple[int, int]] = []
         for index, token in enumerate(self.matched):
             if token is not None:
                 continue
-            if runs and index - runs[-1][1] <= MERGE_GAP:
+            if runs and runs[-1][1] == index:
                 runs[-1] = (runs[-1][0], index + 1)
             else:
                 runs.append((index, index + 1))
         return runs
+
+    def _both(self, start: int, stop: int) -> bool:
+        """Whether steps [start, stop) consume words of both sides."""
+        return any(word is not None for word in self.transcript[start:stop]) and any(
+            word is not None for word in self.reference[start:stop]
+        )
 
     def _whole(self, start: int, stop: int) -> tuple[int, int]:
         """Widen steps [start, stop) until every word they touch on either side is inside."""
@@ -268,14 +275,17 @@ class _Alignment:
         """Return the step ranges of the spots, before any is judged a difference in form."""
         spans: list[tuple[int, int]] = []
         for first, last in self._runs():
-            both = any(word is not None for word in self.transcript[first:last]) and any(
-                word is not None for word in self.reference[first:last]
-            )
-            if not both:
+            if not self._both(first, last):
                 continue
             start, stop = self._whole(first, last)
-            # Widened, a spot can reach the one before or come within MERGE_GAP of it.
-            while spans and start - spans[-1][1] <= MERGE_GAP:
+            # Joined to the spot before when MERGE_GAP steps apart or fewer, or
+            # when widening reaches it, unless a one-sided run lies between: a
+            # reference pick would drop or add its words, which only the fill may.
+            while (
+                spans
+                and start - spans[-1][1] <= MERGE_GAP
+                and all(token is not None for token in self.matched[spans[-1][1] : start])
+            ):
                 before = spans.pop()
                 start, stop = self._whole(min(start, before[0]), max(stop, before[1]))
             spans.append((start, stop))

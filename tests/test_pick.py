@@ -281,6 +281,22 @@ def test_a_word_only_one_side_heard_is_the_fills_not_a_spot() -> None:
     )
 
 
+def test_a_word_only_one_side_heard_one_matched_word_from_a_spot_stays_out_of_it() -> None:
+    lovely = _said("please", "lovely", "cat", "sat")
+    plain = _timed(("please", 0.0, 0.4), ("cat", 2.0, 2.4), ("slept", 3.0, 3.4))
+
+    assert find_spots(lovely, plain) == [Spot(range(3, 4), range(2, 3))]
+    assert find_spots(plain, lovely) == [Spot(range(2, 3), range(3, 4))]
+
+
+def test_a_word_only_one_side_heard_between_two_widened_spots_stays_out_of_them() -> None:
+    # Each spot widens to a whole hyphenated word, which leaves "lovely" one step from both.
+    said = _timed(("big-cat", 0.0, 0.8), ("lovely", 1.0, 1.4), ("hat-sat", 2.0, 2.8))
+    heard = _timed(("pig", 0.0, 0.3), ("cat", 0.4, 0.8), ("hat", 2.0, 2.3), ("sad", 2.4, 2.8))
+
+    assert find_spots(said, heard) == [Spot(range(1), range(2)), Spot(range(2, 3), range(2, 4))]
+
+
 _VOCAB = [
     *["the", "cat", "hat", "um", "it's", "it is", "twenty", "20", "sat", "e-mail", "Cat,", ""],
     "cat-the-hat-sat",
