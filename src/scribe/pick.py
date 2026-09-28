@@ -196,11 +196,20 @@ def _fillers_only(said: Sequence[str]) -> bool:
 
 
 def _same(first: Sequence[str], second: Sequence[str]) -> bool:
-    return (
-        list(first) == list(second)
-        or set(first) == set(second)
-        or "".join(first) == "".join(second)
-    )
+    return list(first) == list(second) or set(first) == set(second) or _respaced(first, second)
+
+
+def _respaced(first: Sequence[str], second: Sequence[str]) -> bool:
+    """Whether two readings differ only in one word written apart ("everyday", "every day").
+
+    The same letters split at another boundary ("an ice", "a nice") can be other words.
+    """
+    one, other = list(first), list(second)
+    while one and other and one[0] == other[0]:
+        del one[0], other[0]
+    while one and other and one[-1] == other[-1]:
+        del one[-1], other[-1]
+    return "".join(one) == "".join(other) and min(len(one), len(other)) <= 1
 
 
 @dataclass(frozen=True)
@@ -306,8 +315,8 @@ def find_spots(transcript: Sequence[Word], reference: Sequence[Word]) -> list[Sp
         The spots, disjoint and in order on both sides, each holding words of
         both. Readings the same once normalized, with up to CONTEXT_TOKENS
         matched tokens on each side, are left out: equal, the same set of
-        tokens, or the same letters spaced differently. So is a spot where
-        either side holds only fillers other than "like".
+        tokens, or one word written apart on the other side. So is a spot
+        where either side holds only fillers other than "like".
 
     """
     aligned = _Alignment.of(transcript, reference)

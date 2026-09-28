@@ -133,6 +133,29 @@ def test_like_beside_the_same_words_is_still_no_spot() -> None:
     assert find_spots(reference, transcript) == []
 
 
+def test_the_same_letters_split_at_another_word_boundary_are_a_spot() -> None:
+    transcript = _said("it", "is", "an", "ice", "day")
+    reference = _said("it", "is", "a", "nice", "day")
+
+    assert find_spots(transcript, reference) == [Spot(range(2, 4), range(2, 4))]
+
+
+def test_one_word_written_apart_among_the_same_words_is_still_no_spot() -> None:
+    apart = _timed(
+        ("we", 0.0, 0.4),
+        ("meet", 0.5, 0.9),
+        ("every", 1.0, 1.3),
+        ("day", 1.3, 1.6),
+        ("here", 2.0, 2.4),
+    )
+    joined = _timed(
+        ("we", 0.0, 0.4), ("meet", 0.5, 0.9), ("everyday", 1.0, 1.6), ("here", 2.0, 2.4)
+    )
+
+    assert find_spots(apart, joined) == []
+    assert find_spots(joined, apart) == []
+
+
 def test_a_spot_holds_exactly_the_words_that_differ() -> None:
     transcript = _said("the", "cat", "sat", "on", "the", "mat")
     reference = _said("the", "hat", "sat", "on", "the", "mat")
