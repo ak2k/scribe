@@ -43,7 +43,10 @@ checked by loudness, as `scribe gaps` does.
 The cross-check never changes the exit code, and a failure in it keeps xAI's
 transcript. With `--vote` the voted words are filled the same way.
 `--no-cross-check` skips it. `scribe fill TRANSCRIPT REFERENCE` runs the fill
-on transcripts already written.
+on transcripts already written. `scribe pick TRANSCRIPT REFERENCE` has a model
+pick, at each spot where the two disagree, which of their two readings was
+said, from the conversation around it (`--context` adds background such as who
+was there); the words, not the audio, go to Anthropic through `claude`.
 
 `turns` groups the words into speaker turns. A transcript that carries turns
 but no words keeps its turns as they are.

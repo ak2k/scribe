@@ -304,9 +304,16 @@ def prompts(
     return built
 
 
-async def _ask_all(
+async def ask_all(
     backend: SpeakerBackend, asked: Sequence[tuple[str, str]], concurrency: int
 ) -> list[Completion | Exception]:
+    """Ask every (system, user) prompt, `concurrency` at a time, from worker threads.
+
+    Returns:
+        One answer per prompt, in order: its completion, or the Exception its
+        call raised.
+
+    """
     limiter = anyio.CapacityLimiter(concurrency)
     answers: dict[int, Completion | Exception] = {}
 
@@ -386,7 +393,7 @@ def relabel(
     ids = [None if speaker is None else rank[speaker] for speaker in speakers]
     allowed = set(range(len(order)))
     spans = cut_points(texts)
-    answers = anyio.run(_ask_all, backend, prompts(texts, ids, spans), concurrency)
+    answers = anyio.run(ask_all, backend, prompts(texts, ids, spans), concurrency)
 
     out = list(ids)
     chunks: list[ChunkOutcome] = []

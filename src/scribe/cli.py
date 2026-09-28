@@ -42,6 +42,7 @@ from scribe.gaps import check_gaps, clock, format_gap
 from scribe.log import configure
 from scribe.outputs import plan_outputs, prove_writable, sibling
 from scribe.parakeet import ParakeetMlx
+from scribe.pick import DEFAULT_PICK_MODEL, PICK_PROMPT_VERSION, pick_readings
 from scribe.schema import Engine, Source, Transcript, from_xai_response
 from scribe.speakers import (
     DEFAULT_SPEAKER_MODEL,
@@ -76,6 +77,7 @@ if TYPE_CHECKING:
     from scribe.diarizer import Diarization
     from scribe.fidelity import Fidelity
     from scribe.outputs import OutputPlan
+    from scribe.pick import Picking
     from scribe.speakers import Relabeling
 
 # Enough of a stderr line to act on without pasting a whole transcript into it.
@@ -114,7 +116,7 @@ _SUFFIXES = {Format.json: ".turns.json", Format.md: ".md", Format.srt: ".srt", F
 _SPEAKERS_SIDECAR = "speakers sidecar"
 # Distinct from 2 (nothing was run) and 3 (cleanup drift): the artifacts exist,
 # but no model call behind them succeeded.
-_EXIT_NO_SPEAKER_CHUNK = 4
+_EXIT_NO_CHUNK = 4
 
 
 def _fail(exc: AppError) -> NoReturn:
@@ -746,7 +748,7 @@ def _finish_speakers(
             err=True,
         )
     if len(result.failed) == len(result.chunks):
-        raise typer.Exit(_EXIT_NO_SPEAKER_CHUNK)
+        raise typer.Exit(_EXIT_NO_CHUNK)
 
 
 def _turns_input(path: Path) -> Transcript:
@@ -1148,6 +1150,100 @@ def fill_command(
 
     _report_fill(fill)
     typer.echo(str(plan["--out"]))
+
+
+def _report_pick(picking: Picking, model: str) -> None:
+    picked = picking.picked
+    typer.echo(
+        f"scribe: picked the reference's reading at {picked.count('reference')} of "
+        f"{len(picked)} disputed spots ({picked.count('unsure')} unsure) with {model}, "
+        f"prompt {PICK_PROMPT_VERSION}",
+        err=True,
+    )
+    if picking.failed:
+        listed = ", ".join(str(chunk.index) for chunk in picking.failed)
+        spots = sum(len(chunk.spots) for chunk in picking.failed)
+        typer.echo(
+            f"scribe: the pick failed on {len(picking.failed)} of {len(picking.chunks)} chunks "
+            f"({listed}); their {spots} spots keep the transcript's words",
+            err=True,
+        )
+
+
+@app.command(name="pick")
+def pick_command(
+    transcript_path: Path = typer.Argument(
+        ..., metavar="TRANSCRIPT", help="Transcript whose words stay except where REFERENCE's win."
+    ),
+    reference_path: Path = typer.Argument(
+        ..., metavar="REFERENCE", help="Transcript of the same audio, as `scribe parakeet` writes."
+    ),
+    out: Path | None = typer.Option(
+        None,
+        "--out",
+        help="Where to write the result. Default: TRANSCRIPT's name ending .picked.json.",
+    ),
+    model: str = typer.Option(DEFAULT_PICK_MODEL, "--model", help="Model the pick is asked for."),
+    context: str | None = typer.Option(
+        None, "--context", help="Background on the recording. Never added to the transcript."
+    ),
+) -> None:
+    """Pick, where two transcripts of one recording disagree, which reading was said.
+
+    TRANSCRIPT and REFERENCE are aligned word by word. A disputed spot is where
+    they differ in what was said, not only in how it was written: numbers,
+    contractions, fillers, repeats, spacing and accents aside, and neither
+    side fillers alone. Words only one of them heard are left to `scribe fill`.
+
+    A model reads the conversation around each spot and picks one of the two
+    readings, or neither when unsure; it never writes words of its own. It is
+    asked through the `claude` CLI on PATH, on its own subscription auth, one
+    call per ~1,500 words, six at a time: the words, not the audio, go to
+    Anthropic. --context gives it background, such as who was at the
+    recording; a reading that matches a name or term in it, or sounds like
+    one, is more likely picked. The background is never added to the words.
+
+    Where REFERENCE's reading is picked, its words replace TRANSCRIPT's there,
+    each with REFERENCE's times held between the words around it and the
+    speaker of the nearest word replaced. Every other word stays as it was.
+    The result records each spot and its pick in its engine params, and has
+    no turns: run `scribe turns` on it next.
+
+    Both inputs' word starts must not decrease. Exit 2 is a bad input, a
+    TRANSCRIPT picked before, an unwritable output, or no usable claude CLI,
+    found before any call. Exit 4 means every call failed; the result is
+    written anyway, with TRANSCRIPT's words.
+    """
+    # stdout carries only the output path; unconfigured, structlog prints there.
+    configure()
+    try:
+        transcript = _voter(transcript_path, "TRANSCRIPT", ordered=True)
+        # Its spots would compare REFERENCE with words REFERENCE already gave it.
+        if "pick_record" in transcript.engine.params:
+            raise InputValidationError(f"TRANSCRIPT {transcript_path} was picked already")
+        reference = _voter(reference_path, "REFERENCE", ordered=True)
+        destination = sibling(transcript_path, ".picked.json") if out is None else out
+        plan = plan_outputs(
+            {"--out": destination}, {"TRANSCRIPT": transcript_path, "REFERENCE": reference_path}
+        )
+        # Before the calls, which are paid for.
+        prove_writable(plan)
+        backend = ClaudeCliBackend(model=model, disable_tools=True)
+        backend.resolve()
+        picking = pick_readings(transcript, reference, backend, context=context)
+        try:
+            picking.transcript.dump(plan["--out"])
+        except (OSError, ValueError) as exc:
+            raise InputValidationError(
+                f"cannot write transcript to {plan['--out']}: {exc}"
+            ) from exc
+    except AppError as exc:
+        _fail(exc)
+
+    _report_pick(picking, backend.model)
+    typer.echo(str(plan["--out"]))
+    if picking.chunks and len(picking.failed) == len(picking.chunks):
+        raise typer.Exit(_EXIT_NO_CHUNK)
 
 
 @app.command()
