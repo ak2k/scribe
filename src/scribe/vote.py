@@ -170,6 +170,30 @@ def _align(ref: Sequence[_Token], hyp: Sequence[_Token]) -> list[_Step]:
     return steps
 
 
+def align_words(
+    backbone: Sequence[Word], hypothesis: Sequence[Word]
+) -> list[tuple[_Kind, int | None, int | None]]:
+    """Align two word lists token by token, as the vote aligns a hypothesis to its backbone.
+
+    Each side's words are split by `norm_tokens`, and every token is consumed
+    by exactly one step, in order. `hypothesis` must be in start order.
+
+    Returns:
+        One (kind, backbone word, hypothesis word) per step, in order, each
+        word given by its index, and None on a side the step consumes nothing of.
+
+    """
+    backbone_tokens, hypothesis_tokens = _tokens(backbone), _tokens(hypothesis)
+    return [
+        (
+            step.kind,
+            None if step.kind == "ins" else backbone_tokens[step.ref].word,
+            None if step.kind == "del" else hypothesis_tokens[step.hyp].word,
+        )
+        for step in _align(backbone_tokens, hypothesis_tokens)
+    ]
+
+
 def _slots(count: int, steps: Sequence[_Step]) -> tuple[list[int | None], list[list[int]]]:
     """Return the hypothesis token paired with each slot, and the ones in each gap.
 
