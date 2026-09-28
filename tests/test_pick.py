@@ -96,12 +96,39 @@ def test_a_difference_in_form_alone_is_no_spot(
     ("transcript", "reference"),
     [
         (_said("so", "um", "we"), _said("so", "and", "we")),
-        (_said("it", "was", "like", "big"), _said("it", "was", "light", "big")),
         (_said("so", "you know", "we"), _said("so", "and", "we")),
     ],
-    ids=["um", "like", "you-know"],
+    ids=["um", "you-know"],
 )
 def test_a_side_of_only_fillers_is_no_spot(transcript: list[Word], reference: list[Word]) -> None:
+    assert find_spots(transcript, reference) == []
+    assert find_spots(reference, transcript) == []
+
+
+@pytest.mark.parametrize(
+    ("said", "heard"),
+    [
+        (("so", "I", "like", "cats"), ("so", "I", "hate", "cats")),
+        (("it", "was", "like", "big"), ("it", "was", "light", "big")),
+    ],
+    ids=["hate", "light"],
+)
+def test_like_alone_against_another_word_is_a_spot(
+    said: tuple[str, ...], heard: tuple[str, ...]
+) -> None:
+    assert find_spots(_said(*said), _said(*heard)) == [Spot(range(2, 3), range(2, 3))]
+
+
+def test_like_beside_the_same_words_is_still_no_spot() -> None:
+    transcript = _timed(
+        ("so", 0.0, 0.4),
+        ("like,", 1.0, 1.3),
+        ("yeah,", 1.4, 1.8),
+        ("you", 2.0, 2.2),
+        ("know", 2.2, 2.4),
+    )
+    reference = _timed(("so", 0.0, 0.4), ("yes,", 1.4, 1.8), ("you", 2.0, 2.2), ("know", 2.2, 2.4))
+
     assert find_spots(transcript, reference) == []
     assert find_spots(reference, transcript) == []
 

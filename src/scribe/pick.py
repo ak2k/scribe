@@ -188,6 +188,13 @@ def _in_context(said: Sequence[str], before: Sequence[str], after: Sequence[str]
     return [_folded(token) for token in _without_stutters(tokens, own)]
 
 
+def _fillers_only(said: Sequence[str]) -> bool:
+    text = " ".join(said)
+    # A reading left with nothing once "like" goes can still be the verb: "I
+    # like cats" against "I hate cats".
+    return not _normalized(text) and "like" not in norm_tokens(text)
+
+
 def _same(first: Sequence[str], second: Sequence[str]) -> bool:
     return (
         list(first) == list(second)
@@ -300,7 +307,7 @@ def find_spots(transcript: Sequence[Word], reference: Sequence[Word]) -> list[Sp
         both. Readings the same once normalized, with up to CONTEXT_TOKENS
         matched tokens on each side, are left out: equal, the same set of
         tokens, or the same letters spaced differently. So is a spot where
-        either side, alone, normalizes to nothing: fillers only.
+        either side holds only fillers other than "like".
 
     """
     aligned = _Alignment.of(transcript, reference)
@@ -309,7 +316,7 @@ def find_spots(transcript: Sequence[Word], reference: Sequence[Word]) -> list[Sp
         spot = Spot(_words(aligned.transcript[start:stop]), _words(aligned.reference[start:stop]))
         said = [word.text for word in transcript[spot.transcript.start : spot.transcript.stop]]
         heard = [word.text for word in reference[spot.reference.start : spot.reference.stop]]
-        if not _normalized(" ".join(said)) or not _normalized(" ".join(heard)):
+        if _fillers_only(said) or _fillers_only(heard):
             continue
         before, after = aligned.context(start, stop)
         if not _same(_in_context(said, before, after), _in_context(heard, before, after)):
