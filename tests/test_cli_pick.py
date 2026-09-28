@@ -194,8 +194,21 @@ def _picked_before(inputs: list[Path]) -> str:
     return f"TRANSCRIPT {inputs[0]} was picked already"
 
 
+def _digested(path: Path, digest: str | None) -> None:
+    loaded = Transcript.load(path)
+    source = loaded.source.model_copy(update={"sha256": digest})
+    loaded.model_copy(update={"source": source}).dump(path)
+
+
+def _other_audio(inputs: list[Path]) -> str:
+    _digested(inputs[0], "a" * 64)
+    _digested(inputs[1], "b" * 64)
+    return f"REFERENCE {inputs[1]} was made from other audio than TRANSCRIPT {inputs[0]}"
+
+
 @pytest.mark.parametrize(
-    "breakage", [_unsorted, _unsorted_reference, _wordless, _not_a_transcript, _picked_before]
+    "breakage",
+    [_unsorted, _unsorted_reference, _wordless, _not_a_transcript, _picked_before, _other_audio],
 )
 def test_a_bad_input_is_one_stderr_line_and_exit_two_before_any_call(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, breakage: Callable[[list[Path]], str]
@@ -212,6 +225,25 @@ def test_a_bad_input_is_one_stderr_line_and_exit_two_before_any_call(
     assert expected in result.stderr
     assert made == []
     assert not (tmp_path / "meeting.picked.json").exists()
+
+
+@pytest.mark.parametrize(
+    ("said", "heard"),
+    [("a" * 64, None), (None, "b" * 64), ("", "b" * 64), ("a" * 64, "a" * 64)],
+    ids=["reference-none", "transcript-none", "transcript-empty", "equal"],
+)
+def test_inputs_not_both_recording_different_audio_are_picked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, said: str | None, heard: str | None
+) -> None:
+    made = _patch(monkeypatch)
+    inputs = _inputs(tmp_path)
+    _digested(inputs[0], said)
+    _digested(inputs[1], heard)
+
+    result = runner.invoke(app, ["pick", *map(str, inputs)])
+
+    assert result.exit_code == 0, result.output
+    assert len(made[0].calls) == 1
 
 
 @pytest.mark.skipif(os.geteuid() == 0, reason="root writes through any mode bits")

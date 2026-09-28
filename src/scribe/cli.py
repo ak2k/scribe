@@ -1209,10 +1209,11 @@ def pick_command(
     The result records each spot and its pick in its engine params, and has
     no turns: run `scribe turns` on it next.
 
-    Both inputs' word starts must not decrease. Exit 2 is a bad input, a
-    TRANSCRIPT picked before, an unwritable output, or no usable claude CLI,
-    found before any call. Exit 4 means every call failed; the result is
-    written anyway, with TRANSCRIPT's words.
+    Both inputs' word starts must not decrease. Exit 2 is a bad input, inputs
+    that record different audio sha256, a TRANSCRIPT picked before, an
+    unwritable output, or no usable claude CLI, found before any call. Exit 4
+    means every call failed; the result is written anyway, with TRANSCRIPT's
+    words.
     """
     # stdout carries only the output path; unconfigured, structlog prints there.
     configure()
@@ -1222,6 +1223,12 @@ def pick_command(
         if "pick_record" in transcript.engine.params:
             raise InputValidationError(f"TRANSCRIPT {transcript_path} was picked already")
         reference = _voter(reference_path, "REFERENCE", ordered=True)
+        ours, theirs = transcript.source.sha256, reference.source.sha256
+        if ours and theirs and ours != theirs:
+            raise InputValidationError(
+                f"REFERENCE {reference_path} was made from other audio than TRANSCRIPT "
+                f"{transcript_path}: their sha256 differ"
+            )
         destination = sibling(transcript_path, ".picked.json") if out is None else out
         plan = plan_outputs(
             {"--out": destination}, {"TRANSCRIPT": transcript_path, "REFERENCE": reference_path}
