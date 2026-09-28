@@ -447,8 +447,9 @@ class PickBackend(SpeakerBackend, Protocol):
     model: str
 
 
+# Strict: an id of true or "1" would otherwise be read as spot 1.
 class _Pick(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
     id: int
     pick: Label
@@ -456,7 +457,7 @@ class _Pick(BaseModel):
 
 
 class _Reply(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
     picks: list[_Pick]
 

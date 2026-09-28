@@ -161,7 +161,9 @@ def test_every_chunk_failing_exits_four_with_the_input_words_written(
     written = tmp_path / "long.picked.json"
     assert result.stdout == f"{written}\n"
     assert "failed on 2 of 2 chunks (0, 1)" in result.stderr
-    assert Transcript.load(written).words == Transcript.load(inputs[0]).words
+    picked = Transcript.load(written)
+    assert picked.words == Transcript.load(inputs[0]).words
+    assert picked.engine.params["pick_failed"] == 2
 
 
 def _unsorted(inputs: list[Path]) -> str:

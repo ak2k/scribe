@@ -6,7 +6,7 @@ import json
 from typing import TYPE_CHECKING, cast
 
 import pytest
-from hypothesis import given, settings
+from hypothesis import event, given, settings
 from hypothesis import strategies as st
 
 from scribe.claude_cli import Completion
@@ -27,6 +27,7 @@ from tests.speakers_fakes import FakeSpeakerBackend, target_of
 
 if TYPE_CHECKING:
     import random
+    from collections.abc import Mapping, Sequence
     from pathlib import Path
 
 CAUSES = {
@@ -251,24 +252,16 @@ def test_context_adds_one_section_holding_its_stripped_text() -> None:
     assert added.endswith(":\nPeople at this meeting: Ann Lee; Bob Roe\n")
 
 
-def test_context_reaches_every_call_and_its_length_the_params() -> None:
+@pytest.mark.parametrize(("context", "stripped"), [(" Ann Lee ", "Ann Lee"), ("   ", "")])
+def test_context_reaches_every_call_and_its_length_the_params(context: str, stripped: str) -> None:
     said, heard = _cat_and_mat()
     backend = FakeSpeakerBackend(reply=answering(unsure))
 
-    picking = pick_readings(said, heard, backend, context=" Ann Lee ")
+    picking = pick_readings(said, heard, backend, context=context)
 
-    assert [system for system, _ in backend.calls] == [system_prompt("Ann Lee")]
-    assert picking.transcript.engine.params["pick_context_chars"] == len("Ann Lee")
-
-
-def test_blank_context_is_no_context() -> None:
-    said, heard = _cat_and_mat()
-    backend = FakeSpeakerBackend(reply=answering(unsure))
-
-    picking = pick_readings(said, heard, backend, context="   ")
-
-    assert [system for system, _ in backend.calls] == [system_prompt()]
-    assert picking.transcript.engine.params["pick_context_chars"] == 0
+    # Blank, it is the prompt with no context at all.
+    assert [system for system, _ in backend.calls] == [system_prompt(stripped)]
+    assert picking.transcript.engine.params["pick_context_chars"] == len(stripped)
 
 
 def test_a_cut_inside_a_spot_moves_to_its_first_word() -> None:
@@ -352,39 +345,17 @@ def test_an_unexpected_error_is_named_by_its_class() -> None:
     assert picking.chunks == (ChunkPick(0, (1, 2), "error: RuntimeError"),)
 
 
-def test_every_chunk_failing_keeps_every_word() -> None:
-    said, heard = _three_chunks()
-    backend = FakeSpeakerBackend(fail_when=lambda _target: True)
-
-    picking = pick_readings(said, heard, backend)
-
-    assert picking.transcript.words == said.words
-    assert picking.picked == ("failed", "failed")
-    assert len(picking.failed) == len(picking.chunks) == 2
-
-
-@pytest.mark.parametrize(
-    ("reply", "stop_reason", "cause"),
-    [
-        ('{"picks": [{"id": 1, "pick": "B", "reason": "r"}]}', "max_tokens", "max_tokens"),
-        (
-            '{"picks": [{"id": 1, "pick": "B", "reason": "r", "sure": true}]}',
-            "end_turn",
-            "bad_json",
-        ),
-        ('{"picks": [{"id": 1, "pick": "B", "reason": "r"}], "note": "x"}', "end_turn", "bad_json"),
-        ('{"picks": [{"id": 1, "pick": "C", "reason": "r"}]}', "end_turn", "bad_json"),
-        ('{"picks": [{"id": 9, "pick": "B", "reason": "r"}]}', "end_turn", "foreign_id"),
-    ],
-)
-def test_an_unusable_reply_fails_its_chunk(reply: str, stop_reason: str, cause: str) -> None:
+def test_an_unusable_reply_fails_its_chunk() -> None:
     said = transcript(_said(("the", 0), ("cat", 0), ("sat", 0)))
     heard = transcript(_said(("the", 0), ("hat", 0), ("sat", 0)))
-    backend = FakeSpeakerBackend(reply=lambda _target: reply, stop_reason=stop_reason)
+    backend = FakeSpeakerBackend(
+        reply=lambda _target: '{"picks": [{"id": 1, "pick": "B", "reason": "r"}]}',
+        stop_reason="max_tokens",
+    )
 
     picking = pick_readings(said, heard, backend)
 
-    assert picking.chunks == (ChunkPick(0, (1,), cause),)
+    assert picking.chunks == (ChunkPick(0, (1,), "max_tokens"),)
     assert picking.transcript.words == said.words
 
 
@@ -397,6 +368,31 @@ def test_an_unusable_reply_fails_its_chunk(reply: str, stop_reason: str, cause: 
         ("<out>not json</out>", "end_turn", "bad_json"),
         ('<out>{"picks": [{"id": 1, "pick": "A"}]}</out>', "end_turn", "bad_json"),
         ('<out>{"picks": [{"id": 1, "pick": "a", "reason": ""}]}</out>', "end_turn", "bad_json"),
+        (
+            '<out>{"picks": [{"id": 1, "pick": "A", "reason": "", "sure": true}, '
+            '{"id": 2, "pick": "A", "reason": ""}]}</out>',
+            "end_turn",
+            "bad_json",
+        ),
+        (
+            '<out>{"picks": [{"id": 1, "pick": "A", "reason": ""}, '
+            '{"id": 2, "pick": "A", "reason": ""}], "note": ""}</out>',
+            "end_turn",
+            "bad_json",
+        ),
+        # An id of another type is not read as the number it could be taken for.
+        (
+            '<out>{"picks": [{"id": true, "pick": "A", "reason": ""}, '
+            '{"id": 2, "pick": "A", "reason": ""}]}</out>',
+            "end_turn",
+            "bad_json",
+        ),
+        (
+            '<out>{"picks": [{"id": "1", "pick": "A", "reason": ""}, '
+            '{"id": 2, "pick": "A", "reason": ""}]}</out>',
+            "end_turn",
+            "bad_json",
+        ),
         (
             '<out>```\n```\n{"picks": [{"id": 1, "pick": "A", "reason": ""}]}\n```\n```</out>',
             "end_turn",
@@ -423,8 +419,37 @@ def test_the_first_cause_that_holds_names_the_failure(
     assert read_reply(_completion(text, stop_reason), {1, 2}) == cause
 
 
+def _picks_object(picks: Sequence[Mapping[str, object]]) -> str:
+    return json.dumps({"picks": picks})
+
+
+def _out_block(body: str, closed: bool) -> str:
+    return f"<out>{body}</out>" if closed else f"<out>{body}"
+
+
+_JSON = st.recursive(
+    st.none() | st.booleans() | st.integers() | st.text(max_size=4),
+    lambda inner: st.lists(inner, max_size=3) | st.dictionaries(st.text(max_size=4), inner),
+    max_leaves=6,
+)
+_PICKS = st.lists(
+    st.fixed_dictionaries(
+        {
+            "id": st.integers(0, 9),
+            "pick": st.sampled_from(["A", "B", "unsure"]),
+            "reason": st.text(max_size=4),
+        }
+    ),
+    max_size=6,
+).map(_picks_object)
+# Blocks reach the JSON and id checks, which bare text almost never does.
+_REPLIES = st.text() | st.builds(
+    _out_block, st.text() | _JSON.map(json.dumps) | _PICKS, st.booleans()
+)
+
+
 @given(
-    st.text(),
+    _REPLIES,
     st.sampled_from([None, "end_turn", "max_tokens"]),
     st.frozensets(st.integers(0, 9)),
 )
@@ -433,6 +458,7 @@ def test_any_reply_gives_picks_or_a_cause(
 ) -> None:
     read = read_reply(_completion(text, stop_reason), asked)
 
+    event(read if isinstance(read, str) else "picks")
     assert read in CAUSES if isinstance(read, str) else set(read) == asked
 
 
