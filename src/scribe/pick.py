@@ -146,6 +146,19 @@ _CONTRACTIONS = {
     "till": "until",
     "em": "them",
 }
+# `digitize` leaves ordinals as written, so "1st" and "first" would differ.
+_ORDINALS = {
+    "1st": "first",
+    "2nd": "second",
+    "3rd": "third",
+    "4th": "fourth",
+    "5th": "fifth",
+    "6th": "sixth",
+    "7th": "seventh",
+    "8th": "eighth",
+    "9th": "ninth",
+    "10th": "tenth",
+}
 _FILLERS = FILLERS | {"uhm", "umm", "uhh", "mhm", "mmhmm", "er", "erm", "ah", "oh", "like"}
 _FILLER_PAIRS = frozenset({("you", "know"), ("i", "mean"), ("mm", "hmm"), ("uh", "huh")})
 # A one-letter token ("a" before "about") is a word too often to be a false start.
@@ -206,13 +219,20 @@ def _without_stutters(tokens: Sequence[str]) -> list[str]:
 
 
 def _folded(token: str) -> str:
-    return unicodedata.normalize("NFKD", token.replace("'", "")).encode("ascii", "ignore").decode()
+    # Only the accents go: dropping every non-ASCII letter would make any two
+    # Cyrillic or Greek readings equal.
+    decomposed = unicodedata.normalize("NFKD", token.replace("'", ""))
+    return "".join(char for char in decomposed if not unicodedata.combining(char))
 
 
 def _normalized(text: str) -> list[str]:
     """Return the tokens two readings are compared by: what was said, not how it was written."""
     tokens = norm_tokens(digitize(text.replace("%", " percent")))
-    expanded = [part for token in tokens for part in _CONTRACTIONS.get(token, token).split()]
+    expanded = [
+        part
+        for token in tokens
+        for part in _CONTRACTIONS.get(token, _ORDINALS.get(token, token)).split()
+    ]
     return [_folded(token) for token in _without_stutters(_without_fillers(expanded))]
 
 

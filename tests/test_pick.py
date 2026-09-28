@@ -69,6 +69,8 @@ def test_equal_readings_hold_no_spot() -> None:
         (_said("yes", "no"), _said("no", "yes")),
         (_timed(("every", 0.0, 0.4), ("day", 0.4, 0.8)), _timed(("everyday", 0.0, 0.8))),
         (_said("café"), _said("cafe")),
+        # An ordinal in digits or in words.
+        (_said("the", "1st", "quarter"), _said("the", "first", "quarter")),
     ],
     ids=[
         "contraction",
@@ -80,6 +82,7 @@ def test_equal_readings_hold_no_spot() -> None:
         "order",
         "spacing",
         "accent",
+        "ordinal",
     ],
 )
 def test_a_difference_in_form_alone_is_no_spot(
@@ -150,6 +153,35 @@ def test_spots_a_whole_word_brings_one_step_apart_are_one_spot() -> None:
     assert find_spots(transcript, reference) == [Spot(range(1, 4), range(1, 5))]
 
 
+@pytest.mark.parametrize(
+    ("said", "heard"),
+    [
+        (("мы", "видели", "кота", "вчера"), ("мы", "видели", "кита", "вчера")),
+        (("είδαμε", "τη", "γάτα", "χθες"), ("είδαμε", "τη", "μάτα", "χθες")),
+    ],
+    ids=["cyrillic", "greek"],
+)
+def test_readings_in_another_script_that_differ_are_a_spot(
+    said: tuple[str, ...], heard: tuple[str, ...]
+) -> None:
+    assert find_spots(_said(*said), _said(*heard)) == [Spot(range(2, 3), range(2, 3))]
+
+
+def test_runs_one_long_word_joins_are_one_spot() -> None:
+    # Two runs, each widened to the whole of one four-token word, overlap.
+    transcript = _timed(("go", 0.0, 0.3), ("alpha-beta-gamma-delta", 1.0, 1.8), ("now", 3.0, 3.3))
+    reference = _timed(
+        ("go", 0.0, 0.3),
+        ("zeta", 1.0, 1.1),
+        ("beta", 1.2, 1.3),
+        ("gamma", 1.4, 1.5),
+        ("eta", 1.6, 1.8),
+        ("now", 3.0, 3.3),
+    )
+
+    assert find_spots(transcript, reference) == [Spot(range(1, 2), range(1, 5))]
+
+
 def test_a_word_only_one_side_heard_is_the_fills_not_a_spot() -> None:
     assert (
         find_spots(_said("the", "big", "cat"), _timed(("the", 0.0, 0.4), ("cat", 2.0, 2.4))) == []
@@ -159,7 +191,10 @@ def test_a_word_only_one_side_heard_is_the_fills_not_a_spot() -> None:
     )
 
 
-_VOCAB = ["the", "cat", "hat", "um", "it's", "it is", "twenty", "20", "sat", "e-mail", "Cat,", ""]
+_VOCAB = [
+    *["the", "cat", "hat", "um", "it's", "it is", "twenty", "20", "sat", "e-mail", "Cat,", ""],
+    "cat-the-hat-sat",
+]
 
 
 @st.composite
