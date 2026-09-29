@@ -118,6 +118,30 @@ def test_out_model_and_context_reach_the_run(
     assert not (tmp_path / "meeting.picked.json").exists()
 
 
+def test_the_summary_names_the_picks_guarded_for_dropping_words(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch(monkeypatch, reply=answering(choosing({"purple"})))
+    colors = ["red", "green", "blue", "pink", "gray", "brown", "black", "white", "gold", "teal"]
+    said, heard = tmp_path / "said.json", tmp_path / "heard.json"
+    transcript(_said("we", "saw", *colors, "at")).dump(said)
+    purple = Word(text="purple", start=2.0, end=2.4)
+    at = Word(text="at", start=12.0, end=12.4)
+    transcript([*_said("we", "saw"), purple, at], engine="parakeet-mlx").dump(heard)
+
+    result = runner.invoke(app, ["pick", str(said), str(heard)])
+
+    assert result.exit_code == 0, result.output
+    assert result.stderr == (
+        "scribe: picked the reference's reading at 0 of 1 disputed spots (0 unsure) "
+        f"with {DEFAULT_PICK_MODEL}, prompt {PICK_PROMPT_VERSION}; 1 guarded, keeping the "
+        "transcript's words where the reading picked is 5 or more words shorter\n"
+    )
+    picked = Transcript.load(tmp_path / "said.picked.json")
+    assert picked.words == Transcript.load(said).words
+    assert picked.engine.params["pick_guarded"] == 1
+
+
 def test_no_spot_writes_the_transcript_and_asks_nothing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

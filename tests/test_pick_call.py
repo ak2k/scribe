@@ -15,6 +15,7 @@ from scribe.pick import (
     ChunkPick,
     Spot,
     chunk_spans,
+    find_spots,
     pick_readings,
     read_reply,
     reference_first,
@@ -38,6 +39,8 @@ if TYPE_CHECKING:
     import random
     from collections.abc import Mapping, Sequence
     from pathlib import Path
+
+    from scribe.pick import Picking
 
 CAUSES = {
     "max_tokens",
@@ -229,6 +232,52 @@ def test_a_reference_pick_keeps_every_word_both_heard_alike_as_it_was(
     assert words[changed].speaker == said[changed].speaker
 
 
+_COLORS = ("red", "green", "blue", "pink", "gray", "brown", "black", "white", "gold", "teal")
+
+
+@pytest.mark.parametrize(
+    ("count", "heard_as", "side"),
+    [
+        (10, ("purple",), "guarded"),
+        (6, ("purple", "violet"), "reference"),
+        (1, ("purple", "violet", "lilac", "plum", "mauve", "puce"), "reference"),
+    ],
+    ids=["10-to-1", "6-to-2", "1-to-6"],
+)
+def test_a_reference_pick_dropping_five_words_or_more_keeps_the_transcripts(
+    count: int, heard_as: tuple[str, ...], side: str
+) -> None:
+    # Both sides' readings span the same seconds, so "at" is heard when it was said.
+    span = max(count, len(heard_as))
+
+    def spoken(texts: Sequence[str], speaker: int | None) -> list[Word]:
+        starts = [2 + index * span / len(texts) for index in range(len(texts))]
+        return [
+            *_said(("we", speaker), ("saw", speaker)),
+            *(
+                Word(text=text, start=start, end=start + 0.4, speaker=speaker)
+                for text, start in zip(texts, starts, strict=True)
+            ),
+            Word(text="at", start=2 + span, end=2.4 + span, speaker=speaker),
+        ]
+
+    said = transcript(spoken(_COLORS[:count], 0))
+    heard = transcript(spoken(heard_as, None), engine="parakeet-mlx")
+    backend = FakeSpeakerBackend(reply=answering(choosing({" ".join(heard_as)})))
+
+    picking = pick_readings(said, heard, backend)
+
+    assert picking.spots == (Spot(range(2, 2 + count), range(2, 2 + len(heard_as))),)
+    assert picking.picked == (side,)
+    guarded = side == "guarded"
+    assert _texts(picking.transcript) == _texts(said if guarded else heard)
+    if guarded:
+        assert picking.transcript.words == said.words
+    params = picking.transcript.engine.params
+    assert (params["pick_guarded"], params["pick_to_reference"]) == (int(guarded), 1 - guarded)
+    assert _record(picking.transcript)[0][4] == side
+
+
 def test_the_result_records_the_pick_in_its_params() -> None:
     said, heard = _cat_and_mat()
     said = said.model_copy(
@@ -246,6 +295,7 @@ def test_the_result_records_the_pick_in_its_params() -> None:
         "pick_context_chars": 7,
         "pick_spots": 2,
         "pick_to_reference": 1,
+        "pick_guarded": 0,
         "pick_unsure": 0,
         "pick_failed": 0,
         "pick_chunks": 1,
@@ -547,21 +597,8 @@ def _cases(draw: st.DrawFn) -> tuple[Transcript, Transcript, list[str]]:
     )
 
 
-@settings(deadline=None)
-@given(case=_cases())
-def test_only_the_spots_picked_for_the_reference_change_and_starts_stay_in_order(
-    case: tuple[Transcript, Transcript, list[str]], tmp_path_factory: pytest.TempPathFactory
-) -> None:
-    said, heard, labels = case
-    backend = FakeSpeakerBackend(
-        reply=answering(lambda number, _a, _b: labels[number % len(labels)])
-    )
-
-    picking = pick_readings(said, heard, backend)
-    written: Path = tmp_path_factory.mktemp("pick") / "picked.json"
-    picking.transcript.dump(written)
-    loaded = Transcript.load(written)
-
+def _expected(said: Transcript, heard: Transcript, picking: Picking) -> list[Word | str]:
+    """The transcript's words, each spot applied replaced by the text of the reference's."""
     expected: list[Word | str] = []
     chosen = {
         spot.transcript.start: spot
@@ -579,6 +616,25 @@ def test_only_the_spots_picked_for_the_reference_change_and_starts_stay_in_order
                 word.text for word in heard.words[spot.reference.start : spot.reference.stop]
             ]
             index = spot.transcript.stop
+    return expected
+
+
+@settings(deadline=None)
+@given(case=_cases())
+def test_only_the_spots_picked_for_the_reference_change_and_starts_stay_in_order(
+    case: tuple[Transcript, Transcript, list[str]], tmp_path_factory: pytest.TempPathFactory
+) -> None:
+    said, heard, labels = case
+    backend = FakeSpeakerBackend(
+        reply=answering(lambda number, _a, _b: labels[number % len(labels)])
+    )
+
+    picking = pick_readings(said, heard, backend)
+    written: Path = tmp_path_factory.mktemp("pick") / "picked.json"
+    picking.transcript.dump(written)
+    loaded = Transcript.load(written)
+
+    expected = _expected(said, heard, picking)
     assert len(loaded.words) == len(expected)
     for word, wanted in zip(loaded.words, expected, strict=True):
         assert word == wanted if isinstance(wanted, Word) else word.text == wanted
@@ -586,3 +642,63 @@ def test_only_the_spots_picked_for_the_reference_change_and_starts_stay_in_order
     assert starts == sorted(starts)
     assert all(word.end >= word.start for word in loaded.words if word not in said.words)
     assert len(marks("".join(target_of(user) for _, user in backend.calls))) == len(picking.spots)
+
+
+_KEPT = ["the", "cat", "sat", "on", "mat", "dog", "ran"]
+_PUT = ["pig", "fox", "owl"]
+
+
+@st.composite
+def _drops(draw: st.DrawFn) -> tuple[Transcript, Transcript]:
+    """Words two a second, heard with one run of up to ten of them as up to three others."""
+    before, run, after = (
+        draw(st.lists(st.sampled_from(_KEPT), min_size=low, max_size=high))
+        for low, high in ((0, 4), (1, 10), (0, 4))
+    )
+    texts = [*before, *run, *after]
+    start, stop = len(before), len(before) + len(run)
+    put = draw(st.lists(st.sampled_from(_PUT), max_size=3))
+    said = [
+        Word(text=text, start=index * 0.5, end=index * 0.5 + 0.3, speaker=0)
+        for index, text in enumerate(texts)
+    ]
+    step = (stop - start) * 0.5 / max(len(put), 1)
+    heard = [
+        *(word.model_copy(update={"speaker": None}) for word in said[:start]),
+        *(
+            Word(text=text, start=start * 0.5 + index * step, end=start * 0.5 + index * step + 0.3)
+            for index, text in enumerate(put)
+        ),
+        *(word.model_copy(update={"speaker": None}) for word in said[stop:]),
+    ]
+    return transcript(said), transcript(heard, engine="parakeet-mlx")
+
+
+@settings(deadline=None)
+@given(case=_drops())
+def test_no_reference_pick_applied_drops_five_words_and_the_rest_still_hold(
+    case: tuple[Transcript, Transcript],
+) -> None:
+    said, heard = case
+    theirs = {
+        " ".join(word.text for word in heard.words[spot.reference.start : spot.reference.stop])
+        for spot in find_spots(said.words, heard.words)
+    }
+    backend = FakeSpeakerBackend(reply=answering(choosing(theirs)))
+
+    picking = pick_readings(said, heard, backend)
+
+    for spot, side in zip(picking.spots, picking.picked, strict=True):
+        dropped = len(spot.transcript) - len(spot.reference)
+        event(f"{side}, {'5 or more' if dropped >= 5 else 'fewer'} dropped")
+        assert side != "reference" or dropped < 5
+        assert side != "guarded" or dropped >= 5
+    expected = _expected(said, heard, picking)
+    words = picking.transcript.words
+    assert len(words) == len(expected)
+    for word, wanted in zip(words, expected, strict=True):
+        assert word == wanted if isinstance(wanted, Word) else word.text == wanted
+    if "reference" not in picking.picked:
+        assert words == said.words
+    starts = [word.start for word in words]
+    assert starts == sorted(starts)

@@ -62,6 +62,10 @@ MERGE_GAP = 1
 # Matched tokens on each side of a spot that its readings are compared with, so
 # a repeat or a number across the spot's edge collapses as it does inside.
 CONTEXT_TOKENS = 2
+# A reference reading this many words shorter than the transcript's is not
+# applied when picked: a wrong removal loses speech the fill never puts back,
+# and one of the 164 spots the pick was measured on was of this kind.
+GUARDED_DROP = 5
 
 # fmt: off
 _CONTRACTIONS = {
@@ -346,7 +350,7 @@ def find_spots(transcript: Sequence[Word], reference: Sequence[Word]) -> list[Sp
     return spots
 
 
-Side = Literal["transcript", "reference", "unsure", "failed"]
+Side = Literal["transcript", "reference", "unsure", "failed", "guarded"]
 Label = Literal["A", "B", "unsure"]
 # Why a reply is unusable, in the order they are checked: the first that holds.
 Cause = Literal[
@@ -459,7 +463,8 @@ class Picking:
     transcript: Transcript
     spots: tuple[Spot, ...]
     # One per spot: whose reading it keeps, or "unsure" or "failed" for the
-    # transcript's kept without a pick.
+    # transcript's kept without a pick, or "guarded" for the transcript's kept
+    # where the reference's was picked, GUARDED_DROP words shorter or more.
     picked: tuple[Side, ...]
     chunks: tuple[ChunkPick, ...]
 
@@ -666,7 +671,9 @@ def pick_readings(
 
     Returns:
         The picking. Its transcript has the reference's words at each spot
-        picked for them, `_apply`'s way, every other word as it was, its text
+        picked for them, `_apply`'s way, save where they are GUARDED_DROP
+        words or more fewer than the transcript's: that pick is guarded and
+        keeps the transcript's. Every other word is as it was, its text
         rebuilt from its words and no turns; its engine params record the
         model, the prompt version, the reference, the counts, and each spot
         as [start, end, transcript words, reference words, picked], its start
@@ -729,7 +736,11 @@ def pick_readings(
             chunks.append(ChunkPick(index, ids, labels))
             continue
         for number in ids:
-            picked[number - 1] = _side(labels[number], reference_is_a=orders[number - 1])
+            side = _side(labels[number], reference_is_a=orders[number - 1])
+            spot = spots[number - 1]
+            if side == "reference" and len(spot.transcript) - len(spot.reference) >= GUARDED_DROP:
+                side = "guarded"
+            picked[number - 1] = side
         chunks.append(ChunkPick(index, ids))
 
     words = _apply(said, heard, spots, picked)
@@ -742,6 +753,7 @@ def pick_readings(
         "pick_context_chars": len((context or "").strip()),
         "pick_spots": len(spots),
         "pick_to_reference": picked.count("reference"),
+        "pick_guarded": picked.count("guarded"),
         "pick_unsure": picked.count("unsure"),
         "pick_failed": picked.count("failed"),
         "pick_chunks": len(chunks),

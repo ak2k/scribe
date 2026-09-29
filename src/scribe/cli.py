@@ -42,7 +42,7 @@ from scribe.gaps import check_gaps, clock, format_gap
 from scribe.log import configure
 from scribe.outputs import plan_outputs, prove_writable, sibling
 from scribe.parakeet import ParakeetMlx
-from scribe.pick import DEFAULT_PICK_MODEL, PICK_PROMPT_VERSION, pick_readings
+from scribe.pick import DEFAULT_PICK_MODEL, GUARDED_DROP, PICK_PROMPT_VERSION, pick_readings
 from scribe.schema import Engine, Source, Transcript, from_xai_response
 from scribe.speakers import (
     DEFAULT_SPEAKER_MODEL,
@@ -1154,12 +1154,17 @@ def fill_command(
 
 def _report_pick(picking: Picking, model: str) -> None:
     picked = picking.picked
-    typer.echo(
+    line = (
         f"scribe: picked the reference's reading at {picked.count('reference')} of "
         f"{len(picked)} disputed spots ({picked.count('unsure')} unsure) with {model}, "
-        f"prompt {PICK_PROMPT_VERSION}",
-        err=True,
+        f"prompt {PICK_PROMPT_VERSION}"
     )
+    if guarded := picked.count("guarded"):
+        line += (
+            f"; {guarded} guarded, keeping the transcript's words where the reading "
+            f"picked is {GUARDED_DROP} or more words shorter"
+        )
+    typer.echo(line, err=True)
     if picking.failed:
         listed = ", ".join(str(chunk.index) for chunk in picking.failed)
         spots = sum(len(chunk.spots) for chunk in picking.failed)
@@ -1205,7 +1210,9 @@ def pick_command(
 
     Where REFERENCE's reading is picked, its words replace TRANSCRIPT's there,
     each with REFERENCE's times held between the words around it and the
-    speaker of the nearest word replaced. Every other word stays as it was.
+    speaker of the nearest word replaced, unless they are 5 or more fewer
+    than TRANSCRIPT's: that pick is guarded and TRANSCRIPT's words stay, as a
+    wrong removal loses speech. Every other word stays as it was.
     The result records each spot and its pick in its engine params, and has
     no turns: run `scribe turns` on it next.
 
