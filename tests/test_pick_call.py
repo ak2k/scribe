@@ -287,6 +287,56 @@ def test_a_reference_pick_dropping_five_words_or_more_keeps_the_transcripts(
     assert _record(picking.transcript)[0][4] == side
 
 
+_BIRDS = ("robin", "wren", "finch", "crow", "owl", "hawk", "swan", "duck", "dove", "lark", "jay")
+
+
+@pytest.mark.parametrize(
+    ("heard_as", "answer", "side"),
+    [
+        (_BIRDS[:11], "transcript", "restored"),
+        (_BIRDS[:10], "transcript", "transcript"),
+        (_BIRDS[:11], "unsure", "restored"),
+        (_BIRDS[:11], "reference", "reference"),
+        ((*_BIRDS[:5], ",", *_BIRDS[5:10]), "transcript", "transcript"),
+        (_BIRDS[:11], "fails", "failed"),
+    ],
+    ids=[
+        "10-more-picked-transcript",
+        "9-more-picked-transcript",
+        "10-more-unsure",
+        "10-more-picked-reference",
+        "9-more-and-a-comma-picked-transcript",
+        "10-more-in-a-failed-chunk",
+    ],
+)
+def test_a_reference_reading_ten_words_longer_is_put_in_whatever_was_answered(
+    heard_as: tuple[str, ...], answer: str, side: str
+) -> None:
+    at = Word(text="at", start=13.0, end=13.4, speaker=0)
+    said = transcript([*_said(("we", 0), ("saw", 0), ("red", 0)), at])
+    heard = transcript(
+        _said(("we", None), ("saw", None), *((text, None) for text in heard_as), ("at", None)),
+        engine="parakeet-mlx",
+    )
+    readings = {"transcript": "red", "reference": " ".join(heard_as)}
+    backend = FakeSpeakerBackend(
+        reply=answering(choosing({readings[answer]}) if answer in readings else unsure),
+        fail_when=lambda _target: answer == "fails",
+    )
+
+    picking = pick_readings(said, heard, backend)
+
+    assert picking.spots == (Spot(range(2, 3), range(2, 2 + len(heard_as))),)
+    assert picking.picked == (side,)
+    params = picking.transcript.engine.params
+    assert params.get("pick_restored", 0) == int(side == "restored")
+    assert _record(picking.transcript)[0][4] == side
+    put_in = side in {"restored", "reference"}
+    assert _texts(picking.transcript) == _texts(heard if put_in else said)
+    if not put_in:
+        assert picking.transcript.words == said.words
+
+
 def test_the_result_records_the_pick_in_its_params() -> None:
     said, heard = _cat_and_mat()
     said = said.model_copy(
@@ -305,6 +355,7 @@ def test_the_result_records_the_pick_in_its_params() -> None:
         "pick_spots": 2,
         "pick_to_reference": 1,
         "pick_guarded": 0,
+        "pick_restored": 0,
         "pick_unsure": 0,
         "pick_failed": 0,
         "pick_chunks": 1,
@@ -612,7 +663,7 @@ def _expected(said: Transcript, heard: Transcript, picking: Picking) -> list[Wor
     chosen = {
         spot.transcript.start: spot
         for spot, side in zip(picking.spots, picking.picked, strict=True)
-        if side == "reference"
+        if side in {"reference", "restored"}
     }
     index = 0
     while index < len(said.words):

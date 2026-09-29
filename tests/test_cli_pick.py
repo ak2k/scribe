@@ -142,6 +142,29 @@ def test_the_summary_names_the_picks_guarded_for_dropping_words(
     assert picked.engine.params["pick_guarded"] == 1
 
 
+def test_the_summary_names_the_spots_restored_for_words_the_transcript_dropped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch(monkeypatch, reply=answering(choosing({"red"})))
+    birds = ["robin", "wren", "finch", "crow", "owl", "hawk", "swan", "duck", "dove", "lark", "jay"]
+    said, heard = tmp_path / "said.json", tmp_path / "heard.json"
+    at = Word(text="at", start=13.0, end=13.4, speaker=0)
+    transcript([*_said("we", "saw", "red"), at]).dump(said)
+    transcript(_said("we", "saw", *birds, "at"), engine="parakeet-mlx").dump(heard)
+
+    result = runner.invoke(app, ["pick", str(said), str(heard)])
+
+    assert result.exit_code == 0, result.output
+    assert result.stderr == (
+        "scribe: picked the reference's reading at 0 of 1 disputed spots (0 unsure) "
+        f"with {DEFAULT_PICK_MODEL}, prompt {PICK_PROMPT_VERSION}; 1 restored, putting in the "
+        "reference's words where they are 10 or more words longer than the transcript's\n"
+    )
+    picked = Transcript.load(tmp_path / "said.picked.json")
+    assert [word.text for word in picked.words] == ["we", "saw", *birds, "at"]
+    assert picked.engine.params["pick_restored"] == 1
+
+
 def test_no_spot_writes_the_transcript_and_asks_nothing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
