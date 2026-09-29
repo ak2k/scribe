@@ -1297,8 +1297,8 @@ def pick_command(
     each with REFERENCE's times held between the words around it and the
     speaker of the nearest word replaced, unless they are 5 or more fewer
     than TRANSCRIPT's: that pick is guarded and TRANSCRIPT's words stay, as a
-    wrong removal loses speech. Where REFERENCE's reading has 10 or more words
-    more than TRANSCRIPT's, its words go in the same way whatever the model
+    wrong removal loses speech. Where REFERENCE's reading is 10 or more words
+    longer than TRANSCRIPT's, its words go in the same way whatever the model
     picks: the spot is restored, as keeping the shorter loses speech. Every
     other word stays as it was.
     The result records each spot and its pick in its engine params, and has

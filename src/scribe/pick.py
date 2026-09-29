@@ -65,8 +65,8 @@ CONTEXT_TOKENS = 2
 # not applied when picked: a wrong removal loses speech the fill never puts back.
 GUARDED_DROP = 5
 # A reference reading this many spoken words longer than the transcript's is
-# applied whatever the pick: keeping the transcript's loses speech the fill
-# never puts back.
+# applied wherever the model answered, whatever it answered: keeping the
+# transcript's loses speech the fill never puts back.
 RESTORED_ADD = 10
 
 # fmt: off
