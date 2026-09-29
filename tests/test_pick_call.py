@@ -287,19 +287,36 @@ def test_a_reference_pick_dropping_five_words_or_more_keeps_the_transcripts(
     assert _record(picking.transcript)[0][4] == side
 
 
-_BIRDS = ("robin", "wren", "finch", "crow", "owl", "hawk", "swan", "duck", "dove", "lark", "jay")
+_BIRDS = (
+    "robin",
+    "wren",
+    "finch",
+    "crow",
+    "owl",
+    "hawk",
+    "swan",
+    "duck",
+    "dove",
+    "lark",
+    "jay",
+    "kite",
+)
+# A period between two words, so it falls inside the spot rather than at its edge.
+_RED_BLUE = ("red", ".", "blue")
 
 
 @pytest.mark.parametrize(
-    ("heard_as", "answer", "side"),
+    ("said_as", "heard_as", "answer", "side"),
     [
-        (_BIRDS[:11], "transcript", "restored"),
-        (_BIRDS[:10], "transcript", "transcript"),
-        (_BIRDS[:11], "unsure", "restored"),
-        (_BIRDS[:11], "reference", "reference"),
-        ((*_BIRDS[:5], ",", *_BIRDS[5:10]), "transcript", "transcript"),
-        (_BIRDS[:11], "fails", "failed"),
-        (_BIRDS[:11], "unusable", "failed"),
+        (("red",), _BIRDS[:11], "transcript", "restored"),
+        (("red",), _BIRDS[:10], "transcript", "transcript"),
+        (("red",), _BIRDS[:11], "unsure", "restored"),
+        (("red",), _BIRDS[:11], "reference", "reference"),
+        (("red",), (*_BIRDS[:5], ",", *_BIRDS[5:10]), "transcript", "transcript"),
+        (("red",), _BIRDS[:11], "fails", "failed"),
+        (("red",), _BIRDS[:11], "unusable", "failed"),
+        (_RED_BLUE, _BIRDS[:11], "transcript", "transcript"),
+        (_RED_BLUE, _BIRDS[:12], "transcript", "restored"),
     ],
     ids=[
         "10-more-picked-transcript",
@@ -309,18 +326,20 @@ _BIRDS = ("robin", "wren", "finch", "crow", "owl", "hawk", "swan", "duck", "dove
         "9-more-and-a-comma-picked-transcript",
         "10-more-in-a-failed-chunk",
         "10-more-in-an-unusable-reply",
+        "9-more-than-2-and-a-period-picked-transcript",
+        "10-more-than-2-and-a-period-picked-transcript",
     ],
 )
 def test_a_reference_reading_ten_words_longer_is_put_in_whatever_was_answered(
-    heard_as: tuple[str, ...], answer: str, side: str
+    said_as: tuple[str, ...], heard_as: tuple[str, ...], answer: str, side: str
 ) -> None:
     at = Word(text="at", start=13.0, end=13.4, speaker=0)
-    said = transcript([*_said(("we", 0), ("saw", 0), ("red", 0)), at])
+    said = transcript([*_said(("we", 0), ("saw", 0), *((text, 0) for text in said_as)), at])
     heard = transcript(
         _said(("we", None), ("saw", None), *((text, None) for text in heard_as), ("at", None)),
         engine="parakeet-mlx",
     )
-    readings = {"transcript": "red", "reference": " ".join(heard_as)}
+    readings = {"transcript": " ".join(said_as), "reference": " ".join(heard_as)}
     backend = FakeSpeakerBackend(
         reply=answering(choosing({readings[answer]}) if answer in readings else unsure),
         fail_when=lambda _target: answer == "fails",
@@ -330,7 +349,7 @@ def test_a_reference_reading_ten_words_longer_is_put_in_whatever_was_answered(
 
     picking = pick_readings(said, heard, backend)
 
-    assert picking.spots == (Spot(range(2, 3), range(2, 2 + len(heard_as))),)
+    assert picking.spots == (Spot(range(2, 2 + len(said_as)), range(2, 2 + len(heard_as))),)
     assert picking.picked == (side,)
     params = picking.transcript.engine.params
     assert (
