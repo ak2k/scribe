@@ -696,12 +696,13 @@ def pick_readings(
         punctuation not being one: that pick is guarded and keeps the
         transcript's. Where they hold RESTORED_ADD or more words more,
         fillers and repeats aside, and the chunk's reply was used, they are
-        put in whatever was picked: the spot is restored. Every other word is as it was, its text
-        rebuilt from its words and no turns; its engine params record the
-        model, the prompt version, the reference, the counts, and each spot
-        as [start, end, transcript words, reference words, picked], its start
-        and end the transcript words' own. A chunk whose call raised or whose
-        reply is unusable keeps the transcript's words at all its spots.
+        put in whatever was picked: the spot is restored. Every other word
+        is as it was, its text rebuilt from its words and no turns; its
+        engine params record the model, the prompt version, the reference,
+        the counts, and each spot as [start, end, transcript words, reference
+        words, picked], its start and end the transcript words' own. A chunk
+        whose call raised or whose reply is unusable keeps the transcript's
+        words at all its spots.
 
     Raises:
         ValueError: A word of either transcript starts before the word ahead of it.
