@@ -317,6 +317,14 @@ _RED_BLUE = ("red", ".", "blue")
         (("red",), _BIRDS[:11], "unusable", "failed"),
         (_RED_BLUE, _BIRDS[:11], "transcript", "transcript"),
         (_RED_BLUE, _BIRDS[:12], "transcript", "restored"),
+        (("cats",), (*("um",) * 10, "dogs"), "transcript", "transcript"),
+        (("cats",), (*("you", "know") * 5, "dogs"), "transcript", "transcript"),
+        (
+            ("red",),
+            (*_BIRDS[:4], "um", *_BIRDS[4:8], "um", *_BIRDS[8:11]),
+            "transcript",
+            "restored",
+        ),
     ],
     ids=[
         "10-more-picked-transcript",
@@ -328,6 +336,9 @@ _RED_BLUE = ("red", ".", "blue")
         "10-more-in-an-unusable-reply",
         "9-more-than-2-and-a-period-picked-transcript",
         "10-more-than-2-and-a-period-picked-transcript",
+        "10-ums-and-another-word-picked-transcript",
+        "5-you-knows-and-another-word-picked-transcript",
+        "10-more-and-2-ums-picked-transcript",
     ],
 )
 def test_a_reference_reading_ten_words_longer_is_put_in_whatever_was_answered(
