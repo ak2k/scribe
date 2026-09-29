@@ -308,6 +308,11 @@ def transcribe(
     try:
         if max_usd is not None and not vote_engines:
             raise InputValidationError("--max-usd caps Gemini's spending, which only --vote runs")
+        if pick_context is not None and (not pick or vote_engines or not cross_check):
+            raise InputValidationError(
+                "--pick-context is background for the pick, which --no-pick, --vote "
+                "and --no-cross-check each turn off"
+            )
         terms = _keyterms(keyterm, keyterm_file)
         check_vad_threshold(vad_threshold)
         client = XaiStt(resolve_api_key())

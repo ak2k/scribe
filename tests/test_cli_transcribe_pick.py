@@ -391,3 +391,30 @@ def test_the_help_says_what_the_pick_sends_and_how_to_turn_it_off() -> None:
     shown = " ".join(result.stdout.split())
     for needed in ["not the audio, go to Anthropic", "--no-pick", "--pick-model", "--pick-context"]:
         assert needed in shown, needed
+
+
+class _NoUpload:
+    def __init__(self, api_key: str) -> None:
+        self.api_key = api_key
+
+    def transcribe(self, *_args: object, **_options: object) -> NoReturn:
+        raise AssertionError("uploaded")
+
+
+@pytest.mark.parametrize("flag", ["--no-pick", "--vote", "--no-cross-check"])
+def test_pick_context_with_no_pick_to_take_it_exits_two_before_the_upload(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, flag: str
+) -> None:
+    _setup(monkeypatch)
+    monkeypatch.setattr("scribe.cli.XaiStt", _NoUpload)
+    monkeypatch.setattr(ensemble, "transcribe_voted", _NoUpload("").transcribe)
+
+    result = _transcribe(tmp_path, flag, "--pick-context", "People at this meeting: Ann Lee")
+
+    assert result.exit_code == 2, result.output
+    assert result.stdout == ""
+    assert result.stderr == (
+        "scribe: --pick-context is background for the pick, which --no-pick, --vote "
+        "and --no-cross-check each turn off\n"
+    )
+    assert [path.name for path in tmp_path.iterdir()] == ["clip.wav"]
