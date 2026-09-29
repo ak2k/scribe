@@ -299,6 +299,7 @@ _BIRDS = ("robin", "wren", "finch", "crow", "owl", "hawk", "swan", "duck", "dove
         (_BIRDS[:11], "reference", "reference"),
         ((*_BIRDS[:5], ",", *_BIRDS[5:10]), "transcript", "transcript"),
         (_BIRDS[:11], "fails", "failed"),
+        (_BIRDS[:11], "unusable", "failed"),
     ],
     ids=[
         "10-more-picked-transcript",
@@ -307,6 +308,7 @@ _BIRDS = ("robin", "wren", "finch", "crow", "owl", "hawk", "swan", "duck", "dove
         "10-more-picked-reference",
         "9-more-and-a-comma-picked-transcript",
         "10-more-in-a-failed-chunk",
+        "10-more-in-an-unusable-reply",
     ],
 )
 def test_a_reference_reading_ten_words_longer_is_put_in_whatever_was_answered(
@@ -322,6 +324,8 @@ def test_a_reference_reading_ten_words_longer_is_put_in_whatever_was_answered(
     backend = FakeSpeakerBackend(
         reply=answering(choosing({readings[answer]}) if answer in readings else unsure),
         fail_when=lambda _target: answer == "fails",
+        # Unwrapped, the reply has no <out> block.
+        wrap=answer != "unusable",
     )
 
     picking = pick_readings(said, heard, backend)
