@@ -192,12 +192,23 @@ def _nowhere(_name: str) -> str | None:
     return None
 
 
+class _NoClaude(FakeSpeakerBackend):
+    """Fails to resolve as the real backend does with no claude on PATH."""
+
+    def resolve(self) -> str:
+        return ClaudeCliBackend(self.model, disable_tools=True, which=_nowhere).resolve()
+
+
 def _no_claude(monkeypatch: pytest.MonkeyPatch) -> list[FakeSpeakerBackend]:
-    def factory(*, model: str, disable_tools: bool) -> ClaudeCliBackend:
-        return ClaudeCliBackend(model, disable_tools=disable_tools, which=_nowhere)
+    made: list[FakeSpeakerBackend] = []
+
+    def factory(*, model: str, disable_tools: bool) -> FakeSpeakerBackend:
+        assert disable_tools
+        made.append(_NoClaude(model=model))
+        return made[-1]
 
     monkeypatch.setattr("scribe.cli.ClaudeCliBackend", factory)
-    return []
+    return made
 
 
 def _every_chunk_fails(monkeypatch: pytest.MonkeyPatch) -> list[FakeSpeakerBackend]:
@@ -222,12 +233,17 @@ def _out_of_order(monkeypatch: pytest.MonkeyPatch) -> list[FakeSpeakerBackend]:
 
 
 @pytest.mark.parametrize(
-    ("arrange", "message", "called"),
+    ("arrange", "message", "built", "called"),
     [
-        (_no_claude, "not picking: claude is not on PATH", False),
-        (_every_chunk_fails, "the pick failed on 1 of 1 chunks", True),
-        (_rewrite_fails, "cannot write the picked transcript to ", True),
-        (_out_of_order, "not picking: the filled transcript's word 1 starts before word 0", False),
+        (_no_claude, "not picking: claude is not on PATH", True, False),
+        (_every_chunk_fails, "the pick failed on 1 of 1 chunks", True, True),
+        (_rewrite_fails, "cannot write the picked transcript to ", True, True),
+        (
+            _out_of_order,
+            "not picking: the filled transcript's word 1 starts before word 0",
+            False,
+            False,
+        ),
     ],
     ids=["no-claude", "every-chunk-failed", "rewrite-fails", "out-of-order"],
 )
@@ -236,6 +252,7 @@ def test_a_pick_that_fails_is_one_line_and_keeps_the_filled_words(
     monkeypatch: pytest.MonkeyPatch,
     arrange: Callable[[pytest.MonkeyPatch], list[FakeSpeakerBackend]],
     message: str,
+    built: bool,
     called: bool,
 ) -> None:
     _setup(monkeypatch)
@@ -250,7 +267,7 @@ def test_a_pick_that_fails_is_one_line_and_keeps_the_filled_words(
     assert lines[-1].startswith(f"scribe: {message}"), lines
     assert lines[-1].endswith(KEPT)
     assert not [line for line in lines[1:-1] if "pick" in line], lines
-    assert bool(made and made[0].calls) == called
+    assert (len(made), bool(made and made[0].calls)) == (int(built), called)
     assert not [path for path in tmp_path.iterdir() if path.name.startswith(".")]
     assert out.read_bytes() == _filled(tmp_path)
 
