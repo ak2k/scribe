@@ -51,7 +51,6 @@ if TYPE_CHECKING:
 # comparable to one made with the same prompt.
 PICK_PROMPT_VERSION = "pick-1"
 DEFAULT_PICK_MODEL = "opus"
-# About 50 spots a call on the meeting the pick was measured on.
 TARGET_WORDS = 1500
 MAX_WORDS = 2000
 CONTEXT_WORDS = 200
@@ -63,8 +62,7 @@ MERGE_GAP = 1
 # a repeat or a number across the spot's edge collapses as it does inside.
 CONTEXT_TOKENS = 2
 # A reference reading this many words shorter than the transcript's is not
-# applied when picked: a wrong removal loses speech the fill never puts back,
-# and one of the 164 spots the pick was measured on was of this kind.
+# applied when picked: a wrong removal loses speech the fill never puts back.
 GUARDED_DROP = 5
 
 # fmt: off
