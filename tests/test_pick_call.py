@@ -303,6 +303,21 @@ _BIRDS = (
 )
 # A period between two words, so it falls inside the spot rather than at its edge.
 _RED_BLUE = ("red", ".", "blue")
+# Twelve spoken words that spots compare as one token, 2999999.
+_NUMBER = (
+    "two",
+    "million",
+    "nine",
+    "hundred",
+    "ninety",
+    "nine",
+    "thousand",
+    "nine",
+    "hundred",
+    "and",
+    "ninety",
+    "nine",
+)
 
 
 @pytest.mark.parametrize(
@@ -325,6 +340,7 @@ _RED_BLUE = ("red", ".", "blue")
             "transcript",
             "restored",
         ),
+        (_NUMBER, _BIRDS[:11], "transcript", "transcript"),
     ],
     ids=[
         "10-more-picked-transcript",
@@ -339,6 +355,7 @@ _RED_BLUE = ("red", ".", "blue")
         "10-ums-and-another-word-picked-transcript",
         "5-you-knows-and-another-word-picked-transcript",
         "10-more-and-2-ums-picked-transcript",
+        "12-word-number-against-11-words-picked-transcript",
     ],
 )
 def test_a_reference_reading_ten_words_longer_is_put_in_whatever_was_answered(
