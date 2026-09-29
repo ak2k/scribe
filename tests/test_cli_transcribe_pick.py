@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import subprocess
 from pathlib import Path
-from typing import TYPE_CHECKING, NoReturn
+from typing import TYPE_CHECKING, NoReturn, override
 
 import pytest
 from typer.testing import CliRunner
@@ -195,6 +195,7 @@ def _nowhere(_name: str) -> str | None:
 class _NoClaude(FakeSpeakerBackend):
     """Fails to resolve as the real backend does with no claude on PATH."""
 
+    @override
     def resolve(self) -> str:
         return ClaudeCliBackend(self.model, disable_tools=True, which=_nowhere).resolve()
 
