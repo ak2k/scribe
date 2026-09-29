@@ -50,12 +50,14 @@ was there); the words, not the audio, go to Anthropic through `claude`.
 
 Unless `--no-pick` is given, `transcribe` then runs that pick itself, on its
 filled words against Parakeet's (`--pick-model`, default opus, and
-`--pick-context` are `pick`'s `--model` and `--context`), so with the pick on
+`--pick-context` are `pick`'s `--model` and `--context`), so, with the pick on,
 the transcript's words, not the audio, go to Anthropic through `claude`. Where
 the reading picked has 5 or more fewer words than the transcript's, the pick
 is guarded and the transcript's words stay. The pick never changes the exit
-code; a failure in it, such as no `claude` on PATH, is one line and keeps the
-filled words. It does not run with `--vote` or `--no-cross-check`.
+code; a failure in it, such as no `claude` on PATH, ends in one line (a retried
+`claude` call is logged as a warning before it) and keeps the filled words. It
+does not run with `--vote` or `--no-cross-check`, or where Parakeet cannot run,
+and `--pick-context` with `--no-pick`, `--vote` or `--no-cross-check` exits 2.
 
 `turns` groups the words into speaker turns. A transcript that carries turns
 but no words keeps its turns as they are.
