@@ -67,7 +67,8 @@ GUARDED_DROP = 5
 # A reference reading this many words longer than the transcript's, counted as
 # spots are compared so fillers and repeats add none, is applied wherever the
 # model answered, whatever it answered: keeping the transcript's loses speech
-# the fill never puts back.
+# the fill never puts back. It must also hold more spoken words, since spots
+# compare a number said in words as one.
 RESTORED_ADD = 10
 
 # fmt: off
@@ -694,15 +695,15 @@ def pick_readings(
         picked for them, `_apply`'s way, save where they hold GUARDED_DROP
         or more fewer spoken words than the transcript's, a word of bare
         punctuation not being one: that pick is guarded and keeps the
-        transcript's. Where they hold RESTORED_ADD or more words more,
-        fillers and repeats aside, and the chunk's reply was used, they are
-        put in whatever was picked: the spot is restored. Every other word
-        is as it was, its text rebuilt from its words and no turns; its
-        engine params record the model, the prompt version, the reference,
-        the counts, and each spot as [start, end, transcript words, reference
-        words, picked], its start and end the transcript words' own. A chunk
-        whose call raised or whose reply is unusable keeps the transcript's
-        words at all its spots.
+        transcript's. Where the chunk's reply was used and they hold
+        RESTORED_ADD or more words more, fillers and repeats aside, and more
+        spoken words too, they are put in whatever was picked: the spot is
+        restored. Every other word is as it was, its text rebuilt from its
+        words and no turns; its engine params record the model, the prompt
+        version, the reference, the counts, and each spot as [start, end,
+        transcript words, reference words, picked], its start and end the
+        transcript words' own. A chunk whose call raised or whose reply is
+        unusable keeps the transcript's words at all its spots.
 
     Raises:
         ValueError: A word of either transcript starts before the word ahead of it.
@@ -765,7 +766,11 @@ def pick_readings(
             dropped = _spoken_count(said, spot.transcript) - _spoken_count(heard, spot.reference)
             if side == "reference" and dropped >= GUARDED_DROP:
                 side = "guarded"
-            elif side != "reference" and _surplus(*readings[number - 1]) >= RESTORED_ADD:
+            elif (
+                side != "reference"
+                and dropped < 0
+                and _surplus(*readings[number - 1]) >= RESTORED_ADD
+            ):
                 side = "restored"
             picked[number - 1] = side
         chunks.append(ChunkPick(index, ids))
