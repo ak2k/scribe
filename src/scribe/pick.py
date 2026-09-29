@@ -64,9 +64,10 @@ CONTEXT_TOKENS = 2
 # A reference reading this many spoken words shorter than the transcript's is
 # not applied when picked: a wrong removal loses speech the fill never puts back.
 GUARDED_DROP = 5
-# A reference reading this many spoken words longer than the transcript's is
-# applied wherever the model answered, whatever it answered: keeping the
-# transcript's loses speech the fill never puts back.
+# A reference reading this many words longer than the transcript's, counted as
+# spots are compared so fillers and repeats add none, is applied wherever the
+# model answered, whatever it answered: keeping the transcript's loses speech
+# the fill never puts back.
 RESTORED_ADD = 10
 
 # fmt: off
@@ -468,7 +469,7 @@ class Picking:
     # transcript's kept without a pick. "guarded" is the transcript's kept where
     # the reference's was picked, GUARDED_DROP spoken words shorter or more.
     # "restored" is the reference's put in where it was not picked, RESTORED_ADD
-    # spoken words longer or more.
+    # words longer or more, fillers and repeats aside.
     picked: tuple[Side, ...]
     chunks: tuple[ChunkPick, ...]
 
@@ -570,6 +571,14 @@ def _joined(words: Sequence[Word]) -> str:
 def _spoken_count(words: Sequence[Word], held: range) -> int:
     """Count the words held that were said: Parakeet writes some punctuation as a word."""
     return sum(1 for index in held if norm_tokens(words[index].text))
+
+
+def _surplus(mine: str, theirs: str) -> int:
+    """Count the tokens the reference's reading has beyond the transcript's, as spots compare them.
+
+    Fillers, filler pairs and repeats never decide a spot, so they add none.
+    """
+    return len(_normalized(theirs)) - len(_normalized(mine))
 
 
 def _target(words: Sequence[Word], start: int, end: int, marks: dict[int, tuple[int, str]]) -> str:
@@ -685,9 +694,9 @@ def pick_readings(
         picked for them, `_apply`'s way, save where they hold GUARDED_DROP
         or more fewer spoken words than the transcript's, a word of bare
         punctuation not being one: that pick is guarded and keeps the
-        transcript's. Where they hold RESTORED_ADD or more spoken words more
-        and the chunk's reply was used, they are put in whatever was picked:
-        the spot is restored. Every other word is as it was, its text
+        transcript's. Where they hold RESTORED_ADD or more words more,
+        fillers and repeats aside, and the chunk's reply was used, they are
+        put in whatever was picked: the spot is restored. Every other word is as it was, its text
         rebuilt from its words and no turns; its engine params record the
         model, the prompt version, the reference, the counts, and each spot
         as [start, end, transcript words, reference words, picked], its start
@@ -755,7 +764,7 @@ def pick_readings(
             dropped = _spoken_count(said, spot.transcript) - _spoken_count(heard, spot.reference)
             if side == "reference" and dropped >= GUARDED_DROP:
                 side = "guarded"
-            elif side != "reference" and -dropped >= RESTORED_ADD:
+            elif side != "reference" and _surplus(*readings[number - 1]) >= RESTORED_ADD:
                 side = "restored"
             picked[number - 1] = side
         chunks.append(ChunkPick(index, ids))

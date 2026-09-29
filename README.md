@@ -54,12 +54,13 @@ filled words against Parakeet's (`--pick-model`, default opus, and
 the transcript's words, not the audio, go to Anthropic through `claude`. Where
 the reading picked has 5 or more fewer words than the transcript's, the pick
 is guarded and the transcript's words stay. Where Parakeet's reading is 10 or
-more words longer than the transcript's, its words go in whatever the model
-picks: the spot is restored. The pick never changes the exit code; a failure
-in it, such as no `claude` on PATH, ends in one line (a retried `claude` call
-is logged as a warning before it) and keeps the filled words. It does not run
-with `--vote` or `--no-cross-check`, or where Parakeet cannot run, and
-`--pick-context` with `--no-pick`, `--vote` or `--no-cross-check` exits 2.
+more words longer than the transcript's, fillers and repeats aside, its words
+go in whatever the model picks: the spot is restored. The pick never changes
+the exit code; a failure in it, such as no `claude` on PATH, ends in one line
+(a retried `claude` call is logged as a warning before it) and keeps the
+filled words. It does not run with `--vote` or `--no-cross-check`, or where
+Parakeet cannot run, and `--pick-context` with `--no-pick`, `--vote` or
+`--no-cross-check` exits 2.
 
 `turns` groups the words into speaker turns. A transcript that carries turns
 but no words keeps its turns as they are.
