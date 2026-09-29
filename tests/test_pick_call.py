@@ -239,10 +239,11 @@ _COLORS = ("red", "green", "blue", "pink", "gray", "brown", "black", "white", "g
     ("count", "heard_as", "side"),
     [
         (10, ("purple",), "guarded"),
+        (6, ("purple",), "guarded"),
         (6, ("purple", "violet"), "reference"),
         (1, ("purple", "violet", "lilac", "plum", "mauve", "puce"), "reference"),
     ],
-    ids=["10-to-1", "6-to-2", "1-to-6"],
+    ids=["10-to-1", "6-to-1", "6-to-2", "1-to-6"],
 )
 def test_a_reference_pick_dropping_five_words_or_more_keeps_the_transcripts(
     count: int, heard_as: tuple[str, ...], side: str
