@@ -295,10 +295,10 @@ def transcribe(
     changes the exit code or the path printed: a failure is one stderr line,
     and --out keeps xAI's words.
 
-    Unless --no-pick is given, once Parakeet's words have filled --out, a model
-    then picks, at each spot where they and --out's words disagree in what was
-    said, which of the two readings was said, as `scribe pick` does;
-    --pick-model and --pick-context are its --model and --context. It is asked
+    Unless --no-pick is given, a model then picks, at each spot where the
+    filled words and Parakeet's disagree in what was said, which of the two
+    readings was said, as `scribe pick` does; --pick-model and --pick-context
+    are its --model and --context. It is asked
     through the `claude` CLI on PATH: the words, not the audio, go to
     Anthropic. No pick runs with --vote or --no-cross-check, or where Parakeet
     could not run. Nor does the pick change the exit code or the path

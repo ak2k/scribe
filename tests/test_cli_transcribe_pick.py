@@ -162,13 +162,21 @@ def test_the_default_run_takes_parakeets_reading_where_the_model_picks_it(
     ]
 
 
+def _filled(tmp_path: Path) -> bytes:
+    """The bytes the fill alone makes of xAI's words and the Parakeet transcript kept."""
+    xai = tmp_path / "xai.json"
+    assert _transcribe(tmp_path, "--no-cross-check", "--out", str(xai)).exit_code == 0
+    filled, _ = fill_holes(Transcript.load(xai), Transcript.load(tmp_path / "clip.parakeet.json"))
+    expected = tmp_path / "expected.json"
+    filled.dump(expected)
+    return expected.read_bytes()
+
+
 def test_no_pick_builds_no_backend_and_writes_the_fill_alone(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _setup(monkeypatch)
     made = _patch(monkeypatch)
-    xai = tmp_path / "xai.json"
-    assert _transcribe(tmp_path, "--no-cross-check", "--out", str(xai)).exit_code == 0
 
     result = _transcribe(tmp_path, "--no-pick")
 
@@ -176,10 +184,7 @@ def test_no_pick_builds_no_backend_and_writes_the_fill_alone(
     out = tmp_path / "clip.transcript.json"
     assert result.stdout == f"{out}\n"
     assert result.stderr.splitlines()[1:] == FILL_LINES
-    filled, _ = fill_holes(Transcript.load(xai), Transcript.load(tmp_path / "clip.parakeet.json"))
-    expected = tmp_path / "expected.json"
-    filled.dump(expected)
-    assert out.read_bytes() == expected.read_bytes()
+    assert out.read_bytes() == _filled(tmp_path)
     assert made == []
 
 
@@ -235,8 +240,6 @@ def test_a_pick_that_fails_is_one_line_and_keeps_the_filled_words(
 ) -> None:
     _setup(monkeypatch)
     made = arrange(monkeypatch)
-    filled = tmp_path / "filled.json"
-    assert _transcribe(tmp_path, "--no-pick", "--out", str(filled)).exit_code == 0
 
     result = _transcribe(tmp_path)
 
@@ -247,9 +250,9 @@ def test_a_pick_that_fails_is_one_line_and_keeps_the_filled_words(
     assert lines[-1].startswith(f"scribe: {message}"), lines
     assert lines[-1].endswith(KEPT)
     assert not [line for line in lines[1:-1] if "pick" in line], lines
-    assert out.read_bytes() == filled.read_bytes()
     assert bool(made and made[0].calls) == called
     assert not [path for path in tmp_path.iterdir() if path.name.startswith(".")]
+    assert out.read_bytes() == _filled(tmp_path)
 
 
 def test_some_chunks_failing_prints_both_lines_and_exits_zero(
