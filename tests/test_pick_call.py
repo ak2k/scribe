@@ -329,7 +329,11 @@ def test_a_reference_reading_ten_words_longer_is_put_in_whatever_was_answered(
     assert picking.spots == (Spot(range(2, 3), range(2, 2 + len(heard_as))),)
     assert picking.picked == (side,)
     params = picking.transcript.engine.params
-    assert params.get("pick_restored", 0) == int(side == "restored")
+    assert (
+        params["pick_to_reference"],
+        params["pick_unsure"],
+        params.get("pick_restored", 0),
+    ) == (int(side == "reference"), int(side == "unsure"), int(side == "restored"))
     assert _record(picking.transcript)[0][4] == side
     put_in = side in {"restored", "reference"}
     assert _texts(picking.transcript) == _texts(heard if put_in else said)
