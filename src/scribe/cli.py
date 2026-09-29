@@ -42,7 +42,13 @@ from scribe.gaps import check_gaps, clock, format_gap
 from scribe.log import configure
 from scribe.outputs import plan_outputs, prove_writable, sibling
 from scribe.parakeet import ParakeetMlx
-from scribe.pick import DEFAULT_PICK_MODEL, GUARDED_DROP, PICK_PROMPT_VERSION, pick_readings
+from scribe.pick import (
+    DEFAULT_PICK_MODEL,
+    GUARDED_DROP,
+    PICK_PROMPT_VERSION,
+    find_spots,
+    pick_readings,
+)
 from scribe.schema import Engine, Source, Transcript, from_xai_response
 from scribe.speakers import (
     DEFAULT_SPEAKER_MODEL,
@@ -238,6 +244,19 @@ def transcribe(
         "--cross-check/--no-cross-check",
         help="Fill holes in the words from a local Parakeet transcript of the same audio.",
     ),
+    pick: bool = typer.Option(
+        True,
+        "--pick/--no-pick",
+        help="Where the filled words and Parakeet's disagree, have a model pick which was said.",
+    ),
+    pick_model: str = typer.Option(
+        DEFAULT_PICK_MODEL, "--pick-model", help="Model the pick is asked for."
+    ),
+    pick_context: str | None = typer.Option(
+        None,
+        "--pick-context",
+        help="Background on the recording for the pick. Never added to the transcript.",
+    ),
 ) -> None:
     """Transcribe an audio file with xAI speech-to-text.
 
@@ -275,6 +294,15 @@ def transcribe(
     checked by loudness as `scribe gaps` does. Nothing in the cross-check
     changes the exit code or the path printed: a failure is one stderr line,
     and --out keeps xAI's words.
+
+    Unless --no-pick is given, once Parakeet's words have filled --out, a model
+    then picks, at each spot where they and --out's words disagree in what was
+    said, which of the two readings was said, as `scribe pick` does;
+    --pick-model and --pick-context are its --model and --context. It is asked
+    through the `claude` CLI on PATH: the words, not the audio, go to
+    Anthropic. No pick runs with --vote or --no-cross-check, or where Parakeet
+    could not run. Nor does the pick change the exit code or the path
+    printed: a failure is one stderr line, and --out keeps the filled words.
     """
     started = time.monotonic()
     try:
@@ -343,7 +371,9 @@ def transcribe(
     spoken = "audio" if transcript.duration is None else f"{transcript.duration:.1f} s of audio"
     typer.echo(f"transcribed {spoken} in {time.monotonic() - started:.1f} s", err=True)
     if cross_check:
-        _cross_check(audio_path, transcript, plan["--out"], inputs)
+        checked = _cross_check(audio_path, transcript, plan["--out"], inputs)
+        if pick and checked is not None:
+            _pick(*checked, plan["--out"], model=pick_model, context=pick_context)
     typer.echo(str(plan["--out"]))
 
 
@@ -366,8 +396,16 @@ def _replace(transcript: Transcript, path: Path) -> None:
         temporary.unlink(missing_ok=True)
 
 
-def _cross_check(audio: Path, transcript: Transcript, out: Path, inputs: dict[str, Path]) -> None:
-    """Fill `out`'s holes from Parakeet, or check them by loudness; never fail the run."""
+def _cross_check(
+    audio: Path, transcript: Transcript, out: Path, inputs: dict[str, Path]
+) -> tuple[Transcript, Transcript] | None:
+    """Fill `out`'s holes from Parakeet, or check them by loudness; never fail the run.
+
+    Returns:
+        The filled transcript and Parakeet's, when the filled one was written
+        to `out`; otherwise None.
+
+    """
     label = "the Parakeet transcript"
     try:
         kept: Path | None = plan_outputs(
@@ -394,12 +432,12 @@ def _cross_check(audio: Path, transcript: Transcript, out: Path, inputs: dict[st
             found = check_gaps(transcript, audio)
         except AppError as exc:
             _warn(f"no cross-check ran: {exc}")
-            return
+            return None
         for gap in found.gaps:
             _warn(possible_drop(gap.start, gap.end))
         flags = f"{len(found.gaps)} {'hole' if len(found.gaps) == 1 else 'holes'} flagged"
         _warn(f"cross-check by loudness: {flags}")
-        return
+        return None
     if kept is not None:
         try:
             reference.dump(kept)
@@ -411,6 +449,40 @@ def _cross_check(audio: Path, transcript: Transcript, out: Path, inputs: dict[st
         _replace(filled, out)
     except (OSError, ValueError) as exc:
         _warn(f"cannot write the filled transcript to {out}: {exc}; it keeps xAI's words")
+        return None
+    return filled, reference
+
+
+def _pick(
+    filled: Transcript, reference: Transcript, out: Path, *, model: str, context: str | None
+) -> None:
+    """Pick between `filled`'s words and `reference`'s where they disagree; never fail the run."""
+    # The pick logs through structlog, which prints to stdout unconfigured.
+    configure("warning")
+    kept = "--out keeps the filled words"
+    for role, words in (("the filled transcript's", filled.words), ("Parakeet's", reference.words)):
+        # xAI's words can step back, and the pick refuses words out of start order.
+        if (index := first_decrease(words)) is not None:
+            _warn(f"not picking: {role} word {index} starts before word {index - 1}; {kept}")
+            return
+    if not find_spots(filled.words, reference.words):
+        return
+    try:
+        backend = ClaudeCliBackend(model=model, disable_tools=True)
+        backend.resolve()
+    except AppError as exc:
+        _warn(f"not picking: {exc}; {kept}")
+        return
+    picking = pick_readings(filled, reference, backend, context=context)
+    if len(picking.failed) == len(picking.chunks):
+        _warn(f"the pick failed on {len(picking.failed)} of {len(picking.chunks)} chunks; {kept}")
+        return
+    try:
+        _replace(picking.transcript, out)
+    except (OSError, ValueError) as exc:
+        _warn(f"cannot write the picked transcript to {out}: {exc}; {kept}")
+        return
+    _report_pick(picking, backend.model)
 
 
 def _speakers_metadata(result: Relabeling, backend: ClaudeCliBackend, *, words: int) -> str:
