@@ -61,8 +61,8 @@ MERGE_GAP = 1
 # Matched tokens on each side of a spot that its readings are compared with, so
 # a repeat or a number across the spot's edge collapses as it does inside.
 CONTEXT_TOKENS = 2
-# A reference reading this many words shorter than the transcript's is not
-# applied when picked: a wrong removal loses speech the fill never puts back.
+# A reference reading this many spoken words shorter than the transcript's is
+# not applied when picked: a wrong removal loses speech the fill never puts back.
 GUARDED_DROP = 5
 
 # fmt: off
@@ -462,7 +462,7 @@ class Picking:
     spots: tuple[Spot, ...]
     # One per spot: whose reading it keeps, or "unsure" or "failed" for the
     # transcript's kept without a pick, or "guarded" for the transcript's kept
-    # where the reference's was picked, GUARDED_DROP words shorter or more.
+    # where the reference's was picked, GUARDED_DROP spoken words shorter or more.
     picked: tuple[Side, ...]
     chunks: tuple[ChunkPick, ...]
 
@@ -559,6 +559,11 @@ def read_reply(answer: Completion, asked: Collection[int]) -> dict[int, Label] |
 
 def _joined(words: Sequence[Word]) -> str:
     return " ".join(word.text for word in words)
+
+
+def _spoken_count(words: Sequence[Word], held: range) -> int:
+    """Count the words held that were said: Parakeet writes some punctuation as a word."""
+    return sum(1 for index in held if norm_tokens(words[index].text))
 
 
 def _target(words: Sequence[Word], start: int, end: int, marks: dict[int, tuple[int, str]]) -> str:
@@ -669,9 +674,10 @@ def pick_readings(
 
     Returns:
         The picking. Its transcript has the reference's words at each spot
-        picked for them, `_apply`'s way, save where they are GUARDED_DROP
-        words or more fewer than the transcript's: that pick is guarded and
-        keeps the transcript's. Every other word is as it was, its text
+        picked for them, `_apply`'s way, save where they hold GUARDED_DROP
+        or more fewer spoken words than the transcript's, a word of bare
+        punctuation not being one: that pick is guarded and keeps the
+        transcript's. Every other word is as it was, its text
         rebuilt from its words and no turns; its engine params record the
         model, the prompt version, the reference, the counts, and each spot
         as [start, end, transcript words, reference words, picked], its start
@@ -736,7 +742,8 @@ def pick_readings(
         for number in ids:
             side = _side(labels[number], reference_is_a=orders[number - 1])
             spot = spots[number - 1]
-            if side == "reference" and len(spot.transcript) - len(spot.reference) >= GUARDED_DROP:
+            dropped = _spoken_count(said, spot.transcript) - _spoken_count(heard, spot.reference)
+            if side == "reference" and dropped >= GUARDED_DROP:
                 side = "guarded"
             picked[number - 1] = side
         chunks.append(ChunkPick(index, ids))

@@ -23,6 +23,7 @@ from scribe.pick import (
 )
 from scribe.schema import Engine, Transcript, Word
 from scribe.speakers import render
+from scribe.vote import norm_tokens
 from tests.pick_fakes import (
     answering,
     choosing,
@@ -86,6 +87,11 @@ def _completion(text: str, stop_reason: str | None = "end_turn") -> Completion:
 
 def _texts(result: Transcript) -> list[str]:
     return [word.text for word in result.words]
+
+
+def _spoken(words: Sequence[Word], held: range) -> int:
+    """Count the words held that were said: a word of bare punctuation was not."""
+    return sum(1 for index in held if norm_tokens(words[index].text))
 
 
 def _record(result: Transcript) -> list[list[object]]:
@@ -236,20 +242,22 @@ _COLORS = ("red", "green", "blue", "pink", "gray", "brown", "black", "white", "g
 
 
 @pytest.mark.parametrize(
-    ("count", "heard_as", "side"),
+    ("said_as", "heard_as", "side"),
     [
-        (10, ("purple",), "guarded"),
-        (6, ("purple",), "guarded"),
-        (6, ("purple", "violet"), "reference"),
-        (1, ("purple", "violet", "lilac", "plum", "mauve", "puce"), "reference"),
+        (_COLORS[:10], ("purple",), "guarded"),
+        (_COLORS[:6], ("purple",), "guarded"),
+        (_COLORS[:6], ("purple", "violet"), "reference"),
+        (_COLORS[:1], ("purple", "violet", "lilac", "plum", "mauve", "puce"), "reference"),
+        (_COLORS[:7], ("purple", ",", "violet"), "guarded"),
+        ((*_COLORS[:2], ".", *_COLORS[2:5]), ("purple",), "reference"),
     ],
-    ids=["10-to-1", "6-to-1", "6-to-2", "1-to-6"],
+    ids=["10-to-1", "6-to-1", "6-to-2", "1-to-6", "7-to-2-and-a-comma", "5-and-a-period-to-1"],
 )
 def test_a_reference_pick_dropping_five_words_or_more_keeps_the_transcripts(
-    count: int, heard_as: tuple[str, ...], side: str
+    said_as: tuple[str, ...], heard_as: tuple[str, ...], side: str
 ) -> None:
     # Both sides' readings span the same seconds, so "at" is heard when it was said.
-    span = max(count, len(heard_as))
+    span = max(len(said_as), len(heard_as))
 
     def spoken(texts: Sequence[str], speaker: int | None) -> list[Word]:
         starts = [2 + index * span / len(texts) for index in range(len(texts))]
@@ -262,13 +270,13 @@ def test_a_reference_pick_dropping_five_words_or_more_keeps_the_transcripts(
             Word(text="at", start=2 + span, end=2.4 + span, speaker=speaker),
         ]
 
-    said = transcript(spoken(_COLORS[:count], 0))
+    said = transcript(spoken(said_as, 0))
     heard = transcript(spoken(heard_as, None), engine="parakeet-mlx")
     backend = FakeSpeakerBackend(reply=answering(choosing({" ".join(heard_as)})))
 
     picking = pick_readings(said, heard, backend)
 
-    assert picking.spots == (Spot(range(2, 2 + count), range(2, 2 + len(heard_as))),)
+    assert picking.spots == (Spot(range(2, 2 + len(said_as)), range(2, 2 + len(heard_as))),)
     assert picking.picked == (side,)
     guarded = side == "guarded"
     assert _texts(picking.transcript) == _texts(said if guarded else heard)
@@ -690,7 +698,7 @@ def test_no_reference_pick_applied_drops_five_words_and_the_rest_still_hold(
     picking = pick_readings(said, heard, backend)
 
     for spot, side in zip(picking.spots, picking.picked, strict=True):
-        dropped = len(spot.transcript) - len(spot.reference)
+        dropped = _spoken(said.words, spot.transcript) - _spoken(heard.words, spot.reference)
         event(f"{side}, {'5 or more' if dropped >= 5 else 'fewer'} dropped")
         assert side != "reference" or dropped < 5
         assert side != "guarded" or dropped >= 5
