@@ -64,6 +64,10 @@ CONTEXT_TOKENS = 2
 # A reference reading this many spoken words shorter than the transcript's is
 # not applied when picked: a wrong removal loses speech the fill never puts back.
 GUARDED_DROP = 5
+# A reference reading this many spoken words longer than the transcript's is
+# applied whatever the pick: keeping the transcript's loses speech the fill
+# never puts back.
+RESTORED_ADD = 10
 
 # fmt: off
 _CONTRACTIONS = {
@@ -348,7 +352,7 @@ def find_spots(transcript: Sequence[Word], reference: Sequence[Word]) -> list[Sp
     return spots
 
 
-Side = Literal["transcript", "reference", "unsure", "failed", "guarded"]
+Side = Literal["transcript", "reference", "unsure", "failed", "guarded", "restored"]
 Label = Literal["A", "B", "unsure"]
 # Why a reply is unusable, in the order they are checked: the first that holds.
 Cause = Literal[
@@ -461,8 +465,10 @@ class Picking:
     transcript: Transcript
     spots: tuple[Spot, ...]
     # One per spot: whose reading it keeps, or "unsure" or "failed" for the
-    # transcript's kept without a pick, or "guarded" for the transcript's kept
-    # where the reference's was picked, GUARDED_DROP spoken words shorter or more.
+    # transcript's kept without a pick. "guarded" is the transcript's kept where
+    # the reference's was picked, GUARDED_DROP spoken words shorter or more.
+    # "restored" is the reference's put in where it was not picked, RESTORED_ADD
+    # spoken words longer or more.
     picked: tuple[Side, ...]
     chunks: tuple[ChunkPick, ...]
 
@@ -598,13 +604,15 @@ def _apply(
     spots: Sequence[Spot],
     picked: Sequence[Side],
 ) -> list[Word]:
-    """Put the reference's words in place of the transcript's at every spot picked for them.
+    """Put the reference's words in place of the transcript's at every spot picked or restored.
 
     A word put in keeps its text; its start is held between the starts of the
     nearest kept words on either side, its end no earlier than its start, and
     it takes the speaker of the replaced word nearest it in time.
     """
-    chosen = [spot for spot, side in zip(spots, picked, strict=True) if side == "reference"]
+    chosen = [
+        spot for spot, side in zip(spots, picked, strict=True) if side in {"reference", "restored"}
+    ]
     gone = {index for spot in chosen for index in spot.transcript}
     kept = [index for index in range(len(transcript)) if index not in gone]
     at = {spot.transcript.start: spot for spot in chosen}
@@ -677,7 +685,9 @@ def pick_readings(
         picked for them, `_apply`'s way, save where they hold GUARDED_DROP
         or more fewer spoken words than the transcript's, a word of bare
         punctuation not being one: that pick is guarded and keeps the
-        transcript's. Every other word is as it was, its text
+        transcript's. Where they hold RESTORED_ADD or more spoken words more
+        and the chunk's reply was used, they are put in whatever was picked:
+        the spot is restored. Every other word is as it was, its text
         rebuilt from its words and no turns; its engine params record the
         model, the prompt version, the reference, the counts, and each spot
         as [start, end, transcript words, reference words, picked], its start
@@ -745,6 +755,8 @@ def pick_readings(
             dropped = _spoken_count(said, spot.transcript) - _spoken_count(heard, spot.reference)
             if side == "reference" and dropped >= GUARDED_DROP:
                 side = "guarded"
+            elif side != "reference" and -dropped >= RESTORED_ADD:
+                side = "restored"
             picked[number - 1] = side
         chunks.append(ChunkPick(index, ids))
 
@@ -759,6 +771,7 @@ def pick_readings(
         "pick_spots": len(spots),
         "pick_to_reference": picked.count("reference"),
         "pick_guarded": picked.count("guarded"),
+        "pick_restored": picked.count("restored"),
         "pick_unsure": picked.count("unsure"),
         "pick_failed": picked.count("failed"),
         "pick_chunks": len(chunks),

@@ -46,6 +46,7 @@ from scribe.pick import (
     DEFAULT_PICK_MODEL,
     GUARDED_DROP,
     PICK_PROMPT_VERSION,
+    RESTORED_ADD,
     find_spots,
     pick_readings,
 )
@@ -1243,6 +1244,11 @@ def _report_pick(picking: Picking, model: str) -> None:
             f"; {guarded} guarded, keeping the transcript's words where the reading "
             f"picked is {GUARDED_DROP} or more words shorter"
         )
+    if restored := picked.count("restored"):
+        line += (
+            f"; {restored} restored, putting in the reference's words where they are "
+            f"{RESTORED_ADD} or more words longer than the transcript's"
+        )
     typer.echo(line, err=True)
     if picking.failed:
         listed = ", ".join(str(chunk.index) for chunk in picking.failed)
@@ -1291,7 +1297,10 @@ def pick_command(
     each with REFERENCE's times held between the words around it and the
     speaker of the nearest word replaced, unless they are 5 or more fewer
     than TRANSCRIPT's: that pick is guarded and TRANSCRIPT's words stay, as a
-    wrong removal loses speech. Every other word stays as it was.
+    wrong removal loses speech. Where REFERENCE's reading has 10 or more words
+    more than TRANSCRIPT's, its words go in the same way whatever the model
+    picks: the spot is restored, as keeping the shorter loses speech. Every
+    other word stays as it was.
     The result records each spot and its pick in its engine params, and has
     no turns: run `scribe turns` on it next.
 
