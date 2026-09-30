@@ -324,10 +324,10 @@ def transcribe(
     --no-pick, --vote or --no-cross-check, or where the pick finds no spot even
     though the fill filled spans, no list is written, and a file or link an
     earlier run left at that path is removed. A link there to an input or to a
-    directory stays, named in one stderr line, and a run that exits 2 leaves
-    the list as it was. Nor does the list change the exit code or the path
-    printed: a failure is one stderr line, and a list that cannot be written
-    leaves none from an earlier run.
+    directory stays, named in one stderr line, and a run that exits 2 before
+    it changes --out leaves the list as it was. Nor does the list change the
+    exit code or the path printed: a failure is one stderr line, and a list
+    that cannot be written leaves none from an earlier run.
     """
     started = time.monotonic()
     try:
