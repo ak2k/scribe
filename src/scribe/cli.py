@@ -317,12 +317,14 @@ def transcribe(
 
     Where the pick rewrites --out, the list `scribe disputes` writes for it,
     without clips, goes beside it as BASE.disputes.md, and its counts are
-    printed. Where it does not, as with --no-pick, --vote or --no-cross-check,
-    or where it finds no spot even though the fill filled spans, no list is
-    written, and a file or link an earlier run left at that path is removed.
-    Nor does the list change the exit code or the path printed: a failure is
-    one stderr line, and a list that cannot be written leaves none from an
-    earlier run.
+    printed. Where the run rewrites --out but the pick does not, as with
+    --no-pick, --vote or --no-cross-check, or where the pick finds no spot even
+    though the fill filled spans, no list is written, and a file or link an
+    earlier run left at that path is removed. A link there to an input or to a
+    directory stays, named in one stderr line, and a run that exits 2 leaves
+    the list as it was. Nor does the list change the exit code or the path
+    printed: a failure is one stderr line, and a list that cannot be written
+    leaves none from an earlier run.
     """
     started = time.monotonic()
     try:

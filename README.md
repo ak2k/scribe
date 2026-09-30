@@ -83,11 +83,13 @@ unverified. The command sends nothing over the network.
 
 `transcribe` writes this list itself, without clips, beside `--out`
 (`talk.disputes.md`) wherever its pick rewrites the transcript, and prints its
-counts. Where the pick does not, as with `--no-pick`, `--vote` or
-`--no-cross-check`, or where it finds no spot even though the fill filled
-spans, no list is written, and a list an earlier run left there is removed.
-The list never changes the exit code: a failure in it is one line, and a list
-that cannot be written leaves none from an earlier run.
+counts. Where the run rewrites `--out` but the pick does not, as with
+`--no-pick`, `--vote` or `--no-cross-check`, or where the pick finds no spot
+even though the fill filled spans, no list is written, and a list an earlier
+run left there is removed. A link there to an input or to a directory stays,
+named in one line, and a run that exits 2 leaves the list as it was. The list
+never changes the exit code: a failure in it is one line, and a list that
+cannot be written leaves none from an earlier run.
 
 `turns` groups the words into speaker turns. A transcript that carries turns
 but no words keeps its turns as they are.
