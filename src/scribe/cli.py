@@ -1399,9 +1399,10 @@ def disputes_command(
     Writes only --out and, with --clips, its clips directory; sends nothing
     over the network. Exit 2 is a bad input, a transcript with no pick record,
     an unwritable output, --audio without --clips, or, with --clips, audio
-    that is missing or not TRANSCRIPT's, no ffmpeg, or a clips directory that
-    is not empty, all found before anything is written. A failed cut exits 2
-    too: the clips cut before it stay, and no list is written.
+    that is missing or not TRANSCRIPT's, no ffmpeg, a clips directory that is
+    not empty, or an entry that starts at or past the audio's end, all found
+    before anything is written. A failed cut exits 2 too: the clips cut before
+    it stay, and no list is written.
     """
     try:
         if audio is not None and not clips:

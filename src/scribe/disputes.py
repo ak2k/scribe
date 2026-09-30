@@ -339,10 +339,12 @@ def _window(entry: Dispute, duration: float | None) -> tuple[float, float]:
     """Return where an entry's clip starts and how long it runs, in seconds."""
     start, end = max(entry.start - CLIP_MARGIN, 0.0), entry.end + CLIP_MARGIN
     if duration is not None:
-        if start >= duration:
+        # The entry's own start, not its clip's: a clip of an entry just past the
+        # end would hold only the lead-in, none of the entry.
+        if entry.start >= duration:
             raise InputValidationError(
-                f"entry {entry.number} at {hms(entry.start)} starts past the recording's end, "
-                f"{hms(duration)}"
+                f"entry {entry.number} starts at {hms(entry.start)}, at or past the "
+                f"recording's end at {hms(duration)}"
             )
         end = min(end, duration)
     return start, end - start
@@ -396,7 +398,7 @@ def cut_clips(
     Raises:
         ToolMissingError: ffmpeg is not on PATH.
         InputValidationError: `directory` is not a directory or is not empty,
-            or an entry starts past the recording's end.
+            or an entry starts at or past the recording's end.
         ExternalServiceError: ffmpeg failed; the clips cut before it stay.
 
     """

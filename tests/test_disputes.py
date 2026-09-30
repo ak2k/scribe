@@ -598,16 +598,24 @@ def test_a_missing_source_audio_is_refused_before_any_clip(
     assert not (tmp_path / "meeting.disputes.clips").exists()
 
 
-def test_a_clip_past_the_recordings_end_is_refused_before_any_clip(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize(
+    ("start", "shown"),
+    [
+        pytest.param(60.0, "00:01:00", id="at-the-end"),
+        pytest.param(61.0, "00:01:01", id="within-the-lead-in"),
+        pytest.param(70.0, "00:01:10", id="past-the-lead-in"),
+    ],
+)
+def test_an_entry_starting_at_or_past_the_recordings_end_is_refused_before_any_clip(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, start: float, shown: str
 ) -> None:
     fake = _ffmpeg(monkeypatch)
-    path = _recording(tmp_path, [*CLIPPED, (70.0, 71.0, "cat", "hat", "transcript")])
+    path = _recording(tmp_path, [*CLIPPED, (start, start + 1.0, "cat", "hat", "transcript")])
 
     result = _invoke(path, "--clips")
 
     _refused_before_anything(result, fake, tmp_path)
-    assert "00:01:10" in result.stderr
+    assert f"starts at {shown}, at or past the recording's end" in result.stderr
     assert not (tmp_path / "meeting.disputes.clips").exists()
 
 
@@ -757,6 +765,7 @@ def test_the_help_says_what_it_writes_and_that_it_sends_nothing() -> None:
     assert ".disputes.md" in text
     assert "sends nothing over the network" in text
     assert "Unlisted text is unverified" in text
+    assert "an entry that starts at or past the audio's end" in text
 
 
 _WORDS = ["the", "cat", "hat", "a", "sat", "uh", "gonna", "going", "to", "Cat.", "mat", "on"]
