@@ -21,7 +21,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Literal
 
-from pydantic import AfterValidator, ConfigDict, Json, TypeAdapter, ValidationError
+from pydantic import AfterValidator, ConfigDict, Json, NonNegativeInt, TypeAdapter, ValidationError
 
 from scribe.curated import fill_ranges
 from scribe.errors import InputValidationError, ToolMissingError
@@ -65,6 +65,10 @@ UNLISTED = (
     "them), and words both got wrong the same way. Unlisted text is unverified."
 )
 QUOTES = "Quotes are the words before cleanup; the reading copy may word them differently."
+FILL_TIMED = (
+    "Fill quotes are bounded by time only: this record does not say how many words each fill "
+    "put in, so a quote may hold a word the transcript already had."
+)
 
 _Row = tuple[FiniteFloat, FiniteFloat, str, str, Side]
 
@@ -83,6 +87,7 @@ _PICK_RECORD = TypeAdapter(
     Json[list[Annotated[_Row, AfterValidator(_ordered)]]],
     config=ConfigDict(strict=True),
 )
+_FILL_COUNTS = TypeAdapter(Json[list[NonNegativeInt]], config=ConfigDict(strict=True))
 
 
 @dataclass(frozen=True)
@@ -105,8 +110,8 @@ class Dispute:
     # heard nothing there.
     other: str
     other_by: str
-    # The transcript's words inside a fill's span, or starting in an unresolved
-    # one, ends included; 0 at a spot.
+    # The words quoted at a fill, or the transcript's words starting in an
+    # unresolved span, ends included; 0 at a spot.
     words: int
 
 
@@ -121,6 +126,9 @@ class Disputes:
     reference_engine: str
     fill_engine: str
     entries: tuple[Dispute, ...]
+    # The record has fill spans but no fill_counts, so each fill quotes the
+    # words inside its span's times.
+    fills_by_time: bool
 
 
 def _record(transcript: Transcript, path: Path) -> list[_Row]:
@@ -155,6 +163,52 @@ def _ranges(transcript: Transcript, path: Path, key: str) -> list[tuple[float, f
                 f"{path} has a malformed {key}: range {index} starts before the recording"
             )
     return ranges
+
+
+def _counts(transcript: Transcript, path: Path, ranges: int) -> list[int] | None:
+    recorded = transcript.engine.params.get("fill_counts")
+    if recorded is None:
+        return None
+    try:
+        counts = _FILL_COUNTS.validate_python(recorded)
+    except ValidationError as exc:
+        first = exc.errors()[0]
+        where = ".".join(str(part) for part in first["loc"])
+        raise InputValidationError(
+            f"{path} has a malformed fill_counts: {first['msg']} (at {where or 'top level'})"
+        ) from exc
+    if len(counts) != ranges:
+        raise InputValidationError(
+            f"{path} has a malformed fill_counts: not one count per range of fill_ranges "
+            f"({len(counts)} against {ranges})"
+        )
+    return counts
+
+
+def _filled(
+    words: Sequence[Word], path: Path, index: int, span: tuple[float, float], count: int | None
+) -> list[str]:
+    start, end = span
+    if count is None:
+        # Time alone cannot tell the word that closed the hole from the fill's
+        # own words when it lies inside the span, or at its end with no length.
+        return [word.text for word in words if start <= word.start and word.end <= end]
+    # The fill put its words in as one run, just before the word that closed the
+    # hole, the first starting at the span's start.
+    first = next((at for at, word in enumerate(words) if word.start >= start), len(words))
+    held = words[first : first + count]
+    if len(held) < count:
+        raise InputValidationError(
+            f"{path} has a fill_counts of {count} for range {index} of fill_ranges, but only "
+            f"{len(held)} words start at or after it"
+        )
+    return [word.text for word in held]
+
+
+def _started(words: Sequence[Word], span: tuple[float, float]) -> list[str]:
+    # An unresolved span's ends are window bounds, so a word starting on one is counted.
+    start, end = span
+    return [word.text for word in words if start <= word.start <= end]
 
 
 def _name(engine: str) -> str:
@@ -202,16 +256,9 @@ def _spot(row: _Row, said: str, heard: str) -> Dispute:
 
 
 def _span(
-    kind: Kind, words: Sequence[Word], start: float, end: float, by: str, other: str
+    kind: Kind, held: Sequence[str], span: tuple[float, float], by: str, other: str
 ) -> Dispute:
-    # A fill's span ends where its last inserted word does, and the word closing
-    # the hole can start right there; an unresolved span's ends are window
-    # bounds, so a word starting on one is counted.
-    held = [
-        word.text
-        for word in words
-        if start <= word.start and (word.end if kind == "fill" else word.start) <= end
-    ]
+    start, end = span
     return Dispute(
         number=0,
         band="A",
@@ -244,8 +291,8 @@ def find_disputes(transcript: Transcript, path: Path) -> Disputes:
 
     Raises:
         InputValidationError: there is no pick_record, or it, the engine it
-            names or the fill's ranges are malformed, a time before 0 among
-            them.
+            names, the fill's ranges or its counts are malformed, a time
+            before 0 among them, or a count runs past the transcript's words.
 
     """
     rows = _record(transcript, path)
@@ -253,14 +300,23 @@ def find_disputes(transcript: Transcript, path: Path) -> Disputes:
     reference = _engine_param(transcript, path, "pick_reference", None)
     filler = _engine_param(transcript, path, "fill_reference", reference)
     said, heard = engine.name, _name(reference)
+    words = transcript.words
+    fills = _ranges(transcript, path, "fill_ranges")
+    counts = _counts(transcript, path, len(fills))
     entries = [_spot(row, said, heard) for row in rows]
     entries += [
-        _span("fill", transcript.words, start, end, _name(filler), said)
-        for start, end in _ranges(transcript, path, "fill_ranges")
+        _span(
+            "fill",
+            _filled(words, path, index, span, None if counts is None else counts[index]),
+            span,
+            _name(filler),
+            said,
+        )
+        for index, span in enumerate(fills)
     ]
     entries += [
-        _span("unresolved", transcript.words, start, end, "", "")
-        for start, end in _ranges(transcript, path, "fill_unresolved_ranges")
+        _span("unresolved", _started(words, span), span, "", "")
+        for span in _ranges(transcript, path, "fill_unresolved_ranges")
     ]
     ranked = sorted(entries, key=lambda entry: (entry.band, entry.start, entry.end))
     return Disputes(
@@ -269,6 +325,7 @@ def find_disputes(transcript: Transcript, path: Path) -> Disputes:
         reference_engine=reference,
         fill_engine=filler,
         entries=tuple(replace(entry, number=number) for number, entry in enumerate(ranked, 1)),
+        fills_by_time=bool(fills) and counts is None,
     )
 
 
@@ -333,6 +390,7 @@ def render_disputes(disputes: Disputes, clips: Mapping[int, Path] | None = None)
         "",
         QUOTES,
         "",
+        *([FILL_TIMED, ""] if disputes.fills_by_time else []),
         "Entries by band, likeliest errors first:",
         "",
         *(f"- {band}. {label}: {bands[band]}" for band, label in BANDS.items()),
