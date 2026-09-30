@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import stat
 import subprocess
 from functools import partial
@@ -26,6 +27,7 @@ from tests.speakers_fakes import FakeSpeakerBackend
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
+    from types import FrameType
 
     from typer.testing import Result
 
@@ -831,7 +833,17 @@ def test_a_fifo_at_the_lists_path_is_one_line_not_a_hang(
     listed = tmp_path / "clip.disputes.md"
     os.mkfifo(listed)
 
-    result = _transcribe(tmp_path)
+    def hung(_signum: int, _frame: FrameType | None) -> NoReturn:
+        # Not an OSError, which the write would report as one line and carry on.
+        raise AssertionError("the run hung opening the FIFO")
+
+    previous = signal.signal(signal.SIGALRM, hung)
+    signal.alarm(10)
+    try:
+        result = _transcribe(tmp_path)
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, previous)
 
     assert result.exit_code == 0, result.output
     assert result.stdout == f"{tmp_path / 'clip.transcript.json'}\n"
