@@ -44,6 +44,10 @@ UNLISTED = (
     "them), and words both got wrong the same way. Unlisted text is unverified."
 )
 QUOTES = "Quotes are the words before cleanup; the reading copy may word them differently."
+FILL_TIMED = (
+    "Fill quotes are bounded by time only: this record does not say how many words each fill "
+    "put in, so a quote may hold a word the transcript already had."
+)
 FOLDED = (
     "Same words once folded; the difference is with the words around the spot "
     "(for example a number split differently)"
@@ -270,32 +274,146 @@ def test_a_fill_entry_carries_the_words_delivered_in_its_span() -> None:
     )
 
 
-def test_a_fill_entry_holds_only_the_words_the_fill_put_in() -> None:
-    own = [Word(text="before", start=0.0, end=0.4), Word(text="after", start=3.0, end=3.3)]
-    heard = [
-        Word(text=text, start=start, end=end)
-        for text, start, end in [
-            ("one", 1.0, 1.4),
-            ("two", 1.8, 2.2),
-            ("three", 2.5, 3.0),
-            ("after", 3.0, 3.3),
-        ]
-    ]
+Timed = tuple[str, float, float]
+
+
+def _filled(own: Sequence[Timed], heard: Sequence[Timed]) -> Transcript:
+    """Fill a picked transcript of `own` from `heard`, as the fill does."""
     reference = Transcript(
         source=Source(kind="audio", ref="recording.mp3"),
         engine=Engine(name="parakeet-mlx", model="mlx-community/parakeet-tdt-0.6b-v3"),
         duration=None,
         text="",
-        words=heard,
+        words=[Word(text=text, start=start, end=end) for text, start, end in heard],
     )
-    filled, _ = fill_holes(_transcript(words=own), reference)
-    # The word closing the hole starts where the last inserted word ends.
-    assert filled.engine.params["fill_ranges"] == "[[1.0, 3.0]]"
+    own_words = [Word(text=text, start=start, end=end) for text, start, end in own]
+    filled, _ = fill_holes(_transcript(words=own_words), reference)
+    return filled
 
-    (entry,) = find_disputes(filled, Path("m.json")).entries
 
+ONE_TWO: list[Timed] = [("one", 1.0, 1.4), ("two", 1.8, 2.2)]
+
+
+@pytest.mark.parametrize(
+    ("own", "heard", "ranges"),
+    [
+        pytest.param(
+            [("before", 0.0, 0.4), ("after", 3.0, 3.3)],
+            [*ONE_TWO, ("three", 2.5, 3.0), ("after", 3.0, 3.3)],
+            "[[1.0, 3.0]]",
+            id="closer-starts-at-the-span-end",
+        ),
+        pytest.param(
+            [("before", 0.0, 0.4), ("the", 3.0, 3.2)],
+            [*ONE_TWO, ("three", 2.5, 3.25)],
+            "[[1.0, 3.25]]",
+            id="closer-inside-the-span",
+        ),
+        pytest.param(
+            [("before", 0.0, 0.4), ("the", 3.0, 3.2), ("end", 3.4, 3.7)],
+            [*ONE_TWO, ("three", 2.5, 3.8)],
+            "[[1.0, 3.8]]",
+            id="span-overshoots-the-next-word",
+        ),
+        pytest.param(
+            [("before", 0.0, 0.4), ("after", 3.0, 3.0)],
+            [*ONE_TWO, ("three", 2.5, 3.0)],
+            "[[1.0, 3.0]]",
+            id="zero-length-closer-at-the-span-end",
+        ),
+    ],
+)
+def test_a_fill_entry_holds_only_the_words_the_fill_put_in(
+    own: list[Timed], heard: list[Timed], ranges: str
+) -> None:
+    filled = _filled(own, heard)
+    assert filled.engine.params["fill_ranges"] == ranges
+
+    found = find_disputes(filled, Path("m.json"))
+
+    (entry,) = found.entries
     assert (entry.kind, entry.delivered, entry.words) == ("fill", "one two three", 3)
     assert entry.words == filled.engine.params["fill_words"]
+    assert FILL_TIMED not in render_disputes(found)
+
+
+def test_a_record_without_fill_counts_bounds_its_fill_quotes_by_time_and_says_so() -> None:
+    words = [
+        Word(text=text, start=start, end=end)
+        for text, start, end in [
+            ("before", 0.0, 0.4),
+            *ONE_TWO,
+            ("three", 2.5, 3.25),
+            ("the", 3.0, 3.2),
+            ("end", 3.4, 3.7),
+        ]
+    ]
+    transcript = _transcript(words=words, params={"fill_ranges": "[[1.0, 3.25]]"})
+
+    markdown = render_disputes(find_disputes(transcript, Path("m.json")))
+
+    # A closer inside the span is quoted: time alone cannot tell it from a filled word.
+    (line,) = _numbered(markdown)
+    assert line.endswith('filled from parakeet-mlx: "one two three the"')
+    assert f"\n{QUOTES}\n\n{FILL_TIMED}\n" in markdown
+    unfilled = _transcript(words=words, params={"fill_ranges": "[]"})
+    assert FILL_TIMED not in render_disputes(find_disputes(unfilled, Path("m.json")))
+
+
+def test_a_fill_entry_quotes_its_count_of_words_from_the_first_at_its_start() -> None:
+    words = [
+        Word(text=text, start=start, end=end)
+        for text, start, end in [
+            ("before", 0.0, 0.4),
+            *ONE_TWO,
+            ("three", 2.5, 3.25),
+            ("the", 3.0, 3.2),
+        ]
+    ]
+    counted = {"fill_ranges": "[[1.0, 3.25], [3.0, 3.0]]", "fill_counts": "[3, 0]"}
+
+    entries = find_disputes(_transcript(words=words, params=counted), Path("m.json")).entries
+
+    assert [(entry.delivered, entry.words) for entry in entries] == [("one two three", 3), ("", 0)]
+
+
+@pytest.mark.parametrize(
+    "recorded",
+    [
+        pytest.param("[3, 4]", id="more-than-the-ranges"),
+        pytest.param("[]", id="fewer-than-the-ranges"),
+        pytest.param("[-1]", id="negative"),
+        pytest.param("[3.0]", id="float"),
+        pytest.param("[true]", id="boolean"),
+        pytest.param("3", id="not-a-list"),
+    ],
+)
+def test_malformed_fill_counts_exit_2_naming_them(tmp_path: Path, recorded: str) -> None:
+    path = tmp_path / "meeting.json"
+    _transcript(params={"fill_ranges": "[[1.0, 2.0]]", "fill_counts": recorded}).dump(path)
+
+    result = _invoke(path)
+
+    assert result.exit_code == 2
+    assert result.stderr.startswith(f"scribe: {path} has a malformed fill_counts")
+    assert not (tmp_path / "meeting.disputes.md").exists()
+
+
+def test_a_fill_count_past_the_last_word_exits_2_naming_its_range(tmp_path: Path) -> None:
+    path = tmp_path / "meeting.json"
+    words = [
+        Word(text=text, start=start, end=start + 0.2) for text, start in [("a", 1.0), ("b", 2.0)]
+    ]
+    _transcript(words=words, params={"fill_ranges": "[[1.0, 2.2]]", "fill_counts": "[3]"}).dump(
+        path
+    )
+
+    result = _invoke(path)
+
+    assert result.exit_code == 2
+    assert "fill_counts" in result.stderr
+    assert "range 0" in result.stderr
+    assert not (tmp_path / "meeting.disputes.md").exists()
 
 
 def test_an_unresolved_entry_counts_the_words_delivered_in_its_span() -> None:
