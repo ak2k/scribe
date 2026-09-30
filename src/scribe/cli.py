@@ -441,7 +441,8 @@ def _cross_check(
         kept: Path | None = plan_outputs(
             {label: sibling(out, ".parakeet.json")}, {"--out": out, **inputs}
         )[label]
-    except AppError as exc:
+    # OSError and RuntimeError too: a name too long to look up, or a link that loops.
+    except (AppError, OSError, RuntimeError) as exc:
         _warn(f"not keeping Parakeet's transcript: {exc}")
         kept = None
     try:
