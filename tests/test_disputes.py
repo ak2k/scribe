@@ -766,6 +766,9 @@ def test_the_help_says_what_it_writes_and_that_it_sends_nothing() -> None:
     assert "sends nothing over the network" in text
     assert "Unlisted text is unverified" in text
     assert "an entry that starts at or past the audio's end" in text
+    assert "5 or more words shorter than the other as the pick counts them" in text
+    assert "fillers and repeats aside" in text
+    assert "each entry names its clip" in text
 
 
 _WORDS = ["the", "cat", "hat", "a", "sat", "uh", "gonna", "going", "to", "Cat.", "mat", "on"]

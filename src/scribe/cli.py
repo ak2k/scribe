@@ -1382,17 +1382,18 @@ def disputes_command(
     and its engine. So is every span the fill put the reference's words in,
     and every span of possible dropped speech it could not repair. Entries are
     ranked by band, then by time. A: words missing on one side, which is a
-    reading 5 or more words shorter than the other, a pick guarded or
-    restored, or a fill or unresolved span. B: the pick was unsure or gave no
-    answer. C: 4 or more words differ. D: 1 to 3 differ. E: the readings
-    differ only in fillers, repeats, punctuation or spellings the pick sets
-    aside. Not listed: short stretches only one engine heard, unless the fill
-    filled or flagged them, and words both got wrong the same way. Unlisted
-    text is unverified. The quotes are the words before cleanup.
+    reading 5 or more words shorter than the other as the pick counts them,
+    fillers and repeats aside; a pick guarded or restored; or a fill or
+    unresolved span. B: the pick was unsure or gave no answer. C: 4 or more
+    words differ. D: 1 to 3 differ. E: the readings differ only in fillers,
+    repeats, punctuation or spellings the pick sets aside. Not listed: short
+    stretches only one engine heard, unless the fill filled or flagged them,
+    and words both got wrong the same way. Unlisted text is unverified. The
+    quotes are the words before cleanup.
 
     --clips also cuts each entry's audio, from 3 s before it to 3 s after, into
     an AAC file named for its number and start, in a directory named for --out
-    with .clips in place of .md, and links each entry to its clip. The audio is
+    with .clips in place of .md, and each entry names its clip. The audio is
     --audio, else TRANSCRIPT's source audio, read relative to the current
     directory; a recorded sha256 must match it. It needs ffmpeg on PATH.
 

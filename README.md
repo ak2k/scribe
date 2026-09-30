@@ -68,14 +68,14 @@ with where it is, the reading the transcript holds and the engine that heard
 it, and the reading set aside and its engine. No recorded spot is left out;
 entries are ranked so the likeliest errors come first:
 
-- A, words missing on one side: a reading 5 or more words shorter than the other, a guarded or restored pick, a filled or unresolved span.
+- A, words missing on one side: a reading 5 or more words shorter than the other as the pick counts them, fillers and repeats aside; a guarded or restored pick; a filled or unresolved span.
 - B, the pick was unsure or gave no answer.
 - C, 4 or more words differ.
 - D, 1 to 3 words differ.
 - E, no content difference: only fillers, repeats, punctuation or spellings the pick sets aside.
 
 `--clips` also cuts each entry's audio, 3 s on each side, into
-`talk.disputes.clips/` and links it from the entry; it needs `ffmpeg`, and
+`talk.disputes.clips/`, and each entry names its clip; it needs `ffmpeg`, and
 reads `--audio` or the source audio, which must match its recorded sha256.
 Not listed: short stretches only one engine heard, unless the fill filled or
 flagged them, and words both got wrong the same way. Unlisted text is
