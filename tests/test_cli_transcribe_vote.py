@@ -421,6 +421,31 @@ def test_a_vote_stopped_once_it_wrote_out_leaves_no_earlier_disputes_list(
         assert not listed.exists()
 
 
+def test_a_voted_transcript_written_partway_leaves_no_earlier_disputes_list(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _engines(monkeypatch)
+    out = tmp_path / "clip.transcript.json"
+    listed = tmp_path / "clip.disputes.md"
+    listed.write_text("an earlier run's list\n", encoding="utf-8")
+    dump = Transcript.dump
+
+    def partway(self: Transcript, path: Path) -> None:
+        if path == out:
+            # As a disk that fills mid-write leaves it: truncated, then partly written.
+            path.write_text("{", encoding="utf-8")
+            raise OSError("disk full")
+        dump(self, path)
+
+    monkeypatch.setattr(Transcript, "dump", partway)
+
+    line = _failure(_vote(_clip(tmp_path)))
+
+    assert line.startswith(f"scribe: cannot write transcript to {out}: disk full")
+    assert out.read_text(encoding="utf-8") == "{"
+    assert not listed.exists()
+
+
 @pytest.mark.parametrize(
     ("host", "missing", "unset", "message"),
     [

@@ -378,11 +378,16 @@ def test_pick_model_and_context_reach_the_pick(
     assert (params["pick_model"], params["pick_context_chars"]) == ("sonnet", 31)
 
 
-def _refuse_dump(monkeypatch: pytest.MonkeyPatch, refused: Callable[[str], bool]) -> None:
+def _refuse_dump(
+    monkeypatch: pytest.MonkeyPatch, refused: Callable[[str], bool], *, partway: bool = False
+) -> None:
     dump = Transcript.dump
 
     def refuse(self: Transcript, path: Path) -> None:
         if refused(path.name):
+            if partway:
+                # As a disk that fills mid-write leaves it: truncated, then partly written.
+                path.write_text("{", encoding="utf-8")
             raise OSError("disk full")
         dump(self, path)
 
@@ -599,6 +604,24 @@ def test_a_run_that_exits_two_leaves_an_earlier_list_as_it_was(
 
     assert result.exit_code == 2, result.output
     assert listed.read_text(encoding="utf-8") == "an earlier run's list\n"
+
+
+def test_a_run_that_exits_two_once_it_wrote_out_partway_leaves_no_earlier_list(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _setup(monkeypatch)
+    _patch(monkeypatch)
+    _refuse_dump(monkeypatch, lambda name: name == "clip.transcript.json", partway=True)
+    listed = tmp_path / "clip.disputes.md"
+    listed.write_text("an earlier run's list\n", encoding="utf-8")
+
+    result = _transcribe(tmp_path)
+
+    assert result.exit_code == 2, result.output
+    out = tmp_path / "clip.transcript.json"
+    assert result.stderr == f"scribe: cannot write transcript to {out}: disk full\n"
+    assert out.read_text(encoding="utf-8") == "{"
+    assert not listed.exists()
 
 
 def _interrupted(*_args: object, **_kwargs: object) -> NoReturn:
