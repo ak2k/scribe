@@ -99,7 +99,8 @@ class Dispute:
     # heard nothing there.
     other: str
     other_by: str
-    # The transcript's words starting in a span, ends included; 0 at a spot.
+    # The transcript's words inside a fill's span, or starting in an unresolved
+    # one, ends included; 0 at a spot.
     words: int
 
 
@@ -185,7 +186,14 @@ def _spot(row: _Row, said: str, heard: str) -> Dispute:
 def _span(
     kind: Kind, words: Sequence[Word], start: float, end: float, by: str, other: str
 ) -> Dispute:
-    held = [word.text for word in words if start <= word.start <= end]
+    # A fill's span ends where its last inserted word does, and the word closing
+    # the hole can start right there; an unresolved span's ends are window
+    # bounds, so a word starting on one is counted.
+    held = [
+        word.text
+        for word in words
+        if start <= word.start and (word.end if kind == "fill" else word.start) <= end
+    ]
     return Dispute(
         number=0,
         band="A",
