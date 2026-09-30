@@ -51,7 +51,10 @@ BANDS: dict[Band, str] = {
     "B": "The pick was unsure or gave no answer",
     "C": f"{MANY_WORDS} or more words differ",
     "D": f"1 to {MANY_WORDS - 1} words differ",
-    "E": "No content difference",
+    "E": (
+        "Same words once folded; the difference is with the words around the spot "
+        "(for example a number split differently)"
+    ),
 }
 LISTED = (
     "Listed: every spot where the pick compared the two recognizers' readings, "
@@ -161,6 +164,8 @@ def _band(side: Side, mine: str, theirs: str) -> Band:
     differ = _difference(mine, theirs)
     if differ >= MANY_WORDS:
         return "C"
+    # No word apart: the pick kept the spot because its readings differ with the
+    # words around them, as "five" against "5" after "twenty".
     return "D" if differ else "E"
 
 
@@ -221,7 +226,8 @@ def find_disputes(transcript: Transcript, path: Path) -> Disputes:
         A: a reading GUARDED_DROP or more words shorter than the other, as
         the pick counts them, a spot guarded or restored, and every fill and
         unresolved span. B: the pick unsure or failed. C: readings MANY_WORDS
-        or more words apart. D: fewer. E: none.
+        or more words apart. D: fewer. E: none, the readings differing only
+        with the words around them.
 
     Raises:
         InputValidationError: there is no pick_record, or it, the engine it

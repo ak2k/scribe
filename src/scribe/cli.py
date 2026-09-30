@@ -1385,11 +1385,11 @@ def disputes_command(
     reading 5 or more words shorter than the other as the pick counts them,
     fillers and repeats aside; a pick guarded or restored; or a fill or
     unresolved span. B: the pick was unsure or gave no answer. C: 4 or more
-    words differ. D: 1 to 3 differ. E: the readings differ only in fillers,
-    repeats, punctuation or spellings the pick sets aside. Not listed: short
-    stretches only one engine heard, unless the fill filled or flagged them,
-    and words both got wrong the same way. Unlisted text is unverified. The
-    quotes are the words before cleanup.
+    words differ. D: 1 to 3 differ. E: same words once folded; the difference
+    is with the words around the spot (for example a number split
+    differently). Not listed: short stretches only one engine heard, unless
+    the fill filled or flagged them, and words both got wrong the same way.
+    Unlisted text is unverified. The quotes are the words before cleanup.
 
     --clips also cuts each entry's audio, from 3 s before it to 3 s after, into
     an AAC file named for its number and start, in a directory named for --out

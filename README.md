@@ -72,7 +72,7 @@ entries are ranked so the likeliest errors come first:
 - B, the pick was unsure or gave no answer.
 - C, 4 or more words differ.
 - D, 1 to 3 words differ.
-- E, no content difference: only fillers, repeats, punctuation or spellings the pick sets aside.
+- E, same words once folded; the difference is with the words around the spot (for example a number split differently).
 
 `--clips` also cuts each entry's audio, 3 s on each side, into
 `talk.disputes.clips/`, and each entry names its clip; it needs `ffmpeg`, and
