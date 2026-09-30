@@ -385,6 +385,43 @@ def test_a_transcript_that_cannot_be_written_exits_two_keeping_the_earlier_ones(
 
 
 @pytest.mark.parametrize(
+    ("line", "stop", "stays"),
+    [
+        ("vote: ", KeyboardInterrupt(), False),
+        ("vote: ", BrokenPipeError(), False),
+        ("Gemini: ", KeyboardInterrupt(), True),
+    ],
+    ids=["interrupted-after-out", "pipe-closed-after-out", "interrupted-before-out"],
+)
+def test_a_vote_stopped_once_it_wrote_out_leaves_no_earlier_disputes_list(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, line: str, stop: BaseException, stays: bool
+) -> None:
+    _engines(monkeypatch)
+    out = tmp_path / "clip.transcript.json"
+    out.write_text("an earlier run's transcript\n", encoding="utf-8")
+    listed = tmp_path / "clip.disputes.md"
+    listed.write_text("an earlier run's list\n", encoding="utf-8")
+
+    def report(progress: str) -> None:
+        if progress.startswith(line):
+            raise stop
+
+    monkeypatch.setattr("scribe.cli._progress", report)
+
+    result = _vote(_clip(tmp_path))
+
+    assert result.exit_code != 0, result.output
+    if stays:
+        assert out.read_text(encoding="utf-8") == "an earlier run's transcript\n"
+        assert listed.read_text(encoding="utf-8") == "an earlier run's list\n"
+    else:
+        assert [word.text for word in Transcript.load(out).words] == [
+            *("The", "hat", "sat.", "on", "mats.")
+        ]
+        assert not listed.exists()
+
+
+@pytest.mark.parametrize(
     ("host", "missing", "unset", "message"),
     [
         (("Linux", "x86_64"), None, None, "needs Apple silicon"),
