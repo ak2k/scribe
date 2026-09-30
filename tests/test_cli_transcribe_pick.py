@@ -17,6 +17,7 @@ from scribe import ensemble, gaps
 from scribe.claude_cli import ClaudeCliBackend
 from scribe.cli import app
 from scribe.coverage import fill_holes
+from scribe.errors import ExternalServiceError
 from scribe.parakeet import ParakeetMlx
 from scribe.pick import DEFAULT_PICK_MODEL, PICK_PROMPT_VERSION, system_prompt
 from scribe.schema import Transcript, Word
@@ -553,6 +554,59 @@ def test_a_link_an_earlier_run_left_goes_and_what_it_points_to_stays(
     assert result.exit_code == 0, result.output
     assert not listed.is_symlink()
     assert target.read_text(encoding="utf-8") == "an earlier run's list\n"
+
+
+class _XaiDown:
+    def __init__(self, api_key: str) -> None:
+        self.api_key = api_key
+
+    def transcribe(self, *_args: object, **_options: object) -> NoReturn:
+        raise ExternalServiceError("xAI is down")
+
+
+def _xai_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("scribe.cli.XaiStt", _XaiDown)
+
+
+def _out_write_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    dump = Transcript.dump
+
+    def refuse(self: Transcript, path: Path) -> None:
+        if path.name == "clip.transcript.json":
+            raise OSError("disk full")
+        dump(self, path)
+
+    monkeypatch.setattr(Transcript, "dump", refuse)
+
+
+def _vote_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    def down(*_args: object, **_kwargs: object) -> NoReturn:
+        raise ExternalServiceError("Gemini is down")
+
+    monkeypatch.setattr(ensemble, "transcribe_voted", down)
+
+
+@pytest.mark.parametrize(
+    ("arrange", "flags"),
+    [(_xai_fails, []), (_out_write_fails, []), (_vote_fails, ["--vote"])],
+    ids=["xai-fails", "out-write-fails", "vote-fails"],
+)
+def test_a_run_that_exits_two_leaves_an_earlier_list_as_it_was(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    arrange: Callable[[pytest.MonkeyPatch], None],
+    flags: list[str],
+) -> None:
+    _setup(monkeypatch)
+    _patch(monkeypatch)
+    arrange(monkeypatch)
+    listed = tmp_path / "clip.disputes.md"
+    listed.write_text("an earlier run's list\n", encoding="utf-8")
+
+    result = _transcribe(tmp_path, *flags)
+
+    assert result.exit_code == 2, result.output
+    assert listed.read_text(encoding="utf-8") == "an earlier run's list\n"
 
 
 def _interrupted(*_args: object, **_kwargs: object) -> NoReturn:
