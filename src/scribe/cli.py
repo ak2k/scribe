@@ -11,6 +11,7 @@ import stat
 import sys
 import tempfile
 import time
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from enum import StrEnum
 from functools import partial
@@ -86,6 +87,8 @@ from scribe.xai_stt import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Generator
+
     from scribe.attribution import Naming
     from scribe.cleanup import CleanResult, MalformedCause, NumberDiff
     from scribe.coverage import Fill
@@ -349,63 +352,65 @@ def transcribe(
         inputs = {"the audio file": audio_path}
         if keyterm_file is not None:
             inputs["the --keyterm-file"] = keyterm_file
-        xai = partial(
-            _xai_transcript,
-            client,
-            audio_path,
-            model=model,
-            language=language,
-            format_text=format_text,
-            diarize=diarize,
-            keyterms=terms,
-            vad_threshold=vad_threshold,
-        )
-        if vote_engines:
-            # Gemini logs through structlog, which prints to stdout unconfigured.
-            # Warnings only: its pre-flight figure is in the Gemini progress line.
-            configure("warning")
-            voted = ensemble.transcribe_voted(
-                audio_path,
-                Source(kind="audio", ref=str(audio_path), sha256=_sha256(audio_path)),
-                destination,
-                inputs,
-                xai=xai,
-                parakeet=ParakeetMlx(),
-                max_usd=gemini_stt.DEFAULT_MAX_USD if max_usd is None else max_usd,
-                report=_progress,
-                fill=cross_check,
-            )
-            _list_disputes(None, voted, inputs)
-            typer.echo(str(voted))
-            return
-        plan = plan_outputs({"--out": destination}, inputs)
-        # The hash and the upload read the file separately, so a file that
-        # changes between them (or between upload retries) is sent as bytes the
-        # recorded digest does not describe: it names the bytes read here.
-        # Accepted, rather than holding a 500 MB upload in memory to hash it.
-        digest = _sha256(audio_path)
-        transcript = xai(Source(kind="audio", ref=str(audio_path), sha256=digest))
-        try:
-            transcript.dump(plan["--out"])
-        # ValueError too: `model_dump_json` raises PydanticSerializationError, a
-        # ValueError, on upstream text that UTF-8 cannot encode.
-        except (OSError, ValueError) as exc:
-            raise InputValidationError(
-                f"cannot write transcript to {plan['--out']}: {exc}"
-            ) from exc
     except AppError as exc:
         _fail(exc)
 
-    picked = None
-    # --out is rewritten, so an earlier list beside it is stale even if the run stops here.
-    try:
+    with _no_stale_list(destination, inputs):
+        try:
+            xai = partial(
+                _xai_transcript,
+                client,
+                audio_path,
+                model=model,
+                language=language,
+                format_text=format_text,
+                diarize=diarize,
+                keyterms=terms,
+                vad_threshold=vad_threshold,
+            )
+            if vote_engines:
+                # Gemini logs through structlog, which prints to stdout unconfigured.
+                # Warnings only: its pre-flight figure is in the Gemini progress line.
+                configure("warning")
+                voted = ensemble.transcribe_voted(
+                    audio_path,
+                    Source(kind="audio", ref=str(audio_path), sha256=_sha256(audio_path)),
+                    destination,
+                    inputs,
+                    xai=xai,
+                    parakeet=ParakeetMlx(),
+                    max_usd=gemini_stt.DEFAULT_MAX_USD if max_usd is None else max_usd,
+                    report=_progress,
+                    fill=cross_check,
+                )
+                _list_disputes(None, voted, inputs)
+                typer.echo(str(voted))
+                return
+            plan = plan_outputs({"--out": destination}, inputs)
+            # The hash and the upload read the file separately, so a file that
+            # changes between them (or between upload retries) is sent as bytes the
+            # recorded digest does not describe: it names the bytes read here.
+            # Accepted, rather than holding a 500 MB upload in memory to hash it.
+            digest = _sha256(audio_path)
+            transcript = xai(Source(kind="audio", ref=str(audio_path), sha256=digest))
+            try:
+                transcript.dump(plan["--out"])
+            # ValueError too: `model_dump_json` raises PydanticSerializationError, a
+            # ValueError, on upstream text that UTF-8 cannot encode.
+            except (OSError, ValueError) as exc:
+                raise InputValidationError(
+                    f"cannot write transcript to {plan['--out']}: {exc}"
+                ) from exc
+        except AppError as exc:
+            _fail(exc)
+
         spoken = "audio" if transcript.duration is None else f"{transcript.duration:.1f} s of audio"
         typer.echo(f"transcribed {spoken} in {time.monotonic() - started:.1f} s", err=True)
+        picked = None
         if cross_check:
             checked = _cross_check(audio_path, transcript, plan["--out"], inputs)
             if pick and checked is not None:
                 picked = _pick(*checked, plan["--out"], model=pick_model, context=pick_context)
-    finally:
         _list_disputes(picked, plan["--out"], inputs)
     typer.echo(str(plan["--out"]))
 
@@ -579,6 +584,33 @@ def _file_or_link(path: Path) -> bool:
         if exc.errno == errno.ENAMETOOLONG:
             return False
         raise
+
+
+@contextmanager
+def _no_stale_list(out: Path, inputs: dict[str, Path]) -> Generator[None]:
+    """Remove the list an earlier run left beside `out` if the body raises once `out` changed.
+
+    A body that finishes has run the list step itself; one that raises before
+    `out` changes leaves the list, which still describes `out`.
+    """
+    before = _fingerprint(out)
+    try:
+        yield
+    # BaseException: a Ctrl-C or a closed pipe ends the run as surely as a failure does.
+    except BaseException:
+        if _fingerprint(out) != before:
+            _list_disputes(None, out, inputs)
+        raise
+
+
+def _fingerprint(path: Path) -> tuple[int, int, int] | None:
+    """Tell the file at `path` before a write from after it; None where none can be looked up."""
+    try:
+        found = path.stat()
+    except OSError:
+        return None
+    # A replaced file has a new inode; one written in place, a new size or modification time.
+    return found.st_ino, found.st_size, found.st_mtime_ns
 
 
 def _speakers_metadata(result: Relabeling, backend: ClaudeCliBackend, *, words: int) -> str:
