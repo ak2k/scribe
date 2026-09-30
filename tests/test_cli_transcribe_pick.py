@@ -577,6 +577,42 @@ def test_a_list_that_cannot_be_written_is_one_line_and_leaves_no_earlier_list(
     assert _texts(out) == ["Hello", "bear.", "we", "lost", "this", "Bye."]
 
 
+@pytest.mark.skipif(os.geteuid() == 0, reason="root writes through any mode bits")
+@pytest.mark.parametrize(
+    ("flags", "failed"),
+    [(["--no-pick"], ""), ([], "not listing the disputes: cannot write {path}: ")],
+    ids=["no-pick", "write-fails"],
+)
+def test_a_list_that_cannot_be_removed_is_named_in_the_one_line(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, flags: list[str], failed: str
+) -> None:
+    _setup(monkeypatch)
+    _patch(monkeypatch)
+    listed = tmp_path / "clip.disputes.md"
+    listed.write_text("an earlier run's list\n", encoding="utf-8")
+    listed.chmod(0o444)
+    unlink = Path.unlink
+
+    def refuse(self: Path, missing_ok: bool = False) -> None:
+        if self == listed:
+            raise PermissionError(1, "Operation not permitted", str(self))
+        unlink(self, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", refuse)
+
+    result = _transcribe(tmp_path, *flags)
+
+    assert result.exit_code == 0, result.output
+    assert result.stdout == f"{tmp_path / 'clip.transcript.json'}\n"
+    lines = result.stderr.splitlines()
+    assert [line for line in lines if str(listed) in line] == [lines[-1]], lines
+    assert lines[-1].startswith(f"scribe: {failed.format(path=listed)}"), lines
+    assert lines[-1].endswith(
+        f"cannot remove the stale {listed}: [Errno 1] Operation not permitted: '{listed}'"
+    )
+    assert listed.read_text(encoding="utf-8") == "an earlier run's list\n"
+
+
 def test_a_directory_at_the_lists_path_is_one_line_and_stays(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
