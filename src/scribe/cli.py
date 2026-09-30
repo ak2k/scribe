@@ -313,6 +313,15 @@ def transcribe(
     change the exit code or the path printed: a failure ends in one stderr
     line (a retried claude call is logged as a warning before it), and --out
     keeps the filled words.
+
+    Where the pick rewrites --out, the list `scribe disputes` writes for it,
+    without clips, goes beside it as BASE.disputes.md, and its counts are
+    printed. Where it does not, as with --no-pick, --vote or --no-cross-check,
+    or where it finds no spot even though the fill filled spans, no list is
+    written, and a file or link an earlier run left at that path is removed.
+    Nor does the list change the exit code or the path printed: a failure is
+    one stderr line, and a list that cannot be written leaves none from an
+    earlier run.
     """
     started = time.monotonic()
     try:
@@ -363,6 +372,7 @@ def transcribe(
                 report=_progress,
                 fill=cross_check,
             )
+            _list_disputes(None, voted, inputs)
             typer.echo(str(voted))
             return
         plan = plan_outputs({"--out": destination}, inputs)
@@ -385,10 +395,12 @@ def transcribe(
 
     spoken = "audio" if transcript.duration is None else f"{transcript.duration:.1f} s of audio"
     typer.echo(f"transcribed {spoken} in {time.monotonic() - started:.1f} s", err=True)
+    picked = None
     if cross_check:
         checked = _cross_check(audio_path, transcript, plan["--out"], inputs)
         if pick and checked is not None:
-            _pick(*checked, plan["--out"], model=pick_model, context=pick_context)
+            picked = _pick(*checked, plan["--out"], model=pick_model, context=pick_context)
+    _list_disputes(picked, plan["--out"], inputs)
     typer.echo(str(plan["--out"]))
 
 
@@ -470,8 +482,13 @@ def _cross_check(
 
 def _pick(
     filled: Transcript, reference: Transcript, out: Path, *, model: str, context: str | None
-) -> None:
-    """Pick between `filled`'s words and `reference`'s where they disagree; never fail the run."""
+) -> Transcript | None:
+    """Pick between `filled`'s words and `reference`'s where they disagree; never fail the run.
+
+    Returns:
+        The picked transcript, when it was written to `out`; otherwise None.
+
+    """
     # The pick logs through structlog, which prints to stdout unconfigured.
     configure("warning")
     kept = "--out keeps the filled words"
@@ -479,25 +496,72 @@ def _pick(
         # xAI's words can step back, and the pick refuses words out of start order.
         if (index := first_decrease(words)) is not None:
             _warn(f"not picking: {role} word {index} starts before word {index - 1}; {kept}")
-            return
+            return None
     if not find_spots(filled.words, reference.words):
-        return
+        return None
     try:
         backend = ClaudeCliBackend(model=model, disable_tools=True)
         backend.resolve()
     except AppError as exc:
         _warn(f"not picking: {exc}; {kept}")
-        return
+        return None
     picking = pick_readings(filled, reference, backend, context=context)
     if len(picking.failed) == len(picking.chunks):
         _warn(f"the pick failed on {len(picking.failed)} of {len(picking.chunks)} chunks; {kept}")
-        return
+        return None
     try:
         _replace(picking.transcript, out)
     except (OSError, ValueError) as exc:
         _warn(f"cannot write the picked transcript to {out}: {exc}; {kept}")
-        return
+        return None
     _report_pick(picking, backend.model)
+    return picking.transcript
+
+
+def _list_disputes(picked: Transcript | None, out: Path, inputs: dict[str, Path]) -> None:
+    """Write `picked`'s disputes list beside `out`, as `scribe disputes` does; never fail the run.
+
+    With no `picked`, or a list that cannot be written, a file or link an
+    earlier run left at the list's path is removed instead: it describes
+    another `out`.
+    """
+    path = sibling(out, ".disputes.md")
+    # A directory there is not one scribe wrote, and planning would refuse it.
+    if picked is None and not (path.is_symlink() or path.is_file()):
+        return
+    read = {"--out": out, **inputs, "the Parakeet transcript": sibling(out, ".parakeet.json")}
+    try:
+        plan = plan_outputs({"the disputes list": path}, read)
+    # RuntimeError too: resolving a link that loops raises it, not OSError.
+    except (AppError, RuntimeError) as exc:
+        refused = "not listing the disputes" if picked is not None else f"not removing {path}"
+        _warn(f"{refused}: {exc}")
+        return
+    if picked is None:
+        if (stays := _remove_stale_list(path)) is not None:
+            _warn(stays)
+        return
+    try:
+        found = find_disputes(picked, out)
+        # Opened without blocking first: a FIFO there with no reader would hang the write.
+        prove_writable(plan)
+        _write_text(path, render_disputes(found))
+    except AppError as exc:
+        stays = _remove_stale_list(path)
+        _warn(f"not listing the disputes: {exc}" + ("" if stays is None else f"; {stays}"))
+        return
+    _warn(f"listed the disputes in {path}: {summarize(found)}")
+
+
+def _remove_stale_list(path: Path) -> str | None:
+    """Remove the file or link at `path`, never a directory; say why it stays, if it does."""
+    if not (path.is_symlink() or path.is_file()):
+        return None
+    try:
+        path.unlink(missing_ok=True)
+    except OSError as exc:
+        return f"cannot remove the stale {path}: {exc}"
+    return None
 
 
 def _speakers_metadata(result: Relabeling, backend: ClaudeCliBackend, *, words: int) -> str:
