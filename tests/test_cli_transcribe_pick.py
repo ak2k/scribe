@@ -555,6 +555,26 @@ def test_a_link_an_earlier_run_left_goes_and_what_it_points_to_stays(
     assert target.read_text(encoding="utf-8") == "an earlier run's list\n"
 
 
+def _interrupted(*_args: object, **_kwargs: object) -> NoReturn:
+    raise KeyboardInterrupt
+
+
+def test_a_run_stopped_in_the_pick_leaves_no_earlier_list_beside_the_rewritten_out(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _setup(monkeypatch)
+    _patch(monkeypatch)
+    monkeypatch.setattr("scribe.cli.pick_readings", _interrupted)
+    listed = tmp_path / "clip.disputes.md"
+    listed.write_text("an earlier run's list\n", encoding="utf-8")
+
+    result = _transcribe(tmp_path)
+
+    assert result.exit_code != 0, result.output
+    assert _texts(tmp_path / "clip.transcript.json") == FILLED
+    assert not listed.exists()
+
+
 @pytest.mark.skipif(os.geteuid() == 0, reason="root writes through any mode bits")
 def test_a_list_that_cannot_be_written_is_one_line_and_leaves_no_earlier_list(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
