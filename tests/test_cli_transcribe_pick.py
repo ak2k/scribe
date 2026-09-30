@@ -711,6 +711,46 @@ def test_the_audio_at_the_lists_path_is_never_written_or_removed(
     )
 
 
+def test_a_link_to_out_at_the_lists_path_is_not_written_through(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _setup(monkeypatch)
+    _patch(monkeypatch)
+    out = tmp_path / "clip.transcript.json"
+    listed = tmp_path / "clip.disputes.md"
+    listed.symlink_to(out)
+
+    result = _transcribe(tmp_path)
+
+    assert result.exit_code == 0, result.output
+    assert result.stderr.splitlines()[-1] == (
+        f"scribe: not listing the disputes: the disputes list {listed} is --out"
+    )
+    assert _texts(out) == ["Hello", "bear.", "we", "lost", "this", "Bye."]
+
+
+@pytest.mark.parametrize(
+    ("flags", "refused"),
+    [([], "not listing the disputes: "), (["--no-pick"], "not removing {path}: ")],
+    ids=["pick", "no-pick"],
+)
+def test_the_keyterm_file_at_the_lists_path_is_never_written_or_removed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, flags: list[str], refused: str
+) -> None:
+    _setup(monkeypatch)
+    _patch(monkeypatch)
+    terms = tmp_path / "clip.disputes.md"
+    terms.write_text("Ann Lee\n", encoding="utf-8")
+
+    result = _transcribe(tmp_path, "--keyterm-file", str(terms), *flags)
+
+    assert result.exit_code == 0, result.output
+    assert terms.read_text(encoding="utf-8") == "Ann Lee\n"
+    assert result.stderr.splitlines()[-1] == (
+        f"scribe: {refused.format(path=terms)}the disputes list {terms} is the --keyterm-file"
+    )
+
+
 def test_a_link_to_parakeets_transcript_at_the_lists_path_is_not_written_through(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
