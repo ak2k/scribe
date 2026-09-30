@@ -838,6 +838,11 @@ def test_a_link_to_parakeets_transcript_at_the_lists_path_is_not_written_through
     assert [word.text for word in Transcript.load(kept).words] == [text for text, _, _ in HEARD]
 
 
+# A hang never returns, so the bound need only outlast an honest run, which takes
+# about a second alone and fifty times that on a machine loaded with other builds.
+HANG_SECONDS = 300
+
+
 def _within(seconds: int, run: Callable[[], Result]) -> Result:
     """Fail, rather than hang the suite, if `run` blocks for `seconds`."""
 
@@ -862,7 +867,7 @@ def test_a_fifo_at_the_lists_path_is_one_line_not_a_hang(
     listed = tmp_path / "clip.disputes.md"
     os.mkfifo(listed)
 
-    result = _within(10, partial(_transcribe, tmp_path))
+    result = _within(HANG_SECONDS, partial(_transcribe, tmp_path))
 
     assert result.exit_code == 0, result.output
     assert result.stdout == f"{tmp_path / 'clip.transcript.json'}\n"
@@ -888,7 +893,7 @@ def test_a_fifo_whose_reader_never_reads_is_one_line_not_a_hang(
     # Held open and never read: a writer can open the FIFO, then blocks once it is full.
     reader = os.open(listed, os.O_RDONLY | os.O_NONBLOCK)
     try:
-        result = _within(10, partial(_transcribe, tmp_path))
+        result = _within(HANG_SECONDS, partial(_transcribe, tmp_path))
     finally:
         os.close(reader)
 
