@@ -94,6 +94,9 @@ def _invoke(path: Path, *args: str) -> Result:
         pytest.param("unsure", "go", "go and fetch my red hat", "A", id="unsure-surplus-5-is-A"),
         pytest.param("transcript", "go and fetch my red hat", "go", "A", id="surplus-minus-5-is-A"),
         pytest.param("transcript", "go", "go and fetch my hat", "C", id="surplus-4-is-not-A"),
+        pytest.param(
+            "reference", "see. And so that's the,", "think", "A", id="folded-surplus-5-is-A"
+        ),
         pytest.param("restored", "cat", "hat", "A", id="restored-is-A"),
         pytest.param("guarded", "cat", "hat", "A", id="guarded-is-A"),
         pytest.param("failed", "the cat sat down", "a dog ran up", "B", id="failed-is-B"),
