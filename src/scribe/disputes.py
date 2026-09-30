@@ -1,12 +1,12 @@
 """List every place a transcript and its reference disagreed, ranked for a reader to check.
 
-The pick records each spot it compared with both readings and the side it
-took, and the fill records each span it put the reference's words in or found
-speech it could not repair. Every one becomes an entry, as a critical
-apparatus gives it: where, the reading the transcript holds and its engine,
-the reading set aside and its engine. None is left out, since every filter
-measured dropped about half the pick's errors; bands rank the entries instead,
-missed speech first, as the costliest error.
+The pick records each spot it compared, with both readings and the side it
+took; the fill records each span it put the reference's words in, or found
+speech in that it could not repair. Each becomes one entry, given as a
+critical apparatus gives a variant: where, the reading the transcript holds
+and its engine, the reading set aside and its engine. None is left out, as a
+filter drops many of the pick's errors along with its noise; bands rank the
+entries instead, missed speech, the costliest error, first.
 """
 
 from __future__ import annotations
@@ -85,7 +85,8 @@ class Dispute:
     end: float
     # The pick's side at a spot; None for a fill or unresolved span.
     side: Side | None
-    # The words the transcript holds, and the name of the engine they came from.
+    # The words the transcript holds, and the name of the engine they came from:
+    # blank for an unresolved span, whose words may be either engine's.
     delivered: str
     delivered_by: str
     # The reading set aside and its engine's name: at a fill, the engine that
@@ -224,7 +225,7 @@ def find_disputes(transcript: Transcript, path: Path) -> Disputes:
         for start, end in fill_ranges(engine, path)
     ]
     entries += [
-        _span("unresolved", transcript.words, start, end, said, "")
+        _span("unresolved", transcript.words, start, end, "", "")
         for start, end in fill_ranges(engine, path, key="fill_unresolved_ranges")
     ]
     ranked = sorted(entries, key=lambda entry: (entry.band, entry.start, entry.end))
@@ -352,8 +353,8 @@ def _check_directory(directory: Path) -> None:
     # Never emptied or written over: they may be the only copy of an earlier run's clips.
     if held is not None:
         raise InputValidationError(
-            f"the clips directory {directory} is not empty: a partial clips directory from "
-            "an earlier run blocks this one until it is removed"
+            f"the clips directory {directory} is not empty; clips an earlier run left, whole "
+            "or partial, block this one until the directory is removed"
         )
 
 
