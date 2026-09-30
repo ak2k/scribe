@@ -543,7 +543,7 @@ def _list_disputes(picked: Transcript | None, out: Path, inputs: dict[str, Path]
         # A directory there is not one scribe wrote, and planning would refuse it.
         if picked is None and not _file_or_link(path):
             return
-        plan = plan_outputs({"the disputes list": path}, read)
+        plan_outputs({"the disputes list": path}, read)
     # OSError too: a name too long for the filesystem fails the lookup. RuntimeError:
     # resolving a link that loops raises it.
     except (AppError, OSError, RuntimeError) as exc:
@@ -556,8 +556,7 @@ def _list_disputes(picked: Transcript | None, out: Path, inputs: dict[str, Path]
         return
     try:
         found = find_disputes(picked, out)
-        # Opened without blocking first: a FIFO there with no reader would hang the write.
-        prove_writable(plan)
+        _check_regular(path)
         _write_text(path, render_disputes(found))
     except AppError as exc:
         stays = _remove_stale_list(path)
@@ -574,6 +573,19 @@ def _remove_stale_list(path: Path) -> str | None:
     except OSError as exc:
         return f"cannot remove the stale {path}: {exc}"
     return None
+
+
+def _check_regular(path: Path) -> None:
+    """Refuse `path` if what is there is not a regular file."""
+    try:
+        mode = path.stat().st_mode
+    # Nothing there, or nothing that can be looked up, which the write then reports.
+    except OSError:
+        return
+    # A FIFO blocks its writer while no reader has it open, or once its reader
+    # stops reading; a device can block too, or take the list and keep none.
+    if not stat.S_ISREG(mode):
+        raise InputValidationError(f"cannot write {path}: not a regular file")
 
 
 def _file_or_link(path: Path) -> bool:
