@@ -43,13 +43,16 @@ _FILL_RANGES = TypeAdapter(
 def fill_ranges(
     engine: Engine, source: Path, *, key: str = "fill_ranges"
 ) -> list[tuple[float, float]]:
-    """The spans, in seconds, a second transcription pass inserted words into.
+    """The spans, in seconds, a fill recorded under `key`.
+
+    By default those a second transcription pass inserted words into;
+    fill_unresolved_ranges holds those it found dropped speech in and could
+    not repair.
 
     Args:
         engine: Engine whose params may record a fill.
         source: File the transcript was read from, to name in an error.
-        key: The param the spans are recorded under, such as
-            fill_unresolved_ranges for the spans the fill could not repair.
+        key: The param the spans are recorded under.
 
     Returns:
         Each recorded span as (start, end); none when no fill ran.
