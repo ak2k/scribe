@@ -81,7 +81,14 @@ class GapCheck:
     speech_db: float | None
 
 
-def _ffmpeg(run: Runner, argv: list[str]) -> str:
+def run_ffmpeg(run: Runner, argv: list[str]) -> str:
+    """Run ffmpeg's `argv` through `run` and return what it printed to stdout.
+
+    Raises:
+        ExternalServiceError: it could not start, or exited nonzero; the
+            start of its stderr is quoted.
+
+    """
     try:
         done = run(argv, capture_output=True, text=True, check=False)
     except OSError as exc:
@@ -121,7 +128,7 @@ def frame_levels(audio: Path, run: Runner) -> list[float]:
     # Each numbered header must be followed by its level: one missing line
     # would move every later frame 50 ms earlier.
     awaiting = False
-    for line in _ffmpeg(run, [*argv, "-af", _FILTER, "-f", "null", "-"]).splitlines():
+    for line in run_ffmpeg(run, [*argv, "-af", _FILTER, "-f", "null", "-"]).splitlines():
         key, _, value = line.partition("=")
         if not awaiting and line.split(maxsplit=1)[:1] == [f"frame:{len(levels)}"]:
             awaiting = True

@@ -184,7 +184,7 @@ def _spoken(text: str) -> list[str]:
     return _without_fillers(expanded)
 
 
-def _normalized(text: str) -> list[str]:
+def normalized(text: str) -> list[str]:
     """Return the tokens two readings are compared by: what was said, not how it was written."""
     return [_folded(token) for token in _without_stutters(_spoken(text))]
 
@@ -202,7 +202,7 @@ def _fillers_only(said: Sequence[str]) -> bool:
     text = " ".join(said)
     # A reading left with nothing once "like" goes can still be the verb: "I
     # like cats" against "I hate cats".
-    return not _normalized(text) and "like" not in norm_tokens(text)
+    return not normalized(text) and "like" not in norm_tokens(text)
 
 
 def _same(first: Sequence[str], second: Sequence[str]) -> bool:
@@ -574,12 +574,12 @@ def _spoken_count(words: Sequence[Word], held: range) -> int:
     return sum(1 for index in held if norm_tokens(words[index].text))
 
 
-def _surplus(mine: str, theirs: str) -> int:
+def surplus(mine: str, theirs: str) -> int:
     """Count the tokens the reference's reading has beyond the transcript's, as spots compare them.
 
     Fillers, filler pairs and repeats never decide a spot, so they add none.
     """
-    return len(_normalized(theirs)) - len(_normalized(mine))
+    return len(normalized(theirs)) - len(normalized(mine))
 
 
 def _target(words: Sequence[Word], start: int, end: int, marks: dict[int, tuple[int, str]]) -> str:
@@ -769,7 +769,7 @@ def pick_readings(
             elif (
                 side != "reference"
                 and dropped < 0
-                and _surplus(*readings[number - 1]) >= RESTORED_ADD
+                and surplus(*readings[number - 1]) >= RESTORED_ADD
             ):
                 side = "restored"
             picked[number - 1] = side
