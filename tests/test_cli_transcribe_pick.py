@@ -879,6 +879,30 @@ def test_a_list_name_too_long_to_look_up_is_nothing_to_remove(
     assert len(result.stderr.splitlines()) == 1, result.stderr
 
 
+def test_a_list_path_that_cannot_be_looked_up_is_named(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _setup(monkeypatch)
+    _patch(monkeypatch)
+    listed = tmp_path / "clip.disputes.md"
+    is_symlink = Path.is_symlink
+
+    def refuse(self: Path) -> bool:
+        if self == listed:
+            raise PermissionError(13, "Permission denied", str(self))
+        return is_symlink(self)
+
+    monkeypatch.setattr(Path, "is_symlink", refuse)
+
+    result = _transcribe(tmp_path, "--no-pick")
+
+    assert result.exit_code == 0, result.output
+    assert result.stdout == f"{tmp_path / 'clip.transcript.json'}\n"
+    assert result.stderr.splitlines()[-1] == (
+        f"scribe: not removing {listed}: [Errno 13] Permission denied: '{listed}'"
+    )
+
+
 def test_the_help_says_where_the_disputes_list_goes() -> None:
     result = runner.invoke(app, ["transcribe", "--help"], terminal_width=200)
 
