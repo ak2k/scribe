@@ -40,12 +40,16 @@ _FILL_RANGES = TypeAdapter(
 )
 
 
-def fill_ranges(engine: Engine, source: Path) -> list[tuple[float, float]]:
+def fill_ranges(
+    engine: Engine, source: Path, *, key: str = "fill_ranges"
+) -> list[tuple[float, float]]:
     """The spans, in seconds, a second transcription pass inserted words into.
 
     Args:
         engine: Engine whose params may record a fill.
         source: File the transcript was read from, to name in an error.
+        key: The param the spans are recorded under, such as
+            fill_unresolved_ranges for the spans the fill could not repair.
 
     Returns:
         Each recorded span as (start, end); none when no fill ran.
@@ -55,7 +59,7 @@ def fill_ranges(engine: Engine, source: Path) -> list[tuple[float, float]]:
             pairs of finite numbers, each start at most its end.
 
     """
-    recorded = engine.params.get("fill_ranges")
+    recorded = engine.params.get(key)
     if recorded is None:
         return []
     try:
@@ -64,7 +68,7 @@ def fill_ranges(engine: Engine, source: Path) -> list[tuple[float, float]]:
         first = exc.errors()[0]
         where = ".".join(str(part) for part in first["loc"])
         raise InputValidationError(
-            f"{source} has a malformed fill_ranges: {first['msg']} (at {where or 'top level'})"
+            f"{source} has a malformed {key}: {first['msg']} (at {where or 'top level'})"
         ) from exc
 
 
