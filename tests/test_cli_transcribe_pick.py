@@ -145,6 +145,7 @@ def test_the_default_run_takes_parakeets_reading_where_the_model_picks_it(
     ]
     params = picked.engine.params
     assert params["fill_ranges"] == "[[3.0, 5.3]]"
+    assert params["fill_counts"] == "[3]"
     assert (params["pick_model"], params["pick_spots"], params["pick_to_reference"]) == (
         DEFAULT_PICK_MODEL,
         1,

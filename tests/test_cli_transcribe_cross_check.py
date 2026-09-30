@@ -124,6 +124,7 @@ def test_the_cross_check_fills_the_hole_xai_left_with_parakeets_words(
         *(("Hello", 0), ("there.", 0), ("we", None), ("lost", None), ("this", None), ("Bye.", 0))
     ]
     assert filled.engine.params["fill_ranges"] == "[[3.0, 5.3]]"
+    assert filled.engine.params["fill_counts"] == "[3]"
     reference = Transcript.load(tmp_path / "clip.parakeet.json")
     assert [word.text for word in reference.words] == [
         "Hello",

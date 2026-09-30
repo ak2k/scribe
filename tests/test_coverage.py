@@ -244,6 +244,7 @@ def test_the_result_records_the_fill_and_drops_the_stale_turns() -> None:
         "fill_words": 3,
         "fill_unresolved": 0,
         "fill_ranges": "[[3.0, 5.5]]",
+        "fill_counts": "[3]",
         "fill_unresolved_ranges": "[]",
         "fill_retimed_words": 0,
         "fill_retimed_runs": "[]",
@@ -256,10 +257,23 @@ def test_the_result_records_the_fill_and_drops_the_stale_turns() -> None:
         "fill_words": 0,
         "fill_unresolved": 0,
         "fill_ranges": "[]",
+        "fill_counts": "[]",
         "fill_unresolved_ranges": "[]",
         "fill_retimed_words": 0,
         "fill_retimed_runs": "[]",
     }
+
+
+def test_each_filled_span_records_how_many_words_it_took() -> None:
+    own = _said(("alpha", 0.0), ("mid", 10.0), ("omega", 20.0))
+    heard = _heard(("one", 3.0), ("two", 4.0), ("three", 5.0))
+    heard += _heard(("a", 12.0), ("b", 13.0), ("c", 14.0), ("d", 15.0))
+
+    filled, fill = fill_holes(_transcript(own, duration=21.0), _transcript(heard))
+
+    assert fill.filled == (Span(3.0, 5.5, 3), Span(12.0, 15.5, 4))
+    assert filled.engine.params["fill_ranges"] == "[[3.0, 5.5], [12.0, 15.5]]"
+    assert filled.engine.params["fill_counts"] == "[3, 4]"
 
 
 # The transcript slid four words into the time of a passage it dropped; the
@@ -756,6 +770,7 @@ def test_fill_writes_beside_the_transcript_and_reports_every_span(tmp_path: Path
     ]
     filled = Transcript.load(tmp_path / "board.filled.json")
     assert filled.engine.params["fill_ranges"] == "[[3.0, 5.5]]"
+    assert filled.engine.params["fill_counts"] == "[3]"
     assert filled.engine.params["fill_unresolved_ranges"] == "[[30.0, 60.0]]"
 
 
