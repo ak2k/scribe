@@ -22,7 +22,7 @@ from scribe.cli import app
 from scribe.coverage import fill_holes
 from scribe.disputes import find_disputes, render_disputes
 from scribe.errors import InputValidationError
-from scribe.pick import Side
+from scribe.pick import Side, find_spots
 from scribe.schema import Engine, Source, Transcript, Word
 
 if TYPE_CHECKING:
@@ -44,6 +44,10 @@ UNLISTED = (
     "them), and words both got wrong the same way. Unlisted text is unverified."
 )
 QUOTES = "Quotes are the words before cleanup; the reading copy may word them differently."
+FOLDED = (
+    "Same words once folded; the difference is with the words around the spot "
+    "(for example a number split differently)"
+)
 SIDES: tuple[str, ...] = get_args(Side)
 runner = CliRunner()
 
@@ -119,6 +123,33 @@ def test_each_spot_takes_the_first_band_its_rule_matches(
     (entry,) = _entries((1.0, 2.0, mine, theirs, side))
 
     assert (entry.kind, entry.band, entry.side) == ("spot", band, side)
+
+
+def _timed(*texts: str) -> list[Word]:
+    return [Word(text=text, start=float(at), end=at + 0.5) for at, text in enumerate(texts)]
+
+
+def test_a_number_split_across_a_spots_edge_is_the_same_words_once_folded() -> None:
+    said = _timed("we", "had", "twenty", "five", "people")
+    heard = _timed("we", "had", "twenty", "5", "people")
+    (spot,) = find_spots(said, heard)
+    mine = said[spot.transcript.start : spot.transcript.stop]
+    theirs = heard[spot.reference.start : spot.reference.stop]
+    row: Row = (
+        mine[0].start,
+        max(word.end for word in mine),
+        " ".join(word.text for word in mine),
+        " ".join(word.text for word in theirs),
+        "transcript",
+    )
+    # Only the edge of the number is in the spot: 25 against 20 5 is outside it.
+    assert row[2:4] == ("five", "5")
+
+    found = find_disputes(_transcript([row]), Path("m.json"))
+
+    (entry,) = found.entries
+    assert entry.band == "E"
+    assert f"\n## E. {FOLDED} (1)\n" in render_disputes(found)
 
 
 @pytest.mark.parametrize("side", SIDES)
@@ -204,7 +235,7 @@ def test_the_header_names_the_recording_both_engines_the_counts_and_the_caveats(
         "- B. The pick was unsure or gave no answer: 2\n"
         "- C. 4 or more words differ: 0\n"
         "- D. 1 to 3 words differ: 1\n"
-        "- E. No content difference: 0\n"
+        f"- E. {FOLDED}: 0\n"
     ) in markdown
     sections = re.findall(r"^## .*$", markdown, re.MULTILINE)
     assert sections == [
@@ -798,6 +829,7 @@ def test_the_help_says_what_it_writes_and_that_it_sends_nothing() -> None:
     assert "5 or more words shorter than the other as the pick counts them" in text
     assert "fillers and repeats aside" in text
     assert "each entry names its clip" in text
+    assert f"E: {FOLDED[0].lower()}{FOLDED[1:]}." in text
 
 
 _WORDS = ["the", "cat", "hat", "a", "sat", "uh", "gonna", "going", "to", "Cat.", "mat", "on"]
