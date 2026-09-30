@@ -432,6 +432,32 @@ def test_an_end_before_its_start_is_named_as_such(tmp_path: Path) -> None:
     assert "cannot end before it starts" in result.stderr
 
 
+def test_a_spot_starting_before_the_recording_is_named_as_such(tmp_path: Path) -> None:
+    path = tmp_path / "meeting.json"
+    _transcript([(1.0, 2.0, "a", "b", "transcript"), (-2.0, -1.0, "a", "b", "transcript")]).dump(
+        path
+    )
+
+    result = _invoke(path)
+
+    assert result.exit_code == 2
+    assert "row 1" in result.stderr
+    assert "cannot start before the recording" in result.stderr
+    assert not (tmp_path / "meeting.disputes.md").exists()
+
+
+@pytest.mark.parametrize("key", ["fill_ranges", "fill_unresolved_ranges"])
+def test_a_range_starting_before_the_recording_exits_2_naming_it(tmp_path: Path, key: str) -> None:
+    path = tmp_path / "meeting.json"
+    _transcript(params={key: "[[1.0, 2.0], [-0.5, 3.0]]"}).dump(path)
+
+    result = _invoke(path)
+
+    assert result.exit_code == 2
+    assert f"has a malformed {key}: range 1 starts before the recording" in result.stderr
+    assert not (tmp_path / "meeting.disputes.md").exists()
+
+
 def test_a_transcript_with_no_pick_record_exits_2_saying_what_to_run(tmp_path: Path) -> None:
     path = tmp_path / "meeting.json"
     _transcript(params={"pick_record": None}).dump(path)
