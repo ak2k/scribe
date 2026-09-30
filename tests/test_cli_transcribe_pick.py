@@ -862,7 +862,7 @@ def test_a_link_to_itself_at_the_lists_path_is_one_line_and_stays(
     assert listed.is_symlink()
 
 
-def test_a_list_name_too_long_to_look_up_is_one_line(
+def test_a_list_name_too_long_to_look_up_is_nothing_to_remove(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _setup(monkeypatch)
@@ -874,9 +874,7 @@ def test_a_list_name_too_long_to_look_up_is_one_line(
 
     assert result.exit_code == 0, result.output
     assert result.stdout == f"{out}\n"
-    lines = result.stderr.splitlines()
-    assert lines[-1].startswith(f"scribe: not removing {out}.disputes.md: "), lines
-    assert "too long" in lines[-1]
+    assert len(result.stderr.splitlines()) == 1, result.stderr
 
 
 def test_the_help_says_where_the_disputes_list_goes() -> None:
