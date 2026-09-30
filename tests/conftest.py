@@ -5,6 +5,13 @@ from typing import NoReturn
 
 import pytest
 import structlog
+from hypothesis import settings
+
+# A loaded machine can stretch any example past a fixed deadline, so no property
+# test's verdict may depend on how long one example ran. The active profile stays
+# the parent so a CI environment keeps the rest of what it selects.
+settings.register_profile("scribe", settings.default, deadline=None)
+settings.load_profile("scribe")
 
 
 @pytest.fixture
