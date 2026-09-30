@@ -70,6 +70,9 @@ _Row = tuple[FiniteFloat, FiniteFloat, str, str, Side]
 
 
 def _ordered(row: _Row) -> _Row:
+    # Before 0 is outside the recording: a clip of it would hold the opening instead.
+    if row[0] < 0:
+        raise ValueError("a spot cannot start before the recording")
     if row[1] < row[0]:
         raise ValueError("a spot cannot end before it starts")
     return row
@@ -142,6 +145,16 @@ def _engine_param(transcript: Transcript, path: Path, key: str, default: str | N
     if not isinstance(named, str) or not named.strip():
         raise InputValidationError(f"{path} has a pick_record but no {key} naming its engine")
     return named
+
+
+def _ranges(transcript: Transcript, path: Path, key: str) -> list[tuple[float, float]]:
+    ranges = fill_ranges(transcript.engine, path, key=key)
+    for index, (start, _) in enumerate(ranges):
+        if start < 0:
+            raise InputValidationError(
+                f"{path} has a malformed {key}: range {index} starts before the recording"
+            )
+    return ranges
 
 
 def _name(engine: str) -> str:
@@ -231,7 +244,8 @@ def find_disputes(transcript: Transcript, path: Path) -> Disputes:
 
     Raises:
         InputValidationError: there is no pick_record, or it, the engine it
-            names or the fill's ranges are malformed.
+            names or the fill's ranges are malformed, a time before 0 among
+            them.
 
     """
     rows = _record(transcript, path)
@@ -242,11 +256,11 @@ def find_disputes(transcript: Transcript, path: Path) -> Disputes:
     entries = [_spot(row, said, heard) for row in rows]
     entries += [
         _span("fill", transcript.words, start, end, _name(filler), said)
-        for start, end in fill_ranges(engine, path)
+        for start, end in _ranges(transcript, path, "fill_ranges")
     ]
     entries += [
         _span("unresolved", transcript.words, start, end, "", "")
-        for start, end in fill_ranges(engine, path, key="fill_unresolved_ranges")
+        for start, end in _ranges(transcript, path, "fill_unresolved_ranges")
     ]
     ranked = sorted(entries, key=lambda entry: (entry.band, entry.start, entry.end))
     return Disputes(
