@@ -6,7 +6,7 @@ import json
 from typing import TYPE_CHECKING, cast
 
 import pytest
-from hypothesis import event, given, settings
+from hypothesis import event, given
 from hypothesis import strategies as st
 
 from scribe.claude_cli import Completion
@@ -734,7 +734,6 @@ def _expected(said: Transcript, heard: Transcript, picking: Picking) -> list[Wor
     return expected
 
 
-@settings(deadline=None)
 @given(case=_cases())
 def test_only_the_spots_picked_for_the_reference_change_and_starts_stay_in_order(
     case: tuple[Transcript, Transcript, list[str]], tmp_path_factory: pytest.TempPathFactory
@@ -789,7 +788,6 @@ def _drops(draw: st.DrawFn) -> tuple[Transcript, Transcript]:
     return transcript(said), transcript(heard, engine="parakeet-mlx")
 
 
-@settings(deadline=None)
 @given(case=_drops())
 def test_no_reference_pick_applied_drops_five_words_and_the_rest_still_hold(
     case: tuple[Transcript, Transcript],

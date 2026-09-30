@@ -5,7 +5,7 @@ import re
 from typing import TYPE_CHECKING
 
 import pytest
-from hypothesis import given, settings
+from hypothesis import given
 from hypothesis import strategies as st
 
 from scribe.cleanup import CleanupRequest, clean, turn_label
@@ -243,7 +243,6 @@ def _body_blocks(body: str) -> list[str]:
     return [blocks[0].removeprefix("**"), *blocks[1:]]
 
 
-@settings(deadline=None)
 @given(
     specs=st.lists(
         st.tuples(st.sampled_from(["A", "B", "Speaker 1"]), _SECONDS, _SECONDS, _TEXT),

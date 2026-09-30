@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import pytest
-from hypothesis import given, settings
+from hypothesis import given
 from hypothesis import strategies as st
 
 from scribe.cleanup import CleanupRequest
@@ -259,7 +259,6 @@ def _allowed_edits(draw: st.DrawFn) -> tuple[CleanupRequest, str]:
     return request, "\n\n".join(paragraphs) + "\n"
 
 
-@settings(deadline=None)
 @given(_allowed_edits())
 def test_allowed_edits_alone_move_and_change_nothing(case: tuple[CleanupRequest, str]) -> None:
     request, text = case

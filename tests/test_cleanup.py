@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 import pytest
-from hypothesis import given, settings
+from hypothesis import given
 from hypothesis import strategies as st
 
 from scribe.cleanup import (
@@ -220,8 +220,6 @@ def test_drift_is_a_lost_value_or_a_count_drop_beside_a_new_one(
     assert diff.drifted is drifted
 
 
-# The list is unbounded, so one example can outlast any fixed deadline on a loaded machine.
-@settings(deadline=None)
 @given(values=st.lists(st.integers(min_value=0, max_value=99_999), min_size=1), data=st.data())
 def test_only_a_value_gone_entirely_is_missing(values: list[int], data: st.DataObject) -> None:
     # " and " is no stutter gap, and no scale or unit follows a value to fold it.
@@ -792,7 +790,6 @@ _WORDS = st.lists(st.text(alphabet="abcdefg", min_size=1, max_size=4), min_size=
 _TEXT = _WORDS.map(" ".join)
 
 
-@settings(deadline=None)
 @given(
     turns=st.lists(st.tuples(st.sampled_from(["A", "B", "C"]), _TEXT), min_size=1, max_size=5),
     data=st.data(),

@@ -131,7 +131,6 @@ def test_an_unknown_id_and_an_unmatched_word_keep_the_input_label() -> None:
 _REPLY_WORDS = st.sampled_from(["w0", "w1", "w2", "W3.", "junk", "w5", "", "<spk:1>"])
 
 
-@settings(deadline=None)
 @given(
     labels=st.lists(st.none() | st.integers(min_value=0, max_value=2), min_size=0, max_size=30),
     reply=st.lists(
@@ -273,7 +272,7 @@ def _garbled(seed: int) -> Callable[[str], str]:
     return reply
 
 
-@settings(max_examples=25, deadline=None)
+@settings(max_examples=25)
 @given(
     runs=st.lists(
         st.tuples(st.sampled_from([None, 0, 3, 8]), st.integers(min_value=1, max_value=400)),
@@ -458,7 +457,6 @@ def test_words_before_the_first_tag_count_toward_the_word_check() -> None:
 _PREFIX_WORDS = st.sampled_from(["w0", "w1", "w2", "junk"])
 
 
-@settings(deadline=None)
 @given(
     count=st.integers(min_value=2, max_value=12),
     cut=st.integers(min_value=0, max_value=12),
