@@ -526,14 +526,15 @@ def _list_disputes(picked: Transcript | None, out: Path, inputs: dict[str, Path]
     another `out`.
     """
     path = sibling(out, ".disputes.md")
-    # A directory there is not one scribe wrote, and planning would refuse it.
-    if picked is None and not (path.is_symlink() or path.is_file()):
-        return
     read = {"--out": out, **inputs, "the Parakeet transcript": sibling(out, ".parakeet.json")}
     try:
+        # A directory there is not one scribe wrote, and planning would refuse it.
+        if picked is None and not (path.is_symlink() or path.is_file()):
+            return
         plan = plan_outputs({"the disputes list": path}, read)
-    # RuntimeError too: resolving a link that loops raises it, not OSError.
-    except (AppError, RuntimeError) as exc:
+    # OSError too: a name too long for the filesystem fails the lookup. RuntimeError:
+    # resolving a link that loops raises it.
+    except (AppError, OSError, RuntimeError) as exc:
         refused = "not listing the disputes" if picked is not None else f"not removing {path}"
         _warn(f"{refused}: {exc}")
         return
@@ -555,10 +556,9 @@ def _list_disputes(picked: Transcript | None, out: Path, inputs: dict[str, Path]
 
 def _remove_stale_list(path: Path) -> str | None:
     """Remove the file or link at `path`, never a directory; say why it stays, if it does."""
-    if not (path.is_symlink() or path.is_file()):
-        return None
     try:
-        path.unlink(missing_ok=True)
+        if path.is_symlink() or path.is_file():
+            path.unlink(missing_ok=True)
     except OSError as exc:
         return f"cannot remove the stale {path}: {exc}"
     return None
