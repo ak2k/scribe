@@ -511,6 +511,9 @@ def fill_holes(transcript: Transcript, reference: Transcript) -> tuple[Transcrip
         "fill_words": fill.words,
         "fill_unresolved": len(fill.unresolved),
         "fill_ranges": json.dumps([[span.start, span.end] for span in fill.filled]),
+        # Beside the ranges, not in them, so their readers parse them as before:
+        # a range's times cannot tell its words from the word that closed the hole.
+        "fill_counts": json.dumps([span.words for span in fill.filled]),
         "fill_unresolved_ranges": json.dumps([[span.start, span.end] for span in fill.unresolved]),
         "fill_retimed_words": fill.retimed_words,
         "fill_retimed_runs": json.dumps([asdict(run) for run in fill.retimed]),
