@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import subprocess
 from collections import Counter
@@ -19,6 +20,7 @@ from typer.testing import CliRunner
 from scribe import disputes
 from scribe.cli import app
 from scribe.disputes import find_disputes, render_disputes
+from scribe.errors import InputValidationError
 from scribe.pick import Side
 from scribe.schema import Engine, Source, Transcript, Word
 
@@ -610,6 +612,67 @@ def test_a_file_where_the_clips_directory_goes_is_refused(
 
     _refused_before_anything(result, fake, tmp_path)
     assert "not a directory" in result.stderr
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads through any mode bits")
+def test_an_unreadable_clips_directory_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = _ffmpeg(monkeypatch)
+    path = _recording(tmp_path, CLIPPED)
+    clips = tmp_path / "meeting.disputes.clips"
+    clips.mkdir()
+    clips.chmod(0o000)
+    try:
+        result = _invoke(path, "--clips")
+    finally:
+        clips.chmod(0o755)
+
+    _refused_before_anything(result, fake, tmp_path)
+    assert "cannot read the clips directory" in result.stderr
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root writes through any mode bits")
+def test_an_unwritable_list_is_refused_before_any_clip(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = _ffmpeg(monkeypatch)
+    path = _recording(tmp_path, CLIPPED)
+    out = tmp_path / "out"
+    out.mkdir()
+    out.chmod(0o555)
+    try:
+        result = _invoke(path, "--clips", "--out", str(out / "list.md"))
+    finally:
+        out.chmod(0o755)
+
+    assert result.exit_code == 2
+    assert "cannot write" in result.stderr
+    assert fake.calls == []
+    assert list(out.iterdir()) == []
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root writes through any mode bits")
+def test_a_clips_directory_that_cannot_be_made_is_an_input_error(tmp_path: Path) -> None:
+    fake = Ffmpeg()
+    entries = find_disputes(_transcript(CLIPPED), Path("m.json")).entries
+    parent = tmp_path / "locked"
+    parent.mkdir()
+    parent.chmod(0o555)
+    try:
+        with pytest.raises(InputValidationError, match="cannot make the clips directory"):
+            disputes.cut_clips(
+                entries,
+                tmp_path / "recording.mp3",
+                parent / "list.clips",
+                duration=60.0,
+                run=fake.run,
+                which=lambda _name: "/usr/bin/ffmpeg",
+            )
+    finally:
+        parent.chmod(0o755)
+
+    assert fake.calls == []
 
 
 def test_missing_ffmpeg_exits_2_naming_it_before_the_clips_directory_is_made(

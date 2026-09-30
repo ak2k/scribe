@@ -36,6 +36,13 @@ from scribe.cleanup import (
 from scribe.coverage import describe, fill_holes, moved, possible_drop
 from scribe.curated import fill_ranges, read_front, render_curated
 from scribe.diarizer import MODEL, PACKAGE, REVISION, VERSION, PyannoteDiarizer
+from scribe.disputes import (
+    clips_directory,
+    cut_clips,
+    find_disputes,
+    render_disputes,
+    summarize,
+)
 from scribe.errors import AppError, ExternalServiceError, InputValidationError
 from scribe.fidelity import check_fidelity
 from scribe.gaps import check_gaps, clock, format_gap
@@ -1346,6 +1353,82 @@ def pick_command(
     typer.echo(str(plan["--out"]))
     if picking.chunks and len(picking.failed) == len(picking.chunks):
         raise typer.Exit(_EXIT_NO_CHUNK)
+
+
+@app.command(name="disputes")
+def disputes_command(
+    transcript_path: Path = typer.Argument(
+        ...,
+        metavar="TRANSCRIPT",
+        help="Transcript the pick ran on, as `scribe transcribe` or `scribe pick` writes.",
+    ),
+    out: Path | None = typer.Option(
+        None,
+        "--out",
+        help="Where to write the list. Default: TRANSCRIPT's name ending .disputes.md.",
+    ),
+    clips: bool = typer.Option(
+        False, "--clips", help="Also cut each entry's audio into a directory beside --out."
+    ),
+    audio: Path | None = typer.Option(
+        None, "--audio", help="Audio to cut the clips from. Default: TRANSCRIPT's source audio."
+    ),
+) -> None:
+    """List every spot where a transcript and its reference disagreed, likeliest errors first.
+
+    TRANSCRIPT is one the pick ran on, in `scribe transcribe` or `scribe pick`.
+    Every spot the pick recorded is listed once: where, the reading the
+    transcript holds and the engine that heard it, then the reading set aside
+    and its engine. So is every span the fill put the reference's words in,
+    and every span of possible dropped speech it could not repair. Entries are
+    ranked by band, then by time. A: words missing on one side, which is a
+    reading 5 or more words shorter than the other, a pick guarded or
+    restored, or a fill or unresolved span. B: the pick was unsure or gave no
+    answer. C: 4 or more words differ. D: 1 to 3 differ. E: the readings
+    differ only in fillers, repeats, punctuation or spellings the pick sets
+    aside. Text outside these spots is where both engines agreed, and both can
+    be wrong the same way. The quotes are the words before cleanup.
+
+    --clips also cuts each entry's audio, from 3 s before it to 3 s after, into
+    an AAC file named for its number and start, in a directory named for --out
+    with .clips in place of .md, and links each entry to its clip. The audio is
+    --audio, else TRANSCRIPT's source audio, read relative to the current
+    directory; a recorded sha256 must match it. It needs ffmpeg on PATH.
+
+    Writes only --out and, with --clips, its clips directory; sends nothing
+    over the network. Exit 2 is a bad input, a transcript with no pick record,
+    an unwritable output, --audio without --clips, or, with --clips, audio
+    that is missing or not TRANSCRIPT's, no ffmpeg, or a clips directory that
+    is not empty, all found before anything is written. A failed cut exits 2
+    too: the clips cut before it stay, and no list is written.
+    """
+    try:
+        if audio is not None and not clips:
+            raise InputValidationError("--audio is read only by --clips")
+        transcript = Transcript.load(transcript_path)
+        found = find_disputes(transcript, transcript_path)
+        destination = sibling(transcript_path, ".disputes.md") if out is None else out
+        inputs = {"TRANSCRIPT": transcript_path}
+        recording = _source_audio(transcript.source, audio) if clips else None
+        if recording is not None:
+            inputs["the audio file"] = recording
+        plan = plan_outputs({"--out": destination}, inputs)
+        linked: dict[int, Path] = {}
+        if recording is not None:
+            # Before the clips: a list that cannot be written after them leaves
+            # a clips directory that blocks the next run.
+            prove_writable(plan)
+            # Beside --out, never planned with it: plan_outputs refuses a
+            # directory that exists, where an empty one is fine here.
+            directory = clips_directory(plan["--out"])
+            cut = cut_clips(found.entries, recording, directory, duration=transcript.duration)
+            linked = {number: Path(directory.name, clip.name) for number, clip in cut.items()}
+        _write_text(plan["--out"], render_disputes(found, linked))
+    except AppError as exc:
+        _fail(exc)
+
+    _warn(summarize(found))
+    typer.echo(str(plan["--out"]))
 
 
 @app.command()
