@@ -718,6 +718,23 @@ def test_a_link_to_itself_at_the_lists_path_is_one_line_and_stays(
     assert listed.is_symlink()
 
 
+def test_a_list_name_too_long_to_look_up_is_one_line(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _setup(monkeypatch)
+    _patch(monkeypatch)
+    # Short enough to write, too long once .disputes.md is added.
+    out = tmp_path / f"{'x' * 250}.txt"
+
+    result = _transcribe(tmp_path, "--no-cross-check", "--out", str(out))
+
+    assert result.exit_code == 0, result.output
+    assert result.stdout == f"{out}\n"
+    lines = result.stderr.splitlines()
+    assert lines[-1].startswith(f"scribe: not removing {out}.disputes.md: "), lines
+    assert "too long" in lines[-1]
+
+
 def test_the_help_says_where_the_disputes_list_goes() -> None:
     result = runner.invoke(app, ["transcribe", "--help"], terminal_width=200)
 
