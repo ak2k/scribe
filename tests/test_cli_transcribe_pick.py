@@ -838,6 +838,22 @@ def test_a_link_to_parakeets_transcript_at_the_lists_path_is_not_written_through
     assert [word.text for word in Transcript.load(kept).words] == [text for text, _, _ in HEARD]
 
 
+def _within(seconds: int, run: Callable[[], Result]) -> Result:
+    """Fail, rather than hang the suite, if `run` blocks for `seconds`."""
+
+    def hung(_signum: int, _frame: FrameType | None) -> NoReturn:
+        # Not an OSError, which the write would report as one line and carry on.
+        raise AssertionError(f"the run hung for {seconds} s")
+
+    previous = signal.signal(signal.SIGALRM, hung)
+    signal.alarm(seconds)
+    try:
+        return run()
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, previous)
+
+
 def test_a_fifo_at_the_lists_path_is_one_line_not_a_hang(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -846,22 +862,41 @@ def test_a_fifo_at_the_lists_path_is_one_line_not_a_hang(
     listed = tmp_path / "clip.disputes.md"
     os.mkfifo(listed)
 
-    def hung(_signum: int, _frame: FrameType | None) -> NoReturn:
-        # Not an OSError, which the write would report as one line and carry on.
-        raise AssertionError("the run hung opening the FIFO")
-
-    previous = signal.signal(signal.SIGALRM, hung)
-    signal.alarm(10)
-    try:
-        result = _transcribe(tmp_path)
-    finally:
-        signal.alarm(0)
-        signal.signal(signal.SIGALRM, previous)
+    result = _within(10, partial(_transcribe, tmp_path))
 
     assert result.exit_code == 0, result.output
     assert result.stdout == f"{tmp_path / 'clip.transcript.json'}\n"
     lines = result.stderr.splitlines()
     assert lines[-1].startswith(f"scribe: not listing the disputes: cannot write {listed}: "), lines
+    assert stat.S_ISFIFO(listed.lstat().st_mode)
+
+
+def test_a_fifo_whose_reader_never_reads_is_one_line_not_a_hang(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Every third word heard otherwise: a list of some 120 kB, more than a pipe holds.
+    changed = {index: f"x{index}" for index in range(2, 4500, 3)}
+    _setup(
+        monkeypatch,
+        said=[(word.text, word.start, word.end) for word in numbered(4500)],
+        heard=[(word.text, word.start, word.end) for word in numbered(4500, changed)],
+        duration=4500.0,
+    )
+    _patch(monkeypatch)
+    listed = tmp_path / "clip.disputes.md"
+    os.mkfifo(listed)
+    # Held open and never read: a writer can open the FIFO, then blocks once it is full.
+    reader = os.open(listed, os.O_RDONLY | os.O_NONBLOCK)
+    try:
+        result = _within(10, partial(_transcribe, tmp_path))
+    finally:
+        os.close(reader)
+
+    assert result.exit_code == 0, result.output
+    assert result.stdout == f"{tmp_path / 'clip.transcript.json'}\n"
+    assert result.stderr.splitlines()[-1] == (
+        f"scribe: not listing the disputes: cannot write {listed}: not a regular file"
+    )
     assert stat.S_ISFIFO(listed.lstat().st_mode)
 
 
