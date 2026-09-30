@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import json
+import os
+import stat
 import subprocess
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, NoReturn, override
 
 import pytest
 from typer.testing import CliRunner
 
-from scribe import ensemble
+from scribe import ensemble, gaps
 from scribe.claude_cli import ClaudeCliBackend
 from scribe.cli import app
 from scribe.coverage import fill_holes
@@ -41,6 +44,13 @@ FILL_LINES = [
     "scribe: cross-check: 1 span filled with 3 words from Parakeet, 0 unresolved",
 ]
 KEPT = "; --out keeps the filled words"
+PICKED = (
+    "scribe: picked the reference's reading at 1 of 1 disputed spots (0 unsure) "
+    f"with {DEFAULT_PICK_MODEL}, prompt {PICK_PROMPT_VERSION}"
+)
+# The fill's span, and the one spot, a word apart.
+LISTED = "2 entries: A 1, B 0, C 0, D 1, E 0; 1 fill span, 0 unresolved"
+LINUX = ("Linux", "x86_64")
 runner = CliRunner()
 
 
@@ -50,6 +60,7 @@ def _setup(
     said: Sequence[Timed] = SAID,
     heard: Sequence[Timed] = HEARD,
     duration: float = 9.0,
+    host: tuple[str, str] = ("Darwin", "arm64"),
 ) -> None:
     words = [{"text": text, "start": start, "end": end, "speaker": 0} for text, start, end in said]
     payload: dict[str, object] = {
@@ -85,7 +96,7 @@ def _setup(
         return subprocess.CompletedProcess(argv, 0, "", "")
 
     backend = ParakeetMlx(
-        run=run_parakeet, which=lambda name: f"/opt/bin/{name}", host=lambda: ("Darwin", "arm64")
+        run=run_parakeet, which=lambda name: f"/opt/bin/{name}", host=lambda: host
     )
     monkeypatch.setattr("scribe.cli.XaiStt", Xai)
     monkeypatch.setattr("scribe.cli.ParakeetMlx", lambda: backend)
@@ -154,12 +165,12 @@ def test_the_default_run_takes_parakeets_reading_where_the_model_picks_it(
     assert params["pick_reference"] == "parakeet-mlx mlx-community/parakeet-tdt-0.6b-v3"
     assert result.stderr.splitlines()[1:] == [
         *FILL_LINES,
-        "scribe: picked the reference's reading at 1 of 1 disputed spots (0 unsure) "
-        f"with {DEFAULT_PICK_MODEL}, prompt {PICK_PROMPT_VERSION}",
+        PICKED,
+        f"scribe: listed the disputes in {tmp_path / 'clip.disputes.md'}: {LISTED}",
     ]
     assert [system for system, _ in made[0].calls] == [system_prompt()]
     assert sorted(path.name for path in tmp_path.iterdir()) == [
-        *("clip.parakeet.json", "clip.transcript.json", "clip.wav")
+        *("clip.disputes.md", "clip.parakeet.json", "clip.transcript.json", "clip.wav")
     ]
 
 
@@ -294,7 +305,7 @@ def test_some_chunks_failing_prints_both_lines_and_exits_zero(
     assert result.exit_code == 0, result.output
     out = tmp_path / "clip.transcript.json"
     assert result.stdout == f"{out}\n"
-    assert result.stderr.splitlines()[-2:] == [
+    assert result.stderr.splitlines()[-3:-1] == [
         "scribe: picked the reference's reading at 1 of 2 disputed spots (0 unsure) "
         f"with {DEFAULT_PICK_MODEL}, prompt {PICK_PROMPT_VERSION}",
         "scribe: the pick failed on 1 of 2 chunks (0); their 1 spots keep the transcript's words",
@@ -420,3 +431,261 @@ def test_pick_context_with_no_pick_to_take_it_exits_two_before_the_upload(
         "and --no-cross-check each turn off\n"
     )
     assert [path.name for path in tmp_path.iterdir()] == ["clip.wav"]
+
+
+def test_a_run_whose_pick_rewrote_out_lists_its_disputes_beside_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _setup(monkeypatch)
+    _patch(monkeypatch)
+
+    result = _transcribe(tmp_path)
+
+    assert result.exit_code == 0, result.output
+    out = tmp_path / "clip.transcript.json"
+    assert result.stdout == f"{out}\n"
+    listed = tmp_path / "clip.disputes.md"
+    assert result.stderr.splitlines()[-1] == f"scribe: listed the disputes in {listed}: {LISTED}"
+    alone = tmp_path / "alone.md"
+    written = runner.invoke(app, ["disputes", str(out), "--out", str(alone)])
+    assert written.exit_code == 0, written.output
+    assert listed.read_bytes() == alone.read_bytes()
+
+
+def _voting(monkeypatch: pytest.MonkeyPatch) -> list[FakeSpeakerBackend]:
+    monkeypatch.setattr(ensemble, "transcribe_voted", _voted)
+    return _patch(monkeypatch)
+
+
+def _no_parakeet(monkeypatch: pytest.MonkeyPatch) -> list[FakeSpeakerBackend]:
+    _setup(monkeypatch, host=LINUX)
+    # Loud throughout: the loudness check that stands in for Parakeet finds speech.
+    levels = "".join(
+        f"frame:{i} pts:{i}\nlavfi.astats.Overall.RMS_level=-20.0\n" for i in range(180)
+    )
+
+    def run_ffmpeg(argv: list[str], **_settings: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(argv, 0, stdout=levels, stderr="")
+
+    checked = partial(gaps.check_gaps, run=run_ffmpeg, which=lambda _name: "/usr/bin/ffmpeg")
+    monkeypatch.setattr("scribe.cli.check_gaps", checked)
+    return _patch(monkeypatch)
+
+
+def _fill_write_fails(monkeypatch: pytest.MonkeyPatch) -> list[FakeSpeakerBackend]:
+    dump = Transcript.dump
+
+    def refuse(self: Transcript, path: Path) -> None:
+        if path.name.startswith(".clip.transcript.json"):
+            raise OSError("disk full")
+        dump(self, path)
+
+    monkeypatch.setattr(Transcript, "dump", refuse)
+    return _patch(monkeypatch)
+
+
+def _no_spot(monkeypatch: pytest.MonkeyPatch) -> list[FakeSpeakerBackend]:
+    _setup(monkeypatch, heard=[SAID[0], SAID[1], *HEARD[2:]])
+    return _patch(monkeypatch)
+
+
+@pytest.mark.parametrize(
+    ("arrange", "flags"),
+    [
+        (_patch, ["--no-pick"]),
+        (_patch, ["--no-cross-check"]),
+        (_voting, ["--vote"]),
+        (_no_parakeet, []),
+        (_fill_write_fails, []),
+        (_out_of_order, []),
+        (_no_spot, []),
+        (_no_claude, []),
+        (_every_chunk_fails, []),
+        (_rewrite_fails, []),
+    ],
+    ids=[
+        *("no-pick", "no-cross-check", "vote", "no-parakeet", "fill-write-fails"),
+        *("out-of-order", "no-spot", "no-claude", "every-chunk-failed", "rewrite-fails"),
+    ],
+)
+def test_a_run_that_lists_nothing_removes_an_earlier_list_and_keeps_a_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    arrange: Callable[[pytest.MonkeyPatch], list[FakeSpeakerBackend]],
+    flags: list[str],
+) -> None:
+    _setup(monkeypatch)
+    arrange(monkeypatch)
+    out = tmp_path / "clip.transcript.json"
+    listed = tmp_path / "clip.disputes.md"
+    listed.write_text("an earlier run's list\n", encoding="utf-8")
+
+    result = _transcribe(tmp_path, *flags)
+
+    assert result.exit_code == 0, result.output
+    assert result.stdout == f"{out}\n"
+    assert not listed.exists()
+    assert str(listed) not in result.stderr
+    kept = listed / "notes.txt"
+    listed.mkdir()
+    kept.write_text("not scribe's\n", encoding="utf-8")
+
+    again = _transcribe(tmp_path, *flags)
+
+    assert again.exit_code == 0, again.output
+    assert again.stdout == f"{out}\n"
+    assert kept.read_text(encoding="utf-8") == "not scribe's\n"
+    assert str(listed) not in again.stderr
+
+
+def test_a_link_an_earlier_run_left_goes_and_what_it_points_to_stays(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _setup(monkeypatch)
+    _patch(monkeypatch)
+    target = tmp_path / "elsewhere.md"
+    target.write_text("an earlier run's list\n", encoding="utf-8")
+    listed = tmp_path / "clip.disputes.md"
+    listed.symlink_to(target)
+
+    result = _transcribe(tmp_path, "--no-pick")
+
+    assert result.exit_code == 0, result.output
+    assert not listed.is_symlink()
+    assert target.read_text(encoding="utf-8") == "an earlier run's list\n"
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root writes through any mode bits")
+def test_a_list_that_cannot_be_written_is_one_line_and_leaves_no_earlier_list(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _setup(monkeypatch)
+    _patch(monkeypatch)
+    listed = tmp_path / "clip.disputes.md"
+    listed.write_text("an earlier run's list\n", encoding="utf-8")
+    listed.chmod(0o444)
+
+    result = _transcribe(tmp_path)
+
+    assert result.exit_code == 0, result.output
+    out = tmp_path / "clip.transcript.json"
+    assert result.stdout == f"{out}\n"
+    lines = result.stderr.splitlines()
+    assert lines[1:-1] == [*FILL_LINES, PICKED]
+    assert lines[-1].startswith(f"scribe: not listing the disputes: cannot write {listed}: "), lines
+    assert not listed.exists()
+    assert _texts(out) == ["Hello", "bear.", "we", "lost", "this", "Bye."]
+
+
+def test_a_directory_at_the_lists_path_is_one_line_and_stays(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _setup(monkeypatch)
+    _patch(monkeypatch)
+    listed = tmp_path / "clip.disputes.md"
+    kept = listed / "notes.txt"
+    listed.mkdir()
+    kept.write_text("not scribe's\n", encoding="utf-8")
+
+    result = _transcribe(tmp_path)
+
+    assert result.exit_code == 0, result.output
+    out = tmp_path / "clip.transcript.json"
+    assert result.stdout == f"{out}\n"
+    assert result.stderr.splitlines()[1:] == [
+        *FILL_LINES,
+        PICKED,
+        f"scribe: not listing the disputes: the disputes list {listed} is a directory",
+    ]
+    assert kept.read_text(encoding="utf-8") == "not scribe's\n"
+    assert _texts(out) == ["Hello", "bear.", "we", "lost", "this", "Bye."]
+
+
+@pytest.mark.parametrize(
+    ("flags", "refused"),
+    [([], "not listing the disputes: "), (["--no-pick"], "not removing {path}: ")],
+    ids=["pick", "no-pick"],
+)
+def test_the_audio_at_the_lists_path_is_never_written_or_removed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, flags: list[str], refused: str
+) -> None:
+    _setup(monkeypatch)
+    _patch(monkeypatch)
+    audio = tmp_path / "clip.disputes.md"
+    audio.write_bytes(b"pretend this is audio")
+    out = tmp_path / "clip.transcript.json"
+
+    result = runner.invoke(app, ["transcribe", str(audio), "--out", str(out), *flags])
+
+    assert result.exit_code == 0, result.output
+    assert result.stdout == f"{out}\n"
+    assert audio.read_bytes() == b"pretend this is audio"
+    assert result.stderr.splitlines()[-1] == (
+        f"scribe: {refused.format(path=audio)}the disputes list {audio} is the audio file"
+    )
+
+
+def test_a_link_to_parakeets_transcript_at_the_lists_path_is_not_written_through(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _setup(monkeypatch)
+    _patch(monkeypatch)
+    kept = tmp_path / "clip.parakeet.json"
+    listed = tmp_path / "clip.disputes.md"
+    listed.symlink_to(kept)
+
+    result = _transcribe(tmp_path)
+
+    assert result.exit_code == 0, result.output
+    assert result.stderr.splitlines()[-1] == (
+        f"scribe: not listing the disputes: the disputes list {listed} is the Parakeet transcript"
+    )
+    assert [word.text for word in Transcript.load(kept).words] == [text for text, _, _ in HEARD]
+
+
+def test_a_fifo_at_the_lists_path_is_one_line_not_a_hang(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _setup(monkeypatch)
+    _patch(monkeypatch)
+    listed = tmp_path / "clip.disputes.md"
+    os.mkfifo(listed)
+
+    result = _transcribe(tmp_path)
+
+    assert result.exit_code == 0, result.output
+    assert result.stdout == f"{tmp_path / 'clip.transcript.json'}\n"
+    lines = result.stderr.splitlines()
+    assert lines[-1].startswith(f"scribe: not listing the disputes: cannot write {listed}: "), lines
+    assert stat.S_ISFIFO(listed.lstat().st_mode)
+
+
+@pytest.mark.parametrize(
+    ("flags", "refused"),
+    [([], "not listing the disputes: "), (["--no-pick"], "not removing {path}: ")],
+    ids=["pick", "no-pick"],
+)
+def test_a_link_to_itself_at_the_lists_path_is_one_line_and_stays(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, flags: list[str], refused: str
+) -> None:
+    _setup(monkeypatch)
+    _patch(monkeypatch)
+    listed = tmp_path / "clip.disputes.md"
+    listed.symlink_to(listed)
+
+    result = _transcribe(tmp_path, *flags)
+
+    assert result.exit_code == 0, result.output
+    assert result.stdout == f"{tmp_path / 'clip.transcript.json'}\n"
+    lines = result.stderr.splitlines()
+    assert lines[-1].startswith(f"scribe: {refused.format(path=listed)}"), lines
+    assert listed.is_symlink()
+
+
+def test_the_help_says_where_the_disputes_list_goes() -> None:
+    result = runner.invoke(app, ["transcribe", "--help"], terminal_width=200)
+
+    assert result.exit_code == 0
+    shown = " ".join(result.stdout.split())
+    for needed in ["scribe disputes", "BASE.disputes.md"]:
+        assert needed in shown, needed
