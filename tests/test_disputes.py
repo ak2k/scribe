@@ -19,6 +19,7 @@ from typer.testing import CliRunner
 
 from scribe import disputes
 from scribe.cli import app
+from scribe.coverage import fill_holes
 from scribe.disputes import find_disputes, render_disputes
 from scribe.errors import InputValidationError
 from scribe.pick import Side
@@ -217,9 +218,9 @@ def test_the_header_names_the_recording_both_engines_the_counts_and_the_caveats(
 def test_a_fill_entry_carries_the_words_delivered_in_its_span() -> None:
     words = [
         Word(text=text, start=start, end=start + 0.2)
-        for text, start in [("before", 9.9), ("we", 10.0), ("lost", 11.0), ("this", 12.0)]
+        for text, start in [("before", 9.7), ("we", 10.0), ("lost", 11.0), ("this", 11.8)]
     ]
-    words.append(Word(text="after", start=12.1, end=12.3))
+    words.append(Word(text="after", start=12.0, end=12.3))
     transcript = _transcript(words=words, params={"fill_ranges": "[[10.0, 12.0]]"})
 
     found = find_disputes(transcript, Path("m.json"))
@@ -236,6 +237,34 @@ def test_a_fill_entry_carries_the_words_delivered_in_its_span() -> None:
         "1. 00:00:10\N{EN DASH}00:00:12 \N{MIDDLE DOT} xai-stt heard nothing; "
         'filled from parakeet-mlx: "we lost this"'
     )
+
+
+def test_a_fill_entry_holds_only_the_words_the_fill_put_in() -> None:
+    own = [Word(text="before", start=0.0, end=0.4), Word(text="after", start=3.0, end=3.3)]
+    heard = [
+        Word(text=text, start=start, end=end)
+        for text, start, end in [
+            ("one", 1.0, 1.4),
+            ("two", 1.8, 2.2),
+            ("three", 2.5, 3.0),
+            ("after", 3.0, 3.3),
+        ]
+    ]
+    reference = Transcript(
+        source=Source(kind="audio", ref="recording.mp3"),
+        engine=Engine(name="parakeet-mlx", model="mlx-community/parakeet-tdt-0.6b-v3"),
+        duration=None,
+        text="",
+        words=heard,
+    )
+    filled, _ = fill_holes(_transcript(words=own), reference)
+    # The word closing the hole starts where the last inserted word ends.
+    assert filled.engine.params["fill_ranges"] == "[[1.0, 3.0]]"
+
+    (entry,) = find_disputes(filled, Path("m.json")).entries
+
+    assert (entry.kind, entry.delivered, entry.words) == ("fill", "one two three", 3)
+    assert entry.words == filled.engine.params["fill_words"]
 
 
 def test_an_unresolved_entry_counts_the_words_delivered_in_its_span() -> None:
