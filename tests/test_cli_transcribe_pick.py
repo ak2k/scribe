@@ -51,7 +51,7 @@ PICKED = (
     "scribe: picked the reference's reading at 1 of 1 disputed spots (0 unsure) "
     f"with {DEFAULT_PICK_MODEL}, prompt {PICK_PROMPT_VERSION}"
 )
-# The fill's span, and the one spot, a word apart.
+# The fill's span in band A, and the one spot in band D: its two readings differ by one word.
 LISTED = "2 entries: A 1, B 0, C 0, D 1, E 0; 1 fill span, 0 unresolved"
 LINUX = ("Linux", "x86_64")
 runner = CliRunner()
@@ -378,19 +378,28 @@ def test_pick_model_and_context_reach_the_pick(
     assert (params["pick_model"], params["pick_context_chars"]) == ("sonnet", 31)
 
 
-def test_a_fill_that_cannot_be_written_is_not_picked(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    _setup(monkeypatch)
-    made = _patch(monkeypatch)
+def _refuse_dump(monkeypatch: pytest.MonkeyPatch, refused: Callable[[str], bool]) -> None:
     dump = Transcript.dump
 
     def refuse(self: Transcript, path: Path) -> None:
-        if path.name.startswith(".clip.transcript.json"):
+        if refused(path.name):
             raise OSError("disk full")
         dump(self, path)
 
     monkeypatch.setattr(Transcript, "dump", refuse)
+
+
+def _fill_write_fails(monkeypatch: pytest.MonkeyPatch) -> list[FakeSpeakerBackend]:
+    # The fill rewrites --out through a temporary file beside it.
+    _refuse_dump(monkeypatch, lambda name: name.startswith(".clip.transcript.json"))
+    return _patch(monkeypatch)
+
+
+def test_a_fill_that_cannot_be_written_is_not_picked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _setup(monkeypatch)
+    made = _fill_write_fails(monkeypatch)
 
     result = _transcribe(tmp_path, "--pick")
 
@@ -472,18 +481,6 @@ def _no_parakeet(monkeypatch: pytest.MonkeyPatch) -> list[FakeSpeakerBackend]:
 
     checked = partial(gaps.check_gaps, run=run_ffmpeg, which=lambda _name: "/usr/bin/ffmpeg")
     monkeypatch.setattr("scribe.cli.check_gaps", checked)
-    return _patch(monkeypatch)
-
-
-def _fill_write_fails(monkeypatch: pytest.MonkeyPatch) -> list[FakeSpeakerBackend]:
-    dump = Transcript.dump
-
-    def refuse(self: Transcript, path: Path) -> None:
-        if path.name.startswith(".clip.transcript.json"):
-            raise OSError("disk full")
-        dump(self, path)
-
-    monkeypatch.setattr(Transcript, "dump", refuse)
     return _patch(monkeypatch)
 
 
@@ -571,14 +568,7 @@ def _xai_fails(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _out_write_fails(monkeypatch: pytest.MonkeyPatch) -> None:
-    dump = Transcript.dump
-
-    def refuse(self: Transcript, path: Path) -> None:
-        if path.name == "clip.transcript.json":
-            raise OSError("disk full")
-        dump(self, path)
-
-    monkeypatch.setattr(Transcript, "dump", refuse)
+    _refuse_dump(monkeypatch, lambda name: name == "clip.transcript.json")
 
 
 def _vote_fails(monkeypatch: pytest.MonkeyPatch) -> None:
