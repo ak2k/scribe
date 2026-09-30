@@ -100,12 +100,14 @@ def _invoke(path: Path, *args: str) -> Result:
         pytest.param("restored", "cat", "hat", "A", id="restored-is-A"),
         pytest.param("guarded", "cat", "hat", "A", id="guarded-is-A"),
         pytest.param("failed", "the cat sat down", "a dog ran up", "B", id="failed-is-B"),
+        pytest.param("failed", "go", "go and fetch my red hat", "A", id="failed-surplus-5-is-A"),
         pytest.param("unsure", "cat", "hat", "B", id="unsure-is-B"),
         pytest.param(
             "reference", "the cat sat down", "a dog ran up", "C", id="reference-cdiff-4-C"
         ),
         pytest.param("transcript", "the big red", "a small blue", "D", id="cdiff-3-is-D"),
         pytest.param("reference", "cat", "hat", "D", id="cdiff-1-is-D"),
+        pytest.param("transcript", "a cat and a dog", "a cat and dog", "D", id="repeat-counts"),
         pytest.param("transcript", "gonna go", "going to go", "E", id="cdiff-0-is-E"),
         pytest.param("reference", "Cat.", "cat", "E", id="punctuation-only-is-E"),
     ],
@@ -494,7 +496,9 @@ def test_clips_read_the_source_audio_relative_to_the_working_directory(
 ) -> None:
     fake = _ffmpeg(monkeypatch)
     (tmp_path / "recording.mp3").write_bytes(b"pretend this is audio")
-    path = tmp_path / "meeting.json"
+    # Elsewhere than the working directory, so a ref read beside it is not found.
+    path = tmp_path / "run" / "meeting.json"
+    path.parent.mkdir()
     _transcript(CLIPPED[:1], ref="recording.mp3").dump(path)
     monkeypatch.chdir(tmp_path)
 
@@ -518,6 +522,21 @@ def test_an_out_not_ending_md_gets_its_name_plus_clips(
     assert result.stdout == f"{out}\n"
     assert [child.name for child in (tmp_path / "list.txt.clips").iterdir()] == ["001-000001.m4a"]
     assert out.read_text(encoding="utf-8").count("clip: list.txt.clips/001-000001.m4a") == 1
+
+
+def test_clips_refuse_an_out_that_is_the_audio(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = _ffmpeg(monkeypatch)
+    path = _recording(tmp_path, CLIPPED)
+    audio = tmp_path / "recording.mp3"
+
+    result = _invoke(path, "--clips", "--out", str(audio))
+
+    assert result.exit_code == 2
+    assert "is the audio file" in result.stderr
+    assert fake.calls == []
+    assert audio.read_bytes() == b"pretend this is audio"
 
 
 def test_an_empty_clips_directory_is_used(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
