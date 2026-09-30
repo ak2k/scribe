@@ -393,14 +393,17 @@ def transcribe(
     except AppError as exc:
         _fail(exc)
 
-    spoken = "audio" if transcript.duration is None else f"{transcript.duration:.1f} s of audio"
-    typer.echo(f"transcribed {spoken} in {time.monotonic() - started:.1f} s", err=True)
     picked = None
-    if cross_check:
-        checked = _cross_check(audio_path, transcript, plan["--out"], inputs)
-        if pick and checked is not None:
-            picked = _pick(*checked, plan["--out"], model=pick_model, context=pick_context)
-    _list_disputes(picked, plan["--out"], inputs)
+    # --out is rewritten, so an earlier list beside it is stale even if the run stops here.
+    try:
+        spoken = "audio" if transcript.duration is None else f"{transcript.duration:.1f} s of audio"
+        typer.echo(f"transcribed {spoken} in {time.monotonic() - started:.1f} s", err=True)
+        if cross_check:
+            checked = _cross_check(audio_path, transcript, plan["--out"], inputs)
+            if pick and checked is not None:
+                picked = _pick(*checked, plan["--out"], model=pick_model, context=pick_context)
+    finally:
+        _list_disputes(picked, plan["--out"], inputs)
     typer.echo(str(plan["--out"]))
 
 
