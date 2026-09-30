@@ -434,7 +434,8 @@ def test_an_end_before_its_start_is_named_as_such(tmp_path: Path) -> None:
 
 def test_a_spot_starting_before_the_recording_is_named_as_such(tmp_path: Path) -> None:
     path = tmp_path / "meeting.json"
-    _transcript([(1.0, 2.0, "a", "b", "transcript"), (-2.0, -1.0, "a", "b", "transcript")]).dump(
+    # Ending after 0, so only its start is out of the recording.
+    _transcript([(1.0, 2.0, "a", "b", "transcript"), (-0.5, 1.0, "a", "b", "transcript")]).dump(
         path
     )
 
