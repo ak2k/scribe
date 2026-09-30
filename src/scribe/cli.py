@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import errno
 import hashlib
 import json
 import os
@@ -533,7 +534,7 @@ def _list_disputes(picked: Transcript | None, out: Path, inputs: dict[str, Path]
     read = {"--out": out, **inputs, "the Parakeet transcript": sibling(out, ".parakeet.json")}
     try:
         # A directory there is not one scribe wrote, and planning would refuse it.
-        if picked is None and not (path.is_symlink() or path.is_file()):
+        if picked is None and not _file_or_link(path):
             return
         plan = plan_outputs({"the disputes list": path}, read)
     # OSError too: a name too long for the filesystem fails the lookup. RuntimeError:
@@ -561,11 +562,21 @@ def _list_disputes(picked: Transcript | None, out: Path, inputs: dict[str, Path]
 def _remove_stale_list(path: Path) -> str | None:
     """Remove the file or link at `path`, never a directory; say why it stays, if it does."""
     try:
-        if path.is_symlink() or path.is_file():
+        if _file_or_link(path):
             path.unlink(missing_ok=True)
     except OSError as exc:
         return f"cannot remove the stale {path}: {exc}"
     return None
+
+
+def _file_or_link(path: Path) -> bool:
+    try:
+        return path.is_symlink() or path.is_file()
+    except OSError as exc:
+        # No file can have a name too long to look up.
+        if exc.errno == errno.ENAMETOOLONG:
+            return False
+        raise
 
 
 def _speakers_metadata(result: Relabeling, backend: ClaudeCliBackend, *, words: int) -> str:
