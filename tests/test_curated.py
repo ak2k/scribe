@@ -177,6 +177,16 @@ def test_a_malformed_fill_record_is_a_caller_error(tmp_path: Path, recorded: str
     assert str(source) in str(caught.value)
 
 
+def test_fill_ranges_read_the_key_they_are_given_and_name_it_in_an_error(tmp_path: Path) -> None:
+    source = tmp_path / "t.turns.json"
+    recorded = _engine(fill_ranges="[[1, 2]]", fill_unresolved_ranges="[[30.0, 60.0]]")
+
+    assert fill_ranges(recorded, source, key="fill_unresolved_ranges") == [(30.0, 60.0)]
+    malformed = _engine(fill_ranges="[[1, 2]]", fill_unresolved_ranges="[[60.0, 30.0]]")
+    with pytest.raises(InputValidationError, match="malformed fill_unresolved_ranges"):
+        fill_ranges(malformed, source, key="fill_unresolved_ranges")
+
+
 @pytest.mark.parametrize(
     "raw",
     [
