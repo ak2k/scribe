@@ -34,9 +34,13 @@ if TYPE_CHECKING:
 Row = tuple[float, float, str, str, str]
 
 REFERENCE = "parakeet-mlx mlx-community/parakeet-tdt-0.6b-v3"
-AGREED = (
-    "Text outside these spots is where both recognizers agreed. "
-    "Agreement is not verification: both can be wrong the same way."
+LISTED = (
+    "Listed: every spot where the pick compared the two recognizers' readings, "
+    "and every span the fill filled or flagged."
+)
+UNLISTED = (
+    "Not listed: short stretches only one recognizer heard (unless the fill filled or flagged "
+    "them), and words both got wrong the same way. Unlisted text is unverified."
 )
 QUOTES = "Quotes are the words before cleanup; the reading copy may word them differently."
 SIDES: tuple[str, ...] = get_args(Side)
@@ -186,7 +190,8 @@ def test_the_header_names_the_recording_both_engines_the_counts_and_the_caveats(
     assert "- Transcript: xai-stt grok-voice-transcribe-2.0\n" in markdown
     assert f"- Reference: {REFERENCE}\n" in markdown
     assert "- Fill spans: 1; unresolved spans: 1 (both listed in A)\n" in markdown
-    assert f"\n{AGREED}\n" in markdown
+    assert f"\n{LISTED}\n" in markdown
+    assert f"\n{UNLISTED}\n" in markdown
     assert f"\n{QUOTES}\n" in markdown
     assert (
         "- A. Words missing on one side: 3\n"
@@ -729,6 +734,7 @@ def test_the_help_says_what_it_writes_and_that_it_sends_nothing() -> None:
     assert result.exit_code == 0
     assert ".disputes.md" in text
     assert "sends nothing over the network" in text
+    assert "Unlisted text is unverified" in text
 
 
 _WORDS = ["the", "cat", "hat", "a", "sat", "uh", "gonna", "going", "to", "Cat.", "mat", "on"]

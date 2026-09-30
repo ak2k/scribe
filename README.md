@@ -65,8 +65,8 @@ Parakeet cannot run, and `--pick-context` with `--no-pick`, `--vote` or
 `scribe disputes talk.transcript.json` writes `talk.disputes.md`: every spot
 the pick recorded, and every span the fill filled or could not repair, each
 with where it is, the reading the transcript holds and the engine that heard
-it, and the reading set aside and its engine. Nothing is left out; entries are
-ranked so the likeliest errors come first:
+it, and the reading set aside and its engine. No recorded spot is left out;
+entries are ranked so the likeliest errors come first:
 
 - A, words missing on one side: a reading 5 or more words shorter than the other, a guarded or restored pick, a filled or unresolved span.
 - B, the pick was unsure or gave no answer.
@@ -77,9 +77,9 @@ ranked so the likeliest errors come first:
 `--clips` also cuts each entry's audio, 3 s on each side, into
 `talk.disputes.clips/` and links it from the entry; it needs `ffmpeg`, and
 reads `--audio` or the source audio, which must match its recorded sha256.
-Text outside the listed spots is where both engines agreed, and agreement is
-not verification: both can be wrong the same way. The command sends nothing
-over the network.
+Not listed: short stretches only one engine heard, unless the fill filled or
+flagged them, and words both got wrong the same way. Unlisted text is
+unverified. The command sends nothing over the network.
 
 `turns` groups the words into speaker turns. A transcript that carries turns
 but no words keeps its turns as they are.

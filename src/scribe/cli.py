@@ -1374,7 +1374,7 @@ def disputes_command(
         None, "--audio", help="Audio to cut the clips from. Default: TRANSCRIPT's source audio."
     ),
 ) -> None:
-    """List every spot where a transcript and its reference disagreed, likeliest errors first.
+    """List every spot the pick compared and every span the fill flagged, likeliest errors first.
 
     TRANSCRIPT is one the pick ran on, in `scribe transcribe` or `scribe pick`.
     Every spot the pick recorded is listed once: where, the reading the
@@ -1386,8 +1386,9 @@ def disputes_command(
     restored, or a fill or unresolved span. B: the pick was unsure or gave no
     answer. C: 4 or more words differ. D: 1 to 3 differ. E: the readings
     differ only in fillers, repeats, punctuation or spellings the pick sets
-    aside. Text outside these spots is where both engines agreed, and both can
-    be wrong the same way. The quotes are the words before cleanup.
+    aside. Not listed: short stretches only one engine heard, unless the fill
+    filled or flagged them, and words both got wrong the same way. Unlisted
+    text is unverified. The quotes are the words before cleanup.
 
     --clips also cuts each entry's audio, from 3 s before it to 3 s after, into
     an AAC file named for its number and start, in a directory named for --out

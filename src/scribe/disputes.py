@@ -1,12 +1,14 @@
-"""List every place a transcript and its reference disagreed, ranked for a reader to check.
+"""List the places the pick and the fill recorded two recognizers disagreeing, ranked for a reader.
 
 The pick records each spot it compared, with both readings and the side it
 took; the fill records each span it put the reference's words in, or found
 speech in that it could not repair. Each becomes one entry, given as a
 critical apparatus gives a variant: where, the reading the transcript holds
-and its engine, the reading set aside and its engine. None is left out, as a
-filter drops many of the pick's errors along with its noise; bands rank the
-entries instead, missed speech, the costliest error, first.
+and its engine, the reading set aside and its engine. No recorded spot is
+left out, as a filter drops many of the pick's errors along with its noise;
+bands rank the entries instead, missed speech, the costliest error, first. A
+short stretch only one recognizer heard is in neither record, so it is not
+listed unless the fill filled or flagged it.
 """
 
 from __future__ import annotations
@@ -51,9 +53,13 @@ BANDS: dict[Band, str] = {
     "D": f"1 to {MANY_WORDS - 1} words differ",
     "E": "No content difference",
 }
-AGREED = (
-    "Text outside these spots is where both recognizers agreed. "
-    "Agreement is not verification: both can be wrong the same way."
+LISTED = (
+    "Listed: every spot where the pick compared the two recognizers' readings, "
+    "and every span the fill filled or flagged."
+)
+UNLISTED = (
+    "Not listed: short stretches only one recognizer heard (unless the fill filled or flagged "
+    "them), and words both got wrong the same way. Unlisted text is unverified."
 )
 QUOTES = "Quotes are the words before cleanup; the reading copy may word them differently."
 
@@ -293,7 +299,9 @@ def render_disputes(disputes: Disputes, clips: Mapping[int, Path] | None = None)
         f"- Fill spans: {kinds['fill']}; unresolved spans: {kinds['unresolved']} "
         "(both listed in A)",
         "",
-        AGREED,
+        LISTED,
+        "",
+        UNLISTED,
         "",
         QUOTES,
         "",
