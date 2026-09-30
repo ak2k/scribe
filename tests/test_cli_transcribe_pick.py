@@ -575,6 +575,36 @@ def test_a_run_stopped_in_the_pick_leaves_no_earlier_list_beside_the_rewritten_o
     assert not listed.exists()
 
 
+def _looping_sidecar(tmp_path: Path) -> Path:
+    sidecar = tmp_path / "clip.parakeet.json"
+    sidecar.symlink_to(sidecar)
+    return tmp_path / "clip.transcript.json"
+
+
+def _sidecar_name_too_long(tmp_path: Path) -> Path:
+    # Short enough for --out and the fill's temporary file; too long once .parakeet.json is added.
+    return tmp_path / f"{'x' * 238}.txt"
+
+
+@pytest.mark.parametrize(
+    "arrange", [_looping_sidecar, _sidecar_name_too_long], ids=["loop", "too-long"]
+)
+def test_a_parakeet_transcript_that_cannot_be_planned_is_not_kept_and_the_run_goes_on(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, arrange: Callable[[Path], Path]
+) -> None:
+    _setup(monkeypatch)
+    _patch(monkeypatch)
+    out = arrange(tmp_path)
+
+    result = _transcribe(tmp_path, "--out", str(out))
+
+    assert result.exit_code == 0, result.output
+    assert result.stdout == f"{out}\n"
+    lines = result.stderr.splitlines()
+    assert lines[1].startswith("scribe: not keeping Parakeet's transcript: "), lines
+    assert _texts(out) == ["Hello", "bear.", "we", "lost", "this", "Bye."]
+
+
 @pytest.mark.skipif(os.geteuid() == 0, reason="root writes through any mode bits")
 def test_a_list_that_cannot_be_written_is_one_line_and_leaves_no_earlier_list(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
