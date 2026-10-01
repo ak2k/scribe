@@ -61,6 +61,7 @@ def _patch(
     fail_when: Callable[[str], bool] | None = None,
     fail_with: Callable[[], BaseException] | None = None,
     wrap: bool = True,
+    trailer: Callable[[str], str] | None = None,
 ) -> list[FakeSpeakerBackend]:
     made: list[FakeSpeakerBackend] = []
 
@@ -72,6 +73,7 @@ def _patch(
             fail_when=fail_when,
             fail_with=service_error if fail_with is None else fail_with,
             wrap=wrap,
+            trailer=trailer,
         )
         made.append(backend)
         return backend
@@ -625,3 +627,209 @@ def test_an_artifact_linked_into_a_read_only_dir_is_refused_before_any_call(
     assert "cannot write" in result.stderr
     assert made[0].calls == []
     assert sorted(path.name for path in out.iterdir()) == ["transcript_two_speakers.md"]
+
+
+MEETING = (
+    (7, "Okay, let's start. Connor, can you share the deck?"),
+    (3, "Sure, sharing it now."),
+    (7, "Thanks. Jose, what do you think of it?"),
+    (5, "Looks good to me."),
+    (7, "Great. Connor, one more thing about pricing."),
+    (3, "Yes, pricing is settled."),
+    (7, "And Jose, the timeline?"),
+    (5, "End of month."),
+)
+
+
+def _meeting(tmp_path: Path, *runs: tuple[int, str]) -> Path:
+    """Words one second apart from (speaker, "words of one run") pairs, as talk.json."""
+    said = [(speaker, text) for speaker, line in runs for text in line.split()]
+    words = [
+        Word(text=text, start=float(index), end=index + 0.9, speaker=speaker)
+        for index, (speaker, text) in enumerate(said)
+    ]
+    staged = tmp_path / "talk.json"
+    Transcript(
+        source=Source(kind="audio", ref="talk.mp3"),
+        engine=Engine(name="xai-stt"),
+        text=" ".join(word.text for word in words),
+        words=words,
+    ).dump(staged)
+    return staged
+
+
+def _answered(_target: str) -> str:
+    return (
+        "<names>\n"
+        "Connor | Connor | next | Connor, can you share the deck?\n"
+        "Jose | Jose | next | Jose, what do you think of it?\n"
+        "Connor | Connor | next | Connor, one more thing about pricing.\n"
+        "Jose | Jose | next | And Jose, the timeline?\n"
+        "Maria | Maria | next | And Jose, the timeline?\n"
+        "</names>"
+    )
+
+
+def _counted(name: str, word: int, by: str, points_to: str) -> dict[str, object]:
+    return {
+        "chunk": 0,
+        "name": name,
+        "said": name,
+        "kind": "next",
+        "word": word,
+        "time": float(word),
+        "by": by,
+        "points_to": points_to,
+        "status": "counted",
+        "reason": None,
+    }
+
+
+def test_attendees_name_the_labels_the_words_point_at_in_every_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    made = _patch(monkeypatch, trailer=_answered)
+    staged = _meeting(tmp_path, *MEETING)
+    plain = tmp_path / "plain"
+
+    unnamed = runner.invoke(app, ["turns", str(staged), "--out-dir", str(plain), *ALL_FORMATS])
+    result = runner.invoke(
+        app, ["turns", str(staged), "--attendees", "Connor, Jose, Adam", *ALL_FORMATS]
+    )
+
+    assert unnamed.exit_code == 0, unnamed.output
+    assert result.exit_code == 0, result.output
+    assert "People at this meeting" not in made[0].calls[0][0]
+    assert "People at this meeting: Connor, Jose, Adam." in made[1].calls[0][0]
+    written = Transcript.load(tmp_path / "talk.turns.json")
+    before = Transcript.load(plain / "talk.turns.json")
+    assert written.words == before.words
+    assert [(turn.start, turn.end, turn.text) for turn in written.turns] == [
+        (turn.start, turn.end, turn.text) for turn in before.turns
+    ]
+    assert [turn.speaker for turn in written.turns] == [
+        "Speaker 1",
+        "Connor",
+        "Speaker 1",
+        "Jose",
+        "Speaker 1",
+        "Connor",
+        "Speaker 1",
+        "Jose",
+    ]
+    assert json.loads(str(written.engine.params["speaker_names"])) == {
+        "Speaker 2": "Connor",
+        "Speaker 3": "Jose",
+    }
+    for suffix, render in ((".md", to_markdown), (".srt", to_srt), (".vtt", to_vtt)):
+        assert (tmp_path / f"talk{suffix}").read_text(encoding="utf-8") == render(written)
+    sidecar = _sidecar(tmp_path / "talk.speakers.json")
+    assert sidecar["prompt_version"] == SPEAKER_PROMPT_VERSION
+    assert sidecar["naming"] == {
+        "prompt_version": "names-1",
+        "attendees": ["Connor", "Jose", "Adam"],
+        "names": {"Speaker 2": "Connor", "Speaker 3": "Jose"},
+        "unassigned": ["Adam"],
+        "pointed": {"Connor": {"Speaker 2": 2}, "Jose": {"Speaker 3": 2}, "Adam": {}},
+        "says": {"Connor": {"Speaker 1": 2}, "Jose": {"Speaker 1": 2}, "Adam": {}},
+        "names_blocks_missing": [],
+        "evidence": [
+            _counted("Connor", 3, "Speaker 1", "Speaker 2"),
+            _counted("Jose", 14, "Speaker 1", "Speaker 3"),
+            _counted("Connor", 26, "Speaker 1", "Speaker 2"),
+            _counted("Jose", 37, "Speaker 1", "Speaker 3"),
+            {
+                "chunk": 0,
+                "name": "Maria",
+                "said": "Maria",
+                "kind": "next",
+                "word": None,
+                "time": None,
+                "by": None,
+                "points_to": None,
+                "status": "dropped",
+                "reason": "not_attendee",
+            },
+        ],
+    }
+    assert result.stderr == (
+        "scribe: names from the words (prompt names-1): Speaker 2=Connor, Speaker 3=Jose; "
+        "unassigned: Adam\n"
+    )
+
+
+def test_without_attendees_the_sidecar_has_no_naming(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch(monkeypatch, trailer=_answered)
+    staged = _meeting(tmp_path, *MEETING)
+
+    result = runner.invoke(app, ["turns", str(staged)])
+
+    assert result.exit_code == 0, result.output
+    assert "naming" not in _sidecar(tmp_path / "talk.speakers.json")
+    assert "speaker_names" not in Transcript.load(tmp_path / "talk.turns.json").engine.params
+    assert result.stderr == ""
+
+
+def test_a_rerun_without_attendees_drops_the_names(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch(monkeypatch, trailer=_answered)
+    staged = _meeting(tmp_path, *MEETING)
+    named = runner.invoke(app, ["turns", str(staged), "--attendees", "Connor, Jose"])
+    assert named.exit_code == 0, named.output
+    assert "speaker_names" in Transcript.load(tmp_path / "talk.turns.json").engine.params
+
+    again = runner.invoke(
+        app, ["turns", str(tmp_path / "talk.turns.json"), "--out-dir", str(tmp_path / "again")]
+    )
+
+    assert again.exit_code == 0, again.output
+    written = Transcript.load(tmp_path / "again" / "talk.turns.turns.json")
+    assert "speaker_names" not in written.engine.params
+    assert {turn.speaker for turn in written.turns} == {"Speaker 1", "Speaker 2", "Speaker 3"}
+
+
+@pytest.mark.parametrize(
+    ("flags", "complaint"),
+    [
+        pytest.param(["--attendees", "Connor", "--no-llm-speakers"], "--attendees", id="no-pass"),
+        pytest.param(["--attendees", "Connor,,Jose"], "empty name", id="empty-name"),
+        pytest.param(["--attendees", "Speaker 2"], "speaker label", id="label"),
+    ],
+)
+def test_unusable_attendees_exit_two_before_any_call_or_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, flags: list[str], complaint: str
+) -> None:
+    made = _patch(monkeypatch)
+    staged = _meeting(tmp_path, *MEETING)
+    out = tmp_path / "out"
+
+    result = runner.invoke(app, ["turns", str(staged), "--out-dir", str(out), *flags])
+
+    assert result.exit_code == 2
+    assert complaint in result.stderr
+    assert made == []
+    assert not out.exists()
+
+
+def test_attendees_with_no_pass_to_ride_name_nobody_and_say_so(tmp_path: Path) -> None:
+    staged = _meeting(tmp_path, (3, "Connor here, just me today."))
+
+    result = runner.invoke(app, ["turns", str(staged), "--attendees", "Connor"])
+
+    assert result.exit_code == 0, result.output
+    assert "no speaker pass ran" in result.stderr
+    assert "nobody was named" in result.stderr
+    written = Transcript.load(tmp_path / "talk.turns.json")
+    assert [turn.speaker for turn in written.turns] == ["Speaker 1"]
+    assert "speaker_names" not in written.engine.params
+
+
+def test_attendees_and_the_new_exits_are_documented() -> None:
+    result = runner.invoke(app, ["turns", "--help"], terminal_width=200)
+
+    assert result.exit_code == 0
+    assert "--attendees" in result.stdout
+    assert "with --no-llm-speakers" in " ".join(result.stdout.split())
