@@ -10,6 +10,9 @@ chunk, which keeps its input labels: with the words out of step there is no
 telling which of two identical lines a label was meant for. Words no speaker was
 found for are shown to the model as `<spk:?>` and stay unattributed whatever it
 replies.
+
+Given the meeting's attendees, the same calls also ask where each chunk names
+one of them; those lines come back unchecked, for `scribe.attendees` to verify.
 """
 
 from __future__ import annotations
@@ -35,6 +38,7 @@ if TYPE_CHECKING:
 # Recorded beside every relabeled transcript: the pass is nondeterministic, so
 # a result is only comparable to one made with the same prompt.
 SPEAKER_PROMPT_VERSION = "tpst-2"
+NAMES_PROMPT_VERSION = "names-1"
 DEFAULT_SPEAKER_MODEL = "opus"
 
 # The chunking the pass was measured with: at 700-900 words every reply copied
@@ -47,6 +51,7 @@ DEFAULT_CONCURRENCY = 6
 _SENTENCE_ENDS = (".", "?", "!")
 _TAG = re.compile(r"<spk:(\d+|\?)>")
 _OUT = re.compile(r"<out>(.*)</out>", re.DOTALL)
+_NAMES_BLOCK = re.compile(r"<names>(.*?)</names>", re.DOTALL)
 _SPLIT = re.compile(r"(<spk:(?:\d+|\?)>)|\s+")
 _NOT_WORD = re.compile(r"[^\w']")
 # A reply cut off at the output limit can still hold a word-exact prefix, and
@@ -92,10 +97,37 @@ _NO_CONTEXT = "(start of call)"
 _UNATTRIBUTED = (
     "\n<spk:?> marks words no speaker was detected for; leave every <spk:?> tag where it is."
 )
+# Swapped in, and the names section appended, only when attendees are given.
+_REPLY_RULE = "- Reply with the corrected TARGET text between <out> and </out>, and nothing else.\n"
+_NAMES_RULE = (
+    "- Reply with the corrected TARGET text between <out> and </out>, "
+    "then the <names> block described below, and nothing else.\n"
+)
+_NAMES = """\
+Naming them does not change the rules for <spk:N> tags above.
+After </out>, list each place in TARGET where one of these people is named, one line per \
+place, between <names> and </names>:
+NAME | SAID | KIND | QUOTE
+- NAME: the person, written exactly as in the list above.
+- SAID: the word or words in TARGET that name the person, copied as written there; speech \
+recognition may have misspelled the name.
+- KIND, from what the words show:
+  next: the speaker addresses the person, who is expected to speak next;
+  previous: the speaker addresses the person who spoke just before;
+  self: the speaker names themself;
+  about: any other mention.
+- QUOTE: 4 to 12 consecutive words copied exactly from TARGET, including SAID.
+List only people on the list, and only names said in TARGET, not in CONTEXT. When no one on \
+the list is named, write <names></names>.
+"""
 
 
 def _logger() -> BoundLogger:
     return structlog.get_logger(__name__)  # pyright: ignore[reportAny]  # structlog.get_logger is Any
+
+
+class _PromptMismatchError(AppError):
+    """The speaker prompt no longer holds the rule the names request replaces."""
 
 
 class SpeakerBackend(Protocol):
@@ -130,11 +162,33 @@ class ChunkOutcome:
 
 
 @dataclass(frozen=True)
+class Claim:
+    """One line of a reply's names block, as the model wrote it and not yet checked.
+
+    The fields are the line's `NAME | SAID | KIND | QUOTE`, trimmed; a line
+    with fewer leaves the missing ones empty.
+    """
+
+    chunk: int
+    # The chunk's word offsets into the transcript, end exclusive.
+    start: int
+    end: int
+    name: str
+    said: str
+    kind: str
+    quote: str
+
+
+@dataclass(frozen=True)
 class Relabeling:
     """Per-word speaker ids after the pass, and how each chunk went."""
 
     speakers: tuple[int | None, ...]
     chunks: tuple[ChunkOutcome, ...]
+    # Asked for only with attendees, and read only from usable replies.
+    claims: tuple[Claim, ...] = ()
+    # Chunks whose usable reply held no names block after its <out> block.
+    names_blocks_missing: tuple[int, ...] = ()
 
     @property
     def relabeled(self) -> int:
@@ -280,19 +334,43 @@ def align_labels(
     return out, aligned
 
 
+def _asking_names(system: str, attendees: Sequence[str]) -> str:
+    """`system` with its reply rule asking for the names block too, and the block described.
+
+    Raises:
+        AppError: `system` lacks the reply rule, which would leave the block unasked for.
+
+    """
+    asked = system.replace(_REPLY_RULE, _NAMES_RULE)
+    if _REPLY_RULE in asked or _NAMES_RULE not in asked:
+        raise _PromptMismatchError("the speaker prompt has no reply rule to ask for names in")
+    # Joined, never formatted, so a brace in a name is just a brace.
+    return asked + "\nPeople at this meeting: " + ", ".join(attendees) + ".\n" + _NAMES
+
+
 def prompts(
-    texts: Sequence[str], ids: Sequence[int | None], spans: Sequence[tuple[int, int]]
+    texts: Sequence[str],
+    ids: Sequence[int | None],
+    spans: Sequence[tuple[int, int]],
+    attendees: Sequence[str] = (),
 ) -> list[tuple[str, str]]:
     """Build the (system, user) prompt for each chunk.
 
     Context shows the input's labels, not an earlier chunk's corrected ones,
-    so every chunk's call can run at once.
+    so every chunk's call can run at once. With `attendees` the system prompt
+    also asks, after the corrected text, where TARGET names any of them.
+
+    Raises:
+        AppError: the names request could not be added to the system prompt.
+
     """
     known = {speaker for speaker in ids if speaker is not None}
     listed = ", ".join(str(speaker) for speaker in sorted(known))
     system = _SYSTEM.format(
         ids=listed, unattributed=_UNATTRIBUTED if len(known) < len(set(ids)) else ""
     )
+    if attendees:
+        system = _asking_names(system, attendees)
     built: list[tuple[str, str]] = []
     for start, end in spans:
         context_start = max(0, start - CONTEXT_WORDS)
@@ -357,6 +435,22 @@ def _unusable(
     return next((reason for failed, reason in checks if failed), None)
 
 
+def _claims(text: str, chunk: int, start: int, end: int) -> tuple[Claim, ...] | None:
+    """The lines of the names block after a usable reply's <out> block; None without one."""
+    out = _OUT.search(text)
+    found = None if out is None else _NAMES_BLOCK.search(text, out.end())
+    if found is None:
+        return None
+    claims: list[Claim] = []
+    for line in found.group(1).splitlines():
+        if not line.strip():
+            continue
+        fields = [field.strip() for field in line.split("|", 3)]
+        name, said, kind, quote = fields + [""] * (4 - len(fields))
+        claims.append(Claim(chunk, start, end, name, said, kind, quote))
+    return tuple(claims)
+
+
 def _warn_failed(index: int, reason: str, **logged: object) -> None:
     _logger().warning("speakers.chunk_failed", chunk=index, reason=reason, **logged)
 
@@ -367,6 +461,7 @@ def relabel(
     backend: SpeakerBackend,
     *,
     concurrency: int = DEFAULT_CONCURRENCY,
+    attendees: Sequence[str] = (),
 ) -> Relabeling:
     """Ask the backend to correct each chunk's speaker ids, all chunks at once.
 
@@ -379,11 +474,17 @@ def relabel(
         speakers: One diarization id per word.
         backend: Answers each chunk's prompt; called from worker threads.
         concurrency: Calls in flight at most.
+        attendees: People at the meeting; when given, each reply is also asked
+            where its chunk names them.
 
     Returns:
         One id per word, drawn from `speakers`' ids, and each chunk's outcome.
         A chunk whose call failed or whose reply was unusable keeps its input
-        ids, and a word whose id is None always keeps None.
+        ids, and a word whose id is None always keeps None. With `attendees`,
+        the usable replies' names lines, and which usable replies had none.
+
+    Raises:
+        AppError: the names request could not be added to the prompt.
 
     """
     if not needs_relabeling(speakers):
@@ -393,10 +494,12 @@ def relabel(
     ids = [None if speaker is None else rank[speaker] for speaker in speakers]
     allowed = set(range(len(order)))
     spans = cut_points(texts)
-    answers = anyio.run(ask_all, backend, prompts(texts, ids, spans), concurrency)
+    answers = anyio.run(ask_all, backend, prompts(texts, ids, spans, attendees), concurrency)
 
     out = list(ids)
     chunks: list[ChunkOutcome] = []
+    claims: list[Claim] = []
+    missing: list[int] = []
     for index, ((start, end), answer) in enumerate(zip(spans, answers, strict=True)):
         if isinstance(answer, Exception):
             if isinstance(answer, AppError):
@@ -427,6 +530,11 @@ def relabel(
             )
             continue
         out[start:end] = labels
+        named = _claims(answer.text, index, start, end) if attendees else ()
+        if named is None:
+            missing.append(index)
+        else:
+            claims.extend(named)
         chunks.append(
             ChunkOutcome(
                 index,
@@ -442,5 +550,8 @@ def relabel(
             )
         )
     return Relabeling(
-        tuple(None if label is None else order[label] for label in out), tuple(chunks)
+        tuple(None if label is None else order[label] for label in out),
+        tuple(chunks),
+        tuple(claims),
+        tuple(missing),
     )

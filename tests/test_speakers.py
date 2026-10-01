@@ -553,7 +553,7 @@ the list is named, write <names></names>.
 
 def test_with_attendees_the_prompt_asks_for_a_names_block_after_the_out_block() -> None:
     texts = _texts(1000, ends={749})
-    ids: list[int | None] = [0] * 500 + [1] * 500
+    ids = [0] * 500 + [1] * 500
     plain = prompts(texts, ids, cut_points(texts))
 
     # A brace in a name reaches the prompt as written.
@@ -568,7 +568,7 @@ def test_with_attendees_the_prompt_asks_for_a_names_block_after_the_out_block() 
 
 def test_without_attendees_the_prompts_are_the_ones_the_pass_was_measured_with() -> None:
     texts = _texts(1000, ends=set(range(9, 1000, 10)))
-    ids: list[int | None] = [0] * 300 + [None] * 50 + [1] * 650
+    ids = [0] * 300 + [None] * 50 + [1] * 650
 
     asked = json.dumps(prompts(texts, ids, cut_points(texts)))
 
@@ -609,7 +609,10 @@ def test_each_names_line_comes_back_as_a_claim_with_its_chunks_span() -> None:
     backend = FakeSpeakerBackend(trailer=_naming_first_word)
 
     result = relabel(
-        [word.text for word in words], [word.speaker for word in words], backend, attendees=_ATTENDEES
+        [word.text for word in words],
+        [word.speaker for word in words],
+        backend,
+        attendees=_ATTENDEES,
     )
 
     assert "People at this meeting: Connor, Jose." in backend.calls[0][0]
@@ -634,7 +637,10 @@ def test_a_failed_chunks_claims_are_discarded() -> None:
     backend = FakeSpeakerBackend(reply=_rewording_w900, trailer=_naming_first_word)
 
     result = relabel(
-        [word.text for word in words], [word.speaker for word in words], backend, attendees=_ATTENDEES
+        [word.text for word in words],
+        [word.speaker for word in words],
+        backend,
+        attendees=_ATTENDEES,
     )
 
     assert result.failed == (1,)
@@ -656,7 +662,10 @@ def test_a_usable_reply_without_a_names_block_is_listed() -> None:
     backend = FakeSpeakerBackend(trailer=_block_in_the_first_chunk_only)
 
     result = relabel(
-        [word.text for word in words], [word.speaker for word in words], backend, attendees=_ATTENDEES
+        [word.text for word in words],
+        [word.speaker for word in words],
+        backend,
+        attendees=_ATTENDEES,
     )
 
     assert result.failed == ()
