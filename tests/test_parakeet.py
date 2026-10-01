@@ -356,6 +356,15 @@ def test_the_backend_refuses_output_it_cannot_read() -> None:
         parse_output(_output(_sentence(_token(" a", float("nan"), 1.0))).encode())
 
 
+def test_a_key_holding_a_line_break_is_named_on_one_line() -> None:
+    raw = json.dumps({"text": "", "sentences": [], "a\nb": 1}).encode()
+
+    with pytest.raises(ExternalServiceError) as caught:
+        parse_output(raw)
+
+    assert str(caught.value).endswith("(at a b)")
+
+
 def test_the_help_states_the_timeout() -> None:
     result = runner.invoke(app, ["parakeet", "--help"], terminal_width=200)
 

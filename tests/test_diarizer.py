@@ -173,6 +173,7 @@ _NOISE = "UserWarning: torchcodec is not installed\n" * 20
         (FakeWorker(lambda _: None, stderr="warned"), "exited 0 without writing an answer: warned"),
         (FakeWorker(lambda _: "[not json"), "unexpected answer"),
         (FakeWorker(lambda i: answer(i, extra=1)), "at extra"),
+        (FakeWorker(lambda i: answer(i, **{"a\nb": 1})), "(at a b)"),
         (FakeWorker(lambda i: answer(i, embeddings=[])), "embedded 0 of 1 intervals"),
         (FakeWorker(lambda i: answer(i, embeddings=[[0.5] * 3])), "3 values, not 256"),
         (
@@ -189,6 +190,7 @@ _NOISE = "UserWarning: torchcodec is not installed\n" * 20
         "no-answer",
         "not-json",
         "extra-field",
+        "line-break-key",
         "count",
         "dimension",
         "timeout",
