@@ -211,15 +211,19 @@ class PyannoteDiarizer:
         """Diarize `audio` and embed each of `intervals` of it, in seconds.
 
         Raises:
-            ExternalServiceError: `resolve` failed, the request could not be written,
+            ExternalServiceError: `resolve` failed, a working file could not be written,
                 or the decode or the worker failed, timed out, or left no readable answer.
 
         """
         tools = self.resolve()
-        # A directory left behind costs disk; failing on it would discard an answer in hand.
-        with tempfile.TemporaryDirectory(
-            prefix="scribe-diarize-", ignore_cleanup_errors=True
-        ) as workdir:
+        try:
+            # A directory left behind costs disk; failing on it would discard an answer in hand.
+            scratch = tempfile.TemporaryDirectory(
+                prefix="scribe-diarize-", ignore_cleanup_errors=True
+            )
+        except OSError as exc:
+            raise ExternalServiceError(f"cannot make a working directory: {exc}") from exc
+        with scratch as workdir:
             wav, request, out = (
                 Path(workdir) / name for name in ("audio.wav", "in.json", "out.json")
             )
