@@ -49,6 +49,9 @@ DropReason = Literal[
     "no_turn",
     "repeat",
 ]
+# The reasons, None for none, of a mention found in the words: whoever may have
+# said it is not the person it names. A repeat's run is counted already.
+_SAID: tuple[DropReason | None, ...] = (None, "ambiguous", "no_turn", "unattributed")
 
 # A name shaped like a label could not be told from an unnamed one downstream.
 _LABEL = re.compile(r"speaker\s+(\d+|\?)", re.IGNORECASE)
@@ -231,10 +234,12 @@ def name_speakers(
     and `about` at none.
     In a run, an attendee's first pointer counts and so does their first
     other mention; later ones repeat. A pointer spoken in, or pointing at,
-    words no speaker was found for does not count. An id is named
-    for an attendee when at least MIN_POINTERS counted mentions point at it,
-    at least RIVAL_FACTOR times as many as at any other id, and none of its
-    own turns names the attendee; an id two attendees win stays unnamed.
+    words no speaker was found for does not count, nor does one with no run
+    to point at, but either still counts against the speaker who said it.
+    An id is named for an attendee when at least MIN_POINTERS counted
+    mentions point at it, at least RIVAL_FACTOR times as many as at any
+    other id, and none of its own turns names the attendee; an id two
+    attendees win stays unnamed.
 
     Args:
         words: The transcript's words.
@@ -269,7 +274,7 @@ def name_speakers(
     for mention in checked:
         if mention.reason is None and mention.points_to is not None:
             pointed[mention.name][mention.points_to] += 1
-        if mention.kind == "self" or mention.reason not in {None, "ambiguous"}:
+        if mention.kind == "self" or mention.reason not in _SAID:
             continue
         for speaker in (mention.by, *mention.by_one_of):
             if speaker is not None:
