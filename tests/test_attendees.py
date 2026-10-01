@@ -11,7 +11,7 @@ from scribe.attendees import MIN_POINTERS, RIVAL_FACTOR, name_speakers, parse_at
 from scribe.errors import InputValidationError
 from scribe.schema import Word
 from scribe.speakers import Claim, relabel
-from scribe.turns import turns_from_speakers
+from scribe.turns import turns_from_speakers, word_speakers
 from tests.speakers_fakes import FakeSpeakerBackend
 
 if TYPE_CHECKING:
@@ -339,6 +339,65 @@ def test_a_pointer_does_not_hide_one_at_another_label_later_in_its_turn() -> Non
     assert named.names == {}
     assert named.pointed["Alice"] == {5: 2, 3: 2}
     assert [mention.reason for mention in named.evidence] == [None] * 4
+
+
+@pytest.mark.parametrize(
+    ("runs", "block", "names"),
+    [
+        pytest.param(
+            (
+                (7, "Alice, can you share the deck?"),
+                (9, "Yeah."),
+                (3, "Sure, sharing it now."),
+                (7, "Alice, is pricing settled?"),
+                (9, "Right."),
+                (3, "Yes, pricing is settled."),
+            ),
+            "Alice | Alice | next | Alice, can you share the deck?\n"
+            "Alice | Alice | next | Alice, is pricing settled?",
+            {},
+            id="a-third-speaker-answers-after-it",
+        ),
+        pytest.param(
+            (
+                (3, "Here is my update on pricing."),
+                (9, "Yeah."),
+                (7, "Thanks, Alice, that helps."),
+                (3, "And one more on hiring."),
+                (9, "Right."),
+                (7, "Thanks again, Alice, noted."),
+            ),
+            "Alice | Alice | previous | Thanks, Alice, that helps.\n"
+            "Alice | Alice | previous | Thanks again, Alice, noted.",
+            {},
+            id="a-third-speaker-spoke-before-it",
+        ),
+        pytest.param(
+            (
+                (7, "Alice, are you ready?"),
+                (3, "Yes."),
+                (7, "Great. Alice, is pricing settled?"),
+                (3, "Yes."),
+                (7, "Good, moving on."),
+            ),
+            "Alice | Alice | next | Alice, are you ready?\n"
+            "Alice | Alice | next | Alice, is pricing settled?",
+            {3: "Alice"},
+            id="the-speaker-comes-back-after-it",
+        ),
+    ],
+)
+def test_a_pointer_at_a_backchannel_counts_only_where_no_third_speaker_is_past_it(
+    runs: tuple[Run, ...], block: str, names: dict[int, str]
+) -> None:
+    words = _words(*runs)
+    # The turns keep each short reply after a sentence end as a turn of its own.
+    assert word_speakers(words) == [word.speaker for word in words]
+
+    named, _ = _named_from_replies(runs, block)
+
+    assert named.names == names
+    assert named.says["Alice"] == {7: 2}
 
 
 _TOPICS = ("pricing", "hiring", "travel", "budget", "timing")
