@@ -40,7 +40,7 @@ from scribe.spoken_numbers import digitize
 from scribe.vote import FILLERS, align_words, first_decrease, nearest, norm_tokens
 
 if TYPE_CHECKING:
-    from collections.abc import Collection, Sequence
+    from collections.abc import Collection, Mapping, Sequence
 
     from structlog.stdlib import BoundLogger
 
@@ -775,10 +775,9 @@ def pick_readings(
             picked[number - 1] = side
         chunks.append(ChunkPick(index, ids))
 
-    words = _apply(said, heard, spots, picked)
     engine = reference.engine
     picking = Picking(transcript, tuple(spots), tuple(picked), tuple(chunks))
-    params = transcript.engine.params | {
+    params: dict[str, float | int | bool | str] = {
         "pick_model": backend.model,
         "pick_prompt_version": PICK_PROMPT_VERSION,
         "pick_reference": engine.name if engine.model is None else f"{engine.name} {engine.model}",
@@ -791,27 +790,45 @@ def pick_readings(
         "pick_failed": picked.count("failed"),
         "pick_chunks": len(chunks),
         "pick_chunks_failed": len(picking.failed),
-        "pick_record": json.dumps(
-            [
-                [
-                    said[spot.transcript.start].start,
-                    max(word.end for word in said[spot.transcript.start : spot.transcript.stop]),
-                    mine,
-                    theirs,
-                    side,
-                ]
-                for spot, (mine, theirs), side in zip(spots, readings, picked, strict=True)
-            ]
-        ),
     }
-    return replace(
-        picking,
-        transcript=transcript.model_copy(
-            update={
-                "engine": transcript.engine.model_copy(update={"params": params}),
-                "text": _joined(words),
-                "words": words,
-                "turns": [],
-            }
-        ),
+    return replace(picking, transcript=assemble(transcript, reference, spots, picked, params))
+
+
+def assemble(
+    transcript: Transcript,
+    reference: Transcript,
+    spots: Sequence[Spot],
+    sides: Sequence[Side],
+    params: Mapping[str, float | int | bool | str],
+) -> Transcript:
+    """Deliver each spot's final side, recording `params` and the spots.
+
+    Returns:
+        `transcript` with the reference's words at each spot whose side puts
+        them in, `_apply`'s way, its text rebuilt from its words and no turns.
+        Its engine params are its own, then `params`, then pick_record: each
+        spot as [start, end, transcript words, reference words, side], its
+        start and end the transcript words' own.
+
+    """
+    said, heard = transcript.words, reference.words
+    words = _apply(said, heard, spots, sides)
+    record = [
+        [
+            said[spot.transcript.start].start,
+            max(word.end for word in said[spot.transcript.start : spot.transcript.stop]),
+            _joined(said[spot.transcript.start : spot.transcript.stop]),
+            _joined(heard[spot.reference.start : spot.reference.stop]),
+            side,
+        ]
+        for spot, side in zip(spots, sides, strict=True)
+    ]
+    recorded = transcript.engine.params | dict(params) | {"pick_record": json.dumps(record)}
+    return transcript.model_copy(
+        update={
+            "engine": transcript.engine.model_copy(update={"params": recorded}),
+            "text": _joined(words),
+            "words": words,
+            "turns": [],
+        }
     )
