@@ -605,19 +605,24 @@ def test_audio_flips_a_spot_only_where_both_recognizers_heard_the_reading_set_as
     }
 
 
-def test_sides_from_a_heard_pick_replays_the_picks_own_sides(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def _heard_pick(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[list[Path], Path, Path]:
+    """The inputs, their pick, and that pick heard by ears that flip both its spots."""
     inputs, picked = _picked(tmp_path, monkeypatch)
-    _patch(monkeypatch, reply=answering(_hat_then_unsure))
-    # Both flip both spots: "hat" to "cat", and the unsure "mat" to "bat".
+    # "hat" back to "cat", and the unsure "mat" to "bat".
     _, audio = _ears(
         tmp_path, monkeypatch, ["the cat sat on the bat"] * 2, ["the cat sat on the bat"] * 2
     )
     heard = tmp_path / "heard.json"
-    command = ["pick", *map(str, inputs), "--audio", str(audio), "--out", str(heard)]
-    assert runner.invoke(app, command).exit_code == 0
+    command = ["pick", *map(str, inputs), "--sides-from", str(picked), "--audio", str(audio)]
+    assert runner.invoke(app, [*command, "--out", str(heard)]).exit_code == 0
     assert Transcript.load(heard).text == "the cat sat on the bat"
+    return inputs, picked, heard
+
+
+def test_sides_from_a_heard_pick_replays_the_picks_own_sides(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    inputs, picked, heard = _heard_pick(tmp_path, monkeypatch)
     made = _patch(monkeypatch)
     out = tmp_path / "replayed.json"
 
@@ -640,6 +645,45 @@ def test_sides_from_a_heard_pick_replays_the_picks_own_sides(
     assert params == {
         key: value for key, value in original.engine.params.items() if key != "pick_chunks"
     }
+
+
+def test_sides_from_a_heard_pick_with_audio_hears_the_picks_own_sides_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    inputs, picked, heard = _heard_pick(tmp_path, monkeypatch)
+    again = tmp_path / "again"
+    _, audio = _ears(
+        again, monkeypatch, ["the cat sat on the bat"] * 2, ["the cat sat on the bat"] * 2
+    )
+    out = tmp_path / "reheard.json"
+
+    result = runner.invoke(
+        app,
+        [
+            "pick",
+            *map(str, inputs),
+            "--sides-from",
+            str(heard),
+            "--audio",
+            str(audio),
+            "--out",
+            str(out),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert result.stderr.splitlines()[1:] == [
+        "scribe: third ear heard 2 spots with cohere-transcribe, qwen3-asr in 5 s; "
+        "1 flipped to the reference, 1 to the transcript"
+    ]
+    reheard = Transcript.load(out)
+    assert reheard.words == Transcript.load(heard).words
+    params, before = reheard.engine.params, Transcript.load(picked).engine.params
+    ears = cast("list[list[object]]", json.loads(str(params["ear_record"])))
+    assert [row[0] for row in ears] == ["reference", "unsure"]
+    counts = ("pick_to_reference", "pick_unsure")
+    assert [params[key] for key in counts] == [before[key] for key in counts] == [1, 1]
+    assert params["pick_record"] == Transcript.load(heard).engine.params["pick_record"]
 
 
 @pytest.mark.parametrize(
