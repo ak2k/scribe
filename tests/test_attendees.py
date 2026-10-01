@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+from collections import Counter
 from typing import TYPE_CHECKING
 
 import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
-from scribe.attendees import MIN_POINTERS, name_speakers, parse_attendees
+from scribe.attendees import MIN_POINTERS, RIVAL_FACTOR, name_speakers, parse_attendees
 from scribe.errors import InputValidationError
 from scribe.schema import Word
 from scribe.speakers import Claim, relabel
@@ -180,6 +181,31 @@ def test_contradicted_evidence_names_no_label(runs: tuple[Run, ...], block: str)
     assert "Connor" not in _labels(named, words)
 
 
+def test_a_label_two_names_win_stays_unnamed() -> None:
+    runs: tuple[Run, ...] = (
+        (7, "Connor, can you share the deck?"),
+        (3, "Sure, sharing it now."),
+        (7, "Jose, can you share the notes?"),
+        (3, "Sharing those as well."),
+        (7, "Connor, one more thing about pricing."),
+        (3, "Yes, pricing is settled."),
+        (7, "Jose, and the timeline?"),
+        (3, "End of month."),
+    )
+    block = (
+        "Connor | Connor | next | Connor, can you share the deck?\n"
+        "Jose | Jose | next | Jose, can you share the notes?\n"
+        "Connor | Connor | next | Connor, one more thing about pricing.\n"
+        "Jose | Jose | next | Jose, and the timeline?"
+    )
+
+    named, _ = _named_from_replies(runs, block)
+
+    assert named.pointed["Connor"] == named.pointed["Jose"] == {3: 2}
+    assert named.names == {}
+    assert named.unassigned == ATTENDEES
+
+
 @pytest.mark.parametrize(
     "block",
     [
@@ -281,20 +307,32 @@ def test_an_unknown_kind_and_a_short_line_are_dropped() -> None:
     ) == ["bad_kind", "bad_line", "bad_line"]
 
 
-_SPOKEN = st.sampled_from([None, 0, 1, 2])
-_LINES = st.tuples(
-    st.sampled_from([*ATTENDEES, "Maria"]),
-    st.sampled_from(["next", "previous", "self", "about", "later"]),
-    st.integers(min_value=0, max_value=39),
-    st.integers(min_value=1, max_value=4),
-    st.integers(min_value=0, max_value=39),
+# Few runs and many lines, two names and one stranger: sparser draws almost
+# never put two counted pointers on one label, and so never name anyone.
+_RUNS = st.lists(
+    st.tuples(st.sampled_from([None, 0, 1, 2]), st.integers(min_value=1, max_value=5)),
+    min_size=2,
+    max_size=6,
+)
+_LINES = st.lists(
+    st.tuples(
+        st.sampled_from(["Connor", "Jose", "Maria"]),
+        st.sampled_from(["next", "previous", "self", "about", "later"]),
+        st.integers(min_value=0, max_value=29),
+        st.integers(min_value=1, max_value=4),
+        # SAID's offset into the quote; past its end, SAID lies outside it.
+        st.integers(min_value=0, max_value=3),
+    ),
+    min_size=16,
+    max_size=40,
 )
 
 
-@given(spoken=st.lists(_SPOKEN, min_size=1, max_size=40), lines=st.lists(_LINES, max_size=60))
+@given(runs=_RUNS, lines=_LINES)
 def test_no_name_lands_on_two_labels_or_without_its_pointers(
-    spoken: list[int | None], lines: list[tuple[str, str, int, int, int]]
+    runs: list[tuple[int | None, int]], lines: list[tuple[str, str, int, int, int]]
 ) -> None:
+    spoken = [speaker for speaker, count in runs for _ in range(count)]
     words = [
         Word(text=f"w{index}", start=float(index), end=index + 0.9, speaker=speaker)
         for index, speaker in enumerate(spoken)
@@ -302,7 +340,13 @@ def test_no_name_lands_on_two_labels_or_without_its_pointers(
     texts = [word.text for word in words]
     claims = [
         Claim(
-            0, 0, len(words), name, texts[said % len(texts)], kind, " ".join(texts[at : at + size])
+            0,
+            0,
+            len(texts),
+            name,
+            texts[(at + said) % len(texts)],
+            kind,
+            " ".join(texts[at % len(texts) : at % len(texts) + size]),
         )
         for name, kind, at, size, said in lines
     ]
@@ -313,12 +357,23 @@ def test_no_name_lands_on_two_labels_or_without_its_pointers(
     assert len(set(named.names.values())) == len(named.names)
     assert set(named.names.values()) <= set(ATTENDEES)
     for speaker, name in named.names.items():
-        pointers = [
+        counted = [
             mention
             for mention in named.evidence
-            if mention.status == "counted" and mention.name == name and mention.points_to == speaker
+            if mention.status == "counted" and mention.name == name
         ]
-        assert len(pointers) >= MIN_POINTERS
+        pointers = Counter(
+            mention.points_to for mention in counted if mention.points_to is not None
+        )
+        assert pointers[speaker] >= MIN_POINTERS
+        assert all(
+            pointers[speaker] >= RIVAL_FACTOR * count
+            for other, count in pointers.items()
+            if other != speaker
+        )
+        assert not [
+            mention for mention in counted if mention.by == speaker and mention.kind != "self"
+        ]
     unnamed = turns_from_speakers(words, spoken)
     renamed = turns_from_speakers(words, spoken, named.names)
     assert [turn.model_copy(update={"speaker": ""}) for turn in renamed] == [
