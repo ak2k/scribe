@@ -178,8 +178,9 @@ def _checked(
     target = run_of[found] + _POINTS[claim.kind]
     if not 0 <= target < len(ids):
         return replace(mention, reason="no_turn")
-    # The answer may be in words nobody was found for, so they point at no one.
-    if ids[target] is None:
+    # Words nobody was found for may hold the answer, or the question: from them,
+    # a pointer could name the asker's label, past the check that it never says the name.
+    if ids[run_of[found]] is None or ids[target] is None:
         return replace(mention, reason="unattributed")
     return replace(mention, points_to=ids[target])
 
