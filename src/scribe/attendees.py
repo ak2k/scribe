@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING, Literal
 
 from scribe.errors import InputValidationError
 from scribe.speakers import text_keys, word_keys
+from scribe.turns import DEFAULT_MIN_TURN_SECONDS, DEFAULT_MIN_TURN_WORDS
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -168,6 +169,38 @@ def _locate(words: Sequence[Word], claim: Claim) -> list[int] | DropReason:
     return sorted({claim.start + tokens[at + offset][0] for at in starts for offset in offsets})
 
 
+def _brief(words: Sequence[Word], run_of: Sequence[int], run: int) -> bool:
+    """Whether a run is short enough that turns would call it a micro-turn: maybe a backchannel."""
+    first = run_of.index(run)
+    held = words[first : first + run_of.count(run)]
+    return (
+        len(held) < DEFAULT_MIN_TURN_WORDS
+        and max(word.end for word in held) - min(word.start for word in held)
+        < DEFAULT_MIN_TURN_SECONDS
+    )
+
+
+def _pointer_fault(
+    words: Sequence[Word], runs: tuple[list[int], list[int | None]], word: int, step: int
+) -> DropReason | None:
+    """Why a pointer said at `word`, at the run `step` runs on, cannot count, if anything."""
+    run_of, ids = runs
+    run = run_of[word]
+    target = run + step
+    if not 0 <= target < len(ids):
+        return "no_turn"
+    # Words nobody was found for may hold the answer, or the question: from them,
+    # a pointer could name the asker's label, past the check that it never says the name.
+    if ids[run] is None or ids[target] is None:
+        return "unattributed"
+    # A backchannel can come between an address and its reply, so with someone
+    # other than the speaker past it, either of the two may be the one addressed.
+    beyond = target + step
+    if 0 <= beyond < len(ids) and ids[beyond] != ids[run] and _brief(words, run_of, target):
+        return "ambiguous"
+    return None
+
+
 def _checked(
     claim: Claim,
     words: Sequence[Word],
@@ -189,14 +222,11 @@ def _checked(
     mention = replace(mention, word=word, time=words[word].start, by=ids[run_of[word]])
     if claim.kind not in _POINTS:
         return mention
-    target = run_of[word] + _POINTS[claim.kind]
-    if not 0 <= target < len(ids):
-        return replace(mention, reason="no_turn")
-    # Words nobody was found for may hold the answer, or the question: from them,
-    # a pointer could name the asker's label, past the check that it never says the name.
-    if ids[run_of[word]] is None or ids[target] is None:
-        return replace(mention, reason="unattributed")
-    return replace(mention, points_to=ids[target])
+    step = _POINTS[claim.kind]
+    fault = _pointer_fault(words, runs, word, step)
+    if fault is not None:
+        return replace(mention, reason=fault)
+    return replace(mention, points_to=ids[run_of[word] + step])
 
 
 def _winner(pointed: Mapping[int, int], says: Mapping[int, int]) -> int | None:
@@ -233,9 +263,11 @@ def name_speakers(
     one it is said in, `previous` at the run before, `self` at its own run,
     and `about` at none. In a run, an attendee's first pointer at each id
     counts and so does their first other mention; later ones repeat. A
-    pointer spoken in, or pointing at, words no speaker was found for does
-    not count, nor does one with no run to point at, but either still
-    counts against the speaker who said it. An id is named for an attendee
+    pointer does not count when it is spoken in, or points at, words no
+    speaker was found for, when it has no run to point at, or when the run
+    it points at is as short as a backchannel and the run past that is not
+    the speaker's (either may be the one addressed); it still counts
+    against the speaker who said it. An id is named for an attendee
     when at least MIN_POINTERS counted mentions point at it, at least
     RIVAL_FACTOR times as many as at any other id, and none of its own turns
     names the attendee; an id two attendees win stays unnamed.
