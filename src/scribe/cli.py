@@ -724,13 +724,20 @@ def _name_from_words(
     found = name_speakers(words, speakers, relabeled.claims, attendees)
     named = _by_label(found.names, labels)
     shown = ", ".join(f"{label}={name}" for label, name in named.items()) or "none"
+    missing = relabeled.names_blocks_missing
+    # A missing list leaves out whatever that chunk would have counted, for or against.
+    lacking = (
+        f"; {len(missing)} of {len(relabeled.chunks)} chunks returned no names list"
+        if missing
+        else ""
+    )
     _warn(
         f"names from the words (prompt {NAMES_PROMPT_VERSION}): {shown}; "
-        f"unassigned: {', '.join(found.unassigned) or 'none'}"
+        f"unassigned: {', '.join(found.unassigned) or 'none'}{lacking}"
     )
     # A string, like the diarizer's runs: engine params hold no objects.
     params = engine.params | {"speaker_names": json.dumps(named)}
-    metadata = _naming_metadata(found, relabeled.names_blocks_missing, attendees, labels)
+    metadata = _naming_metadata(found, missing, attendees, labels)
     return found.names, engine.model_copy(update={"params": params}), metadata
 
 
@@ -815,11 +822,12 @@ def turns(
     themself, or a mention. A label takes an attendee's name only where at
     least two such places point at it, at least twice as many as at any
     other label, and none of its own turns says that name; otherwise it stays
-    "Speaker N", and one stderr line lists the names and who was left
-    unassigned. A name off the list, or a listed name never said, names no
-    label; whether a spoken form is a listed name is the model's judgment.
-    The sidecar holds each place, what was said there, and why it counted or
-    not. A named label is a new key for `cleanup --speaker`.
+    "Speaker N". One stderr line lists the names, who was left unassigned,
+    and how many chunks returned no names list. A name off the list, or a
+    listed name never said, names no label; whether a spoken form is a
+    listed name is the model's judgment. The sidecar holds each place, what
+    was said there, and why it counted or not. A named label is a new key
+    for `cleanup --speaker`.
 
     Unless --no-audio-speakers is given, the words no engine attributed
     ("Speaker ?") are then named from the audio, when there are any and at
