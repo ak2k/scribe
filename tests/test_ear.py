@@ -84,7 +84,7 @@ def test_each_recognizer_runs_in_turn_on_the_decoded_clips(
     samples = decode[-1]
     assert decode == [FFMPEG, "-nostdin", "-v", "error", "-i", str(clip.absolute()), "-vn",
         "-ac", "1", "-ar", "16000", "-f", "f32le", samples]  # fmt: skip
-    pinned = [UVX, "--python", "3.12", "--exclude-newer", "2026-09-30T00:00:00Z"]
+    pinned = [UVX, "--python", "3.12", "--exclude-newer", "2026-09-30T21:00:00Z"]
     pinned += ["--from", "transformers==5.18.0", "--with", "torch==2.14.1"]
     pinned += ["--with", "numpy==2.5.3", "--with", "librosa==1.0.0", "python", "-P"]
     assert [spawn[: len(pinned)] for spawn in spawns] == [pinned, pinned]
