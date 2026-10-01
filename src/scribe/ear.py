@@ -182,7 +182,7 @@ class LocalEars:
 
         Raises:
             EarError: this is not macOS on arm64, `uvx` or ffmpeg is not on PATH,
-                or a pinned snapshot is not in the Hugging Face cache.
+                or a pinned snapshot is not in the Hugging Face cache or cannot be read.
 
         """
         system, machine = self._host()
@@ -204,7 +204,14 @@ class LocalEars:
                 hub / f"models--{spec.model.replace('/', '--')}" / "snapshots" / spec.revision
             )
             for name in _WEIGHTS:
-                if not (snapshot / name).is_file():
+                try:
+                    cached = (snapshot / name).is_file()
+                except OSError as exc:
+                    raise EarError(
+                        f"cannot look for {spec.model} at {spec.revision} in the Hugging Face "
+                        f"cache: {exc}"
+                    ) from exc
+                if not cached:
                     raise EarError(
                         f"{spec.model} at {spec.revision} is not in the Hugging Face cache: "
                         f"no {name} under {snapshot}"
@@ -241,15 +248,17 @@ class LocalEars:
             offline: Use only what uv and Hugging Face have cached; download nothing.
 
         Raises:
-            EarError: `resolve` failed, or the decode or a worker failed, timed out,
-                or left no readable answer.
+            EarError: `resolve` failed, a working file could not be written, or the
+                decode or a worker failed, timed out, or left no readable answer.
 
         """
         tools = self.resolve()
-        # A directory left behind costs disk; failing on it would discard an answer in hand.
-        with tempfile.TemporaryDirectory(
-            prefix="scribe-ear-", ignore_cleanup_errors=True
-        ) as workdir:
+        try:
+            # A directory left behind costs disk; failing on it would discard an answer in hand.
+            scratch = tempfile.TemporaryDirectory(prefix="scribe-ear-", ignore_cleanup_errors=True)
+        except OSError as exc:
+            raise EarError(f"cannot make a working directory: {exc}") from exc
+        with scratch as workdir:
             samples = Path(workdir) / "audio.f32"
             # Float samples, not the diarizer's 16-bit wav: the vote was measured on these.
             decode = [tools.ffmpeg, "-nostdin", "-v", "error", "-i", str(audio.absolute()), "-vn"]
@@ -279,7 +288,10 @@ class LocalEars:
             "intervals": [list(clip) for clip in clips],
             "max_new_tokens": max_new_tokens,
         }
-        path.write_text(json.dumps(request), encoding="utf-8")
+        try:
+            path.write_text(json.dumps(request), encoding="utf-8")
+        except OSError as exc:
+            raise EarError(f"cannot write {spec.name}'s request: {exc}") from exc
         env = child_env(*(TOKEN_NAMES if spec.gated else TOKENLESS))
         if offline:
             env.update(_OFFLINE)
