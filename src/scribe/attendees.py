@@ -214,8 +214,10 @@ def name_speakers(
     A claim counts once it names an attendee, is one of the known kinds, and
     its QUOTE occurs exactly once among its chunk's words with SAID inside
     it. A `next` mention points at the run after the one it is said in,
-    `previous` at the run before, `self` at its own run, and `about` at none;
-    only the first counted mention of a name in a run counts. An id is named
+    `previous` at the run before, `self` at its own run, and `about` at none.
+    In a run, an attendee's first pointer counts and so does their first
+    other mention; later ones repeat. A pointer spoken in, or pointing at,
+    words no speaker was found for does not count. An id is named
     for an attendee when at least MIN_POINTERS counted mentions point at it,
     at least RIVAL_FACTOR times as many as at any other id, and none of its
     own turns names the attendee; an id two attendees win stays unnamed.
@@ -239,9 +241,11 @@ def name_speakers(
         for at, mention in enumerate(checked)
         if mention.reason is None and mention.word is not None
     )
-    once: set[tuple[str, int]] = set()
+    # Pointers and mentions count once each per run, so listing a mention never
+    # hides the pointer after it.
+    once: set[tuple[str, int, bool]] = set()
     for word, at in located:
-        key = (checked[at].name, runs[0][word])
+        key = (checked[at].name, runs[0][word], checked[at].points_to is None)
         if key in once:
             checked[at] = replace(checked[at], reason="repeat")
         once.add(key)
