@@ -774,6 +774,29 @@ def test_without_attendees_the_sidecar_has_no_naming(
     assert result.stderr == ""
 
 
+def _names_but_in_the_last_chunk(target: str) -> str:
+    return "" if "Goodbye" in target else "<names></names>"
+
+
+def test_the_names_line_counts_the_chunks_that_returned_no_names_list(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    made = _patch(monkeypatch, trailer=_names_but_in_the_last_chunk)
+    # Long enough for two chunks, the last holding the goodbye.
+    staged = _meeting(tmp_path, *MEETING * 22, (5, "Goodbye everyone."))
+
+    result = runner.invoke(app, ["turns", str(staged), "--attendees", "Alice, Bruno"])
+
+    assert result.exit_code == 0, result.output
+    assert len(made[0].calls) == 2
+    naming = cast("dict[str, object]", _sidecar(tmp_path / "talk.speakers.json")["naming"])
+    assert naming["names_blocks_missing"] == [1]
+    assert result.stderr == (
+        "scribe: names from the words (prompt names-1): none; unassigned: Alice, Bruno; "
+        "1 of 2 chunks returned no names list\n"
+    )
+
+
 def test_a_rerun_without_attendees_drops_the_names(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
