@@ -37,6 +37,10 @@ class ToolMissingError(ExternalServiceError):
 class EarError(AppError):
     """Raised when the local recognizers cannot run here, or a run of one fails."""
 
+    def __init__(self, message: str) -> None:
+        # A path, key or report it quotes can hold a line break; the cause is read as one line.
+        super().__init__(" ".join(message.split()))
+
 
 class SpendCapError(AppError):
     """Raised when a paid call could take a run's spending past its cap."""

@@ -113,8 +113,7 @@ def parse_output(recognizer: Recognizer, raw: bytes, clips: int) -> Heard:
         parsed = _Output.model_validate_json(raw)
     except ValidationError as exc:
         first = exc.errors()[0]
-        # A key holding a line break would otherwise split this one-line cause.
-        where = " ".join(".".join(str(part) for part in first["loc"]).split())
+        where = ".".join(str(part) for part in first["loc"])
         raise EarError(
             f"{recognizer.name} wrote an unexpected answer: {first['msg']} "
             f"(at {where or 'top level'})"
@@ -135,11 +134,19 @@ def _host() -> tuple[str, str]:
     return platform.system(), platform.machine()
 
 
+def _expanded(setting: str) -> str:
+    # As Hugging Face's client expands a cache setting, which leaves a `~user`
+    # with no home as written; Path.expanduser would raise on it.
+    return os.path.expandvars(os.path.expanduser(setting))  # noqa: PTH111  # Path's form raises
+
+
 def _hub_cache() -> Path:
-    # Hugging Face's own lookup order, so this checks the cache the worker will read.
+    # Hugging Face's own lookup order and expansion, so this is the cache its client would read.
     home = os.getenv("HF_HOME", str(Path(os.getenv("XDG_CACHE_HOME", "~/.cache")) / "huggingface"))
-    hub = os.getenv("HF_HUB_CACHE", os.getenv("HUGGINGFACE_HUB_CACHE", str(Path(home) / "hub")))
-    return Path(hub).expanduser()
+    hub = os.getenv(
+        "HF_HUB_CACHE", os.getenv("HUGGINGFACE_HUB_CACHE", str(Path(_expanded(home)) / "hub"))
+    )
+    return Path(_expanded(hub))
 
 
 def _excerpt(completed: subprocess.CompletedProcess[str]) -> str:
@@ -295,6 +302,8 @@ class LocalEars:
         except OSError as exc:
             raise EarError(f"cannot write {spec.name}'s request: {exc}") from exc
         env = child_env(*(TOKEN_NAMES if spec.gated else TOKENLESS))
+        # The cache `resolve` checked: a variable its setting names may not be passed on.
+        env["HF_HUB_CACHE"] = str(_hub_cache())
         if offline:
             env.update(_OFFLINE)
         pins = [uvx, "--python", PYTHON, "--exclude-newer", EXCLUDE_NEWER]

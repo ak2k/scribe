@@ -14,6 +14,7 @@ import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
+from scribe.diarizer import Tools
 from scribe.ear import DEFAULT_TIMEOUT_S, FAILED, RECOGNIZERS, Heard, LocalEars, parse_output
 from scribe.errors import EarError
 from tests.child_env_cases import ALL_BUT_THE_WORKER, TOKENS
@@ -26,6 +27,7 @@ if TYPE_CHECKING:
 
 COHERE, QWEN = RECOGNIZERS
 _WEIGHTS = ("config.json", "model.safetensors")
+_CACHE_NAMES = ("HF_HUB_CACHE", "HUGGINGFACE_HUB_CACHE", "HF_HOME", "XDG_CACHE_HOME")
 
 
 def answer(intervals: list[list[float]], **changes: object) -> dict[str, object]:
@@ -44,16 +46,20 @@ def _snapshot(hub: Path, model: str, revision: str) -> Path:
     return hub / f"models--{model.replace('/', '--')}" / "snapshots" / revision
 
 
+def _fill(hub: Path) -> None:
+    for spec in RECOGNIZERS:
+        snapshot = _snapshot(hub, spec.model, spec.revision)
+        snapshot.mkdir(parents=True, exist_ok=True)
+        for name in _WEIGHTS:
+            (snapshot / name).write_text("{}", encoding="utf-8")
+
+
 @pytest.fixture(autouse=True)
 def cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """A Hugging Face cache holding both pinned snapshots."""
     hub = tmp_path / "hub"
     monkeypatch.setenv("HF_HUB_CACHE", str(hub))
-    for spec in RECOGNIZERS:
-        snapshot = _snapshot(hub, spec.model, spec.revision)
-        snapshot.mkdir(parents=True)
-        for name in _WEIGHTS:
-            (snapshot / name).write_text("{}", encoding="utf-8")
+    _fill(hub)
     return hub
 
 
@@ -278,6 +284,32 @@ def test_no_working_directory_is_one_ear_error_before_anything_runs(
     assert fake.calls == []
 
 
+@pytest.mark.parametrize("separator", ["\n", "\r", "\u2028"], ids=["lf", "cr", "ls"])
+def test_a_missing_cache_whose_path_holds_a_line_break_is_one_line(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, separator: str
+) -> None:
+    monkeypatch.setenv("HF_HUB_CACHE", str(tmp_path / f"missing{separator}cache"))
+    fake = FakeWorker(answer)
+
+    with pytest.raises(EarError, match="is not in the Hugging Face cache") as caught:
+        _ears(fake).resolve()
+
+    assert str(caught.value).splitlines() == [str(caught.value)]
+    assert fake.calls == []
+
+
+def test_a_program_whose_path_holds_a_line_break_is_one_line(tmp_path: Path) -> None:
+    fake = FakeWorker(answer, error=OSError("exec format error"))
+
+    def found_in_odd_place(name: str) -> str | None:
+        return {"uvx": "/opt/no\nwhere/uvx", "ffmpeg": FFMPEG}.get(name)
+
+    with pytest.raises(EarError, match="cannot run") as caught:
+        _ears(fake, which=found_in_odd_place).hear(_audio(tmp_path), [(0.0, 3.0)])
+
+    assert str(caught.value).splitlines() == [str(caught.value)]
+
+
 def test_a_request_that_cannot_be_written_is_one_ear_error(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -304,7 +336,7 @@ def test_a_request_that_cannot_be_written_is_one_ear_error(
 def test_the_cache_is_found_where_hugging_face_looks(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, names: dict[str, str], expected: str
 ) -> None:
-    for name in ("HF_HUB_CACHE", "HUGGINGFACE_HUB_CACHE", "HF_HOME", "XDG_CACHE_HOME"):
+    for name in _CACHE_NAMES:
         monkeypatch.delenv(name, raising=False)
     for name, value in names.items():
         monkeypatch.setenv(name, str(tmp_path / value))
@@ -316,6 +348,49 @@ def test_the_cache_is_found_where_hugging_face_looks(
     assert f"under {_snapshot(tmp_path / expected, COHERE.model, COHERE.revision)}" in str(
         caught.value
     )
+
+
+# Hugging Face's client substitutes variables in each of these. The workers are
+# not given SCRIBE_CACHE, so they must be handed the cache it names.
+@pytest.mark.parametrize(
+    ("names", "hub"),
+    [
+        ({"HF_HUB_CACHE": "$SCRIBE_CACHE/hub"}, "hub"),
+        ({"HF_HUB_CACHE": "${SCRIBE_CACHE}/hub"}, "hub"),
+        ({"HUGGINGFACE_HUB_CACHE": "$SCRIBE_CACHE/hub"}, "hub"),
+        ({"HF_HOME": "$SCRIBE_CACHE"}, "hub"),
+        ({"XDG_CACHE_HOME": "$SCRIBE_CACHE"}, "huggingface/hub"),
+    ],
+    ids=["hub-cache", "hub-cache-braced", "legacy-hub-cache", "hf-home", "xdg-cache-home"],
+)
+def test_a_cache_named_through_a_variable_is_found_and_is_the_one_each_worker_reads(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, names: dict[str, str], hub: str
+) -> None:
+    for name in _CACHE_NAMES:
+        monkeypatch.delenv(name, raising=False)
+    _fill(tmp_path / hub)
+    monkeypatch.setenv("SCRIBE_CACHE", str(tmp_path))
+    for name, value in names.items():
+        monkeypatch.setenv(name, value)
+    fake = FakeWorker(answer)
+
+    assert _ears(fake).resolve() == Tools(UVX, FFMPEG)
+    _ears(fake).hear(_audio(tmp_path), [(1.0, 4.0)])
+
+    assert [env.get("HF_HUB_CACHE") for env in fake.envs[1:]] == [str(tmp_path / hub)] * 2
+
+
+def test_a_cache_under_a_user_with_no_home_is_looked_for_as_written(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Hugging Face's client leaves a `~user` it cannot find as it is: a relative path.
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HF_HUB_CACHE", "~scribe-no-such-user/hub")
+    fake = FakeWorker(answer)
+
+    with pytest.raises(EarError, match="under ~scribe-no-such-user/hub/models--"):
+        _ears(fake).resolve()
+    assert fake.calls == []
 
 
 # Every character `str.splitlines` breaks on, drawn often: a key holding one is rare otherwise.

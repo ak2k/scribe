@@ -101,14 +101,24 @@ def main(argv: list[str]) -> int:
     # On the CPU torch would still answer, with words the vote was not measured on.
     if not torch.backends.mps.is_available():
         return _fail("torch cannot use the Metal GPU (mps) here")
+    audio = np.fromfile(request["audio"], dtype="<f4")
+    clips = []
+    for index, (start_s, end_s) in enumerate(request["intervals"]):
+        start, stop = round(start_s * _RATE), round(end_s * _RATE)
+        # Refused, not sliced: a slice would hear such a clip as another stretch
+        # or as nothing, and keep its text. An end past the audio is cut there.
+        if start_s < 0 or stop <= start or start >= len(audio):
+            return _fail(
+                f"clip {index} ({start_s:g} s to {end_s:g} s) is not a stretch of the "
+                f"{len(audio) / _RATE:g} s of decoded audio"
+            )
+        clips.append(audio[start:stop])
     model_class, transcribe = _MODELS[request["name"]]
     pinned = {"revision": request["revision"]}
     processor = AutoProcessor.from_pretrained(request["model"], **pinned)
     model = model_class.from_pretrained(request["model"], **pinned, dtype=_DTYPE)
     model = model.to("mps").eval()
-    audio = np.fromfile(request["audio"], dtype="<f4")
     # One call per clip, never merged: the audio around a spot changes its words.
-    clips = [audio[max(0, round(a * _RATE)) : round(b * _RATE)] for a, b in request["intervals"]]
     texts = [transcribe(processor, model, clip, request["max_new_tokens"]) for clip in clips]
     versions = {
         str(dist.metadata["Name"]): dist.version for dist in importlib.metadata.distributions()
