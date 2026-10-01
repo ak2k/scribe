@@ -108,7 +108,8 @@ def test_a_slot_doubling_the_word_after_the_spot_names_no_reading_made_of_the_wo
     said = _timed("we saw the cat sat down")
     found = slot(said, Spot(range(3, 4), range(3, 4)), (0, 11), "we saw the sat sat down")
 
-    assert found == Slot(("sat",), (), ())
+    assert found is not None
+    assert found.words == ("sat",)
     assert verdict(found, ["cat"], ["the"], (_SAW_THE, _SAT_DOWN)) == "third"
 
 

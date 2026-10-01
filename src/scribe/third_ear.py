@@ -13,7 +13,7 @@ import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
-from scribe.pick import alike, guarded, restored, spot_contexts
+from scribe.pick import alike, guarded, normalized, restored, spot_contexts
 from scribe.schema import Word
 from scribe.vote import align_words, norm_tokens
 
@@ -102,14 +102,22 @@ def verdict(
     """Name the reading `slot` is, the transcript's (`said`) or the reference's; "third" if neither.
 
     A reading is tried with and without the transcript's unmatched words
-    beside it, which the recognizer may have kept, changed or dropped. A slot
-    that is both readings names neither.
+    beside it, which the recognizer may have kept, changed or dropped. A
+    reading that compares alike to no words at all in its context is named
+    only by a slot that is it token for token. A slot that is both readings
+    names neither.
     """
     frames = ((slot.left, slot.right), ((), slot.right), (slot.left, ()), ((), ()))
-    is_said, is_heard = (
-        any(alike(slot.words, [*left, *reading, *right], *context) for left, right in frames)
-        for reading in (said, heard)
-    )
+    tokens = normalized(" ".join(slot.words))
+
+    def names(reading: Sequence[str]) -> bool:
+        # Such a reading repeats its context, so a slot of no word, of
+        # fillers, or of a word beside it doubled collapses into it too.
+        if alike((), reading, *context) and tokens != normalized(" ".join(reading)):
+            return False
+        return any(alike(slot.words, [*left, *reading, *right], *context) for left, right in frames)
+
+    is_said, is_heard = names(said), names(heard)
     if is_said == is_heard:
         return "third"
     return "transcript" if is_said else "reference"
