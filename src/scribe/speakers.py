@@ -287,7 +287,7 @@ def parse_reply(text: str) -> list[tuple[int | None, str]]:
     return pairs
 
 
-def _tokens(texts: Sequence[str]) -> list[tuple[int, str]]:
+def word_keys(texts: Sequence[str]) -> list[tuple[int, str]]:
     """(word index, key) for each token the prompt shows.
 
     `render` joins raw word texts, so a word holding a space reaches the model
@@ -296,9 +296,18 @@ def _tokens(texts: Sequence[str]) -> list[tuple[int, str]]:
     return [(index, _key(token)) for index, text in enumerate(texts) for token in text.split()]
 
 
+def text_keys(text: str) -> list[str]:
+    """The keys of free text the model copied from the prompt, read as `word_keys` reads words.
+
+    A `<spk:N>` tag counts as a space, so words copied across a run boundary
+    still read as the words they are, even with the tag glued between them.
+    """
+    return [_key(token) for token in _TAG.sub(" ", text).split()]
+
+
 def _same_words(texts: Sequence[str], reply: Sequence[tuple[int | None, str]]) -> bool:
     """Whether the reply's words are `texts`' tokens, in order, as matching sees them."""
-    return [key for _, key in _tokens(texts)] == [_key(word) for _, word in reply]
+    return [key for _, key in word_keys(texts)] == [_key(word) for _, word in reply]
 
 
 def align_labels(
@@ -316,7 +325,7 @@ def align_labels(
         One label per word in `texts`, and how many reply words matched a token.
 
     """
-    tokens = _tokens(texts)
+    tokens = word_keys(texts)
     matcher = difflib.SequenceMatcher(
         None, [key for _, key in tokens], [_key(word) for _, word in reply], autojunk=False
     )
