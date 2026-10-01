@@ -715,10 +715,8 @@ def _name_from_words(
     if not attendees:
         return {}, engine, None
     if relabeled is None:
-        _warn(
-            "names from the words: no speaker pass ran (fewer than two speakers), "
-            "so nobody was named"
-        )
+        why = "fewer than two speakers" if words else "the input has no words"
+        _warn(f"names from the words: no speaker pass ran ({why}), so nobody was named")
         return {}, engine, None
     # On the speakers the turns are built from, so each pointer lands on a turn.
     labels = rank_labels(speakers)
