@@ -56,10 +56,11 @@ MEETING: tuple[Run, ...] = (
     (7, "And Jose, the timeline?"),
     (5, "End of month. Keigo sent the notes yesterday."),
 )
+# One NAME in another case: it still names the attendee, as listed.
 ANSWERED = """\
 Connor | Connor | next | Connor, can you share the deck?
 Jose | Jose | next | Jose, what do you think of it?
-Connor | Connor | next | Connor, one more thing about pricing.
+connor | Connor | next | Connor, one more thing about pricing.
 Jose | Jose | next | And Jose, the timeline?"""
 
 
