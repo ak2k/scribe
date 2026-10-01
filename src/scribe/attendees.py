@@ -231,15 +231,14 @@ def name_speakers(
     counts against the speaker of every place it fits, any of whom may be
     the one saying the name. A `next` mention points at the run after the
     one it is said in, `previous` at the run before, `self` at its own run,
-    and `about` at none.
-    In a run, an attendee's first pointer counts and so does their first
-    other mention; later ones repeat. A pointer spoken in, or pointing at,
-    words no speaker was found for does not count, nor does one with no run
-    to point at, but either still counts against the speaker who said it.
-    An id is named for an attendee when at least MIN_POINTERS counted
-    mentions point at it, at least RIVAL_FACTOR times as many as at any
-    other id, and none of its own turns names the attendee; an id two
-    attendees win stays unnamed.
+    and `about` at none. In a run, an attendee's first pointer at each id
+    counts and so does their first other mention; later ones repeat. A
+    pointer spoken in, or pointing at, words no speaker was found for does
+    not count, nor does one with no run to point at, but either still
+    counts against the speaker who said it. An id is named for an attendee
+    when at least MIN_POINTERS counted mentions point at it, at least
+    RIVAL_FACTOR times as many as at any other id, and none of its own turns
+    names the attendee; an id two attendees win stays unnamed.
 
     Args:
         words: The transcript's words.
@@ -260,11 +259,11 @@ def name_speakers(
         for at, mention in enumerate(checked)
         if mention.reason is None and mention.word is not None
     )
-    # Pointers and mentions count once each per run, so listing a mention never
-    # hides the pointer after it.
-    once: set[tuple[str, int, bool]] = set()
+    # A run counts once per id pointed at and once for mentions, so neither a
+    # mention nor a pointer hides a later pointer that disagrees with it.
+    once: set[tuple[str, int, int | None]] = set()
     for word, at in located:
-        key = (checked[at].name, runs[0][word], checked[at].points_to is None)
+        key = (checked[at].name, runs[0][word], checked[at].points_to)
         if key in once:
             checked[at] = replace(checked[at], reason="repeat")
         once.add(key)
