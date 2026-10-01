@@ -237,6 +237,34 @@ def test_a_mention_that_fits_two_places_counts_against_both_speakers(
     assert named.says["Alice"].get(3)
 
 
+@pytest.mark.parametrize(
+    ("after", "reason"),
+    [
+        pytest.param((), "no_turn", id="nobody-answers"),
+        pytest.param(((None, "Sure, on it."),), "unattributed", id="nobody-known-answers"),
+    ],
+)
+def test_a_pointer_that_cannot_count_still_counts_against_its_speaker(
+    after: tuple[Run, ...], reason: str
+) -> None:
+    runs: tuple[Run, ...] = (
+        *SAID_BY_THE_ANSWERER[:3],
+        (3, "Pricing is settled. Alice, can you check the budget?"),
+        *after,
+    )
+    block = (
+        "Alice | Alice | next | Alice, can you share the deck?\n"
+        "Alice | Alice | next | Alice, one more thing about pricing.\n"
+        "Alice | Alice | next | Alice, can you check the budget?"
+    )
+
+    named, _ = _named_from_replies(runs, block)
+
+    assert named.names == {}
+    assert [mention.reason for mention in named.evidence] == [None, None, reason]
+    assert named.says["Alice"] == {7: 2, 3: 1}
+
+
 def test_a_label_two_names_win_stays_unnamed() -> None:
     runs: tuple[Run, ...] = (
         (7, "Alice, can you share the deck?"),
@@ -548,7 +576,11 @@ def test_no_name_lands_on_two_labels_or_without_its_pointers(
             if other != speaker
         )
         assert not [
-            mention for mention in counted if mention.by == speaker and mention.kind != "self"
+            mention
+            for mention in named.evidence
+            if mention.name == name
+            and mention.kind != "self"
+            and speaker in (mention.by, *mention.by_one_of)
         ]
     unnamed = turns_from_speakers(words, spoken)
     renamed = turns_from_speakers(words, spoken, named.names)
