@@ -1396,6 +1396,9 @@ def _report_pick(
         else f"scribe: replayed the sides {replayed} records, asking no model: {counts}, "
         f"as {model} picked them with prompt {version}"
     )
+    # A replay has no chunk, so no failed-chunk line counts the spots no model picked.
+    if replayed is not None and (failed := picked.count("failed")):
+        line += f"; {failed} recorded failed, keeping {unpicked}"
     if guarded := picked.count("guarded"):
         line += (
             f"; {guarded} guarded, keeping the transcript's words where the reading "
