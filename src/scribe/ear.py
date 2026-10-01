@@ -113,8 +113,7 @@ def parse_output(recognizer: Recognizer, raw: bytes, clips: int) -> Heard:
         parsed = _Output.model_validate_json(raw)
     except ValidationError as exc:
         first = exc.errors()[0]
-        # A key holding a line break would otherwise split this one-line cause.
-        where = " ".join(".".join(str(part) for part in first["loc"]).split())
+        where = ".".join(str(part) for part in first["loc"])
         raise EarError(
             f"{recognizer.name} wrote an unexpected answer: {first['msg']} "
             f"(at {where or 'top level'})"
