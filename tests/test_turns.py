@@ -406,6 +406,26 @@ def test_turns_from_speakers_needs_one_id_per_word() -> None:
         turns_from_speakers(_said((1, "two words")), [1])
 
 
+def test_a_named_id_carries_its_name_and_the_others_keep_their_rank() -> None:
+    words = _said((5, "so the plan"), (None, "um"), (9, "is set."), (5, "and then"))
+    speakers = [word.speaker for word in words]
+    unnamed = turns_from_speakers(words, speakers)
+
+    named = turns_from_speakers(words, speakers, names={5: "Connor"})
+
+    assert [turn.speaker for turn in unnamed] == [
+        "Speaker 1",
+        "Speaker ?",
+        "Speaker 2",
+        "Speaker 1",
+    ]
+    # Rank 2 stays rank 2 although rank 1 now has a name.
+    assert [turn.speaker for turn in named] == ["Connor", "Speaker ?", "Speaker 2", "Connor"]
+    assert [(turn.start, turn.end, turn.text) for turn in named] == [
+        (turn.start, turn.end, turn.text) for turn in unnamed
+    ]
+
+
 @given(
     said=st.lists(
         st.tuples(
