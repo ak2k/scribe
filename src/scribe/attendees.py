@@ -176,7 +176,7 @@ def _held(run_of: Sequence[int], run: int) -> range:
 
 
 def _brief(words: Sequence[Word], run_of: Sequence[int], run: int) -> bool:
-    """Whether a run is short enough that turns would call it a micro-turn: maybe a backchannel."""
+    """Whether a run is a micro-turn by the turns' default thresholds: maybe a backchannel."""
     held = [words[at] for at in _held(run_of, run)]
     return (
         len(held) < DEFAULT_MIN_TURN_WORDS
