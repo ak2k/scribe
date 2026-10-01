@@ -341,11 +341,18 @@ def test_a_pointer_past_the_last_turn_is_dropped() -> None:
 
 
 def test_a_name_counts_once_per_turn() -> None:
+    runs: tuple[Run, ...] = (
+        (7, "Connor, can you share the deck? Connor, are you there?"),
+        (3, "Sorry, sharing it now."),
+    )
+
+    # The same place listed twice, and a second place in the same turn.
     assert _reasons(
-        MEETING,
+        runs,
         "Connor | Connor | next | Connor, can you share the deck?",
-        "Connor | Connor | next | start. Connor, can you share",
-    ) == [None, "repeat"]
+        "Connor | Connor | next | Connor, can you share the",
+        "Connor | Connor | next | deck? Connor, are you there?",
+    ) == [None, "repeat", "repeat"]
 
 
 def test_an_unknown_kind_and_a_short_line_are_dropped() -> None:
