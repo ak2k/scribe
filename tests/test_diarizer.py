@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import json
 import subprocess
+import tempfile
 from importlib import resources
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -206,6 +207,19 @@ def test_a_failed_run_is_one_service_error_naming_its_cause(
 
     assert expected in str(caught.value)
     assert "\n" not in str(caught.value)
+
+
+def test_no_working_directory_is_one_service_error_before_anything_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path / "missing"))
+    fake = FakeWorker()
+
+    with pytest.raises(ExternalServiceError, match="No such file or directory") as caught:
+        _backend(fake).diarize(_audio(tmp_path), [(0.0, 3.0)])
+
+    assert "\n" not in str(caught.value)
+    assert fake.calls == []
 
 
 def test_a_request_that_cannot_be_written_is_one_service_error(
