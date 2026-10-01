@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import errno
 import json
 import subprocess
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, NoReturn, cast
 
 from scribe.diarizer import DIMENSION
 
@@ -73,3 +74,7 @@ class FakeWorker:
 
 def found(name: str) -> str | None:
     return {"uvx": UVX, "ffmpeg": FFMPEG}.get(name)
+
+
+def full_disk(*_args: object, **_kwargs: object) -> NoReturn:
+    raise OSError(errno.ENOSPC, "No space left on device")

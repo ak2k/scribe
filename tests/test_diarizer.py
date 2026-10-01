@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import json
 import subprocess
+import tempfile
 from importlib import resources
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -24,7 +25,7 @@ from scribe.diarizer import (
 )
 from scribe.errors import ExternalServiceError, ToolMissingError
 from tests.child_env_cases import ALL_BUT_THE_WORKER, DROPPED, KEPT, TOKENS
-from tests.diarizer_fakes import FFMPEG, TOKEN, UVX, FakeWorker, answer, found
+from tests.diarizer_fakes import FFMPEG, TOKEN, UVX, FakeWorker, answer, found, full_disk
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -173,6 +174,7 @@ _NOISE = "UserWarning: torchcodec is not installed\n" * 20
         (FakeWorker(lambda _: None, stderr="warned"), "exited 0 without writing an answer: warned"),
         (FakeWorker(lambda _: "[not json"), "unexpected answer"),
         (FakeWorker(lambda i: answer(i, extra=1)), "at extra"),
+        (FakeWorker(lambda i: answer(i, **{"a\nb": 1})), "(at a b)"),
         (FakeWorker(lambda i: answer(i, embeddings=[])), "embedded 0 of 1 intervals"),
         (FakeWorker(lambda i: answer(i, embeddings=[[0.5] * 3])), "3 values, not 256"),
         (
@@ -189,6 +191,7 @@ _NOISE = "UserWarning: torchcodec is not installed\n" * 20
         "no-answer",
         "not-json",
         "extra-field",
+        "line-break-key",
         "count",
         "dimension",
         "timeout",
@@ -204,6 +207,32 @@ def test_a_failed_run_is_one_service_error_naming_its_cause(
 
     assert expected in str(caught.value)
     assert "\n" not in str(caught.value)
+
+
+def test_no_working_directory_is_one_service_error_before_anything_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path / "missing"))
+    fake = FakeWorker()
+
+    with pytest.raises(ExternalServiceError, match="No such file or directory") as caught:
+        _backend(fake).diarize(_audio(tmp_path), [(0.0, 3.0)])
+
+    assert "\n" not in str(caught.value)
+    assert fake.calls == []
+
+
+def test_a_request_that_cannot_be_written_is_one_service_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(Path, "write_text", full_disk)
+    fake = FakeWorker()
+
+    with pytest.raises(ExternalServiceError, match="No space left on device") as caught:
+        _backend(fake).diarize(_audio(tmp_path), [(0.0, 3.0)])
+
+    assert "\n" not in str(caught.value)
+    assert [argv[0] for argv in fake.calls] == [FFMPEG]
 
 
 def test_a_long_report_keeps_both_ends() -> None:

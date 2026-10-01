@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-import contextlib
 import json
+import os
 import subprocess
+import tempfile
 from importlib import resources
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -16,7 +17,7 @@ from hypothesis import strategies as st
 from scribe.ear import DEFAULT_TIMEOUT_S, FAILED, RECOGNIZERS, Heard, LocalEars, parse_output
 from scribe.errors import EarError
 from tests.child_env_cases import ALL_BUT_THE_WORKER, TOKENS
-from tests.diarizer_fakes import FFMPEG, TOKEN, UVX, FakeWorker, found
+from tests.diarizer_fakes import FFMPEG, TOKEN, UVX, FakeWorker, found, full_disk
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -169,6 +170,8 @@ _NOISE = "UserWarning: something is deprecated\n" * 20
         ),
         (FakeWorker(lambda _: "[not json"), "cohere-transcribe wrote an unexpected answer"),
         (FakeWorker(lambda i: answer(i, extra=1)), "at extra"),
+        (FakeWorker(lambda i: answer(i, **{"a\nb": 1})), "(at a b)"),
+        (FakeWorker(lambda i: answer(i, versions={"x\ny": 1})), "(at versions.x y)"),
         (FakeWorker(lambda i: answer(i, texts=[])), "cohere-transcribe heard 0 of 1 clips"),
         (
             FakeWorker(answer, error=subprocess.TimeoutExpired(["uvx"], 1.0)),
@@ -184,6 +187,8 @@ _NOISE = "UserWarning: something is deprecated\n" * 20
         "no-answer",
         "not-json",
         "extra-field",
+        "line-break-key",
+        "line-break-nested-key",
         "count",
         "timeout",
         "unrunnable",
@@ -243,6 +248,49 @@ def test_an_uncached_snapshot_is_refused_before_anything_runs(
     assert fake.calls == []
 
 
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads a 0o000 directory, so nothing fails")
+def test_an_unreadable_cache_is_one_ear_error_before_anything_runs(
+    tmp_path: Path, cache: Path
+) -> None:
+    snapshots = _snapshot(cache, COHERE.model, COHERE.revision).parent
+    snapshots.chmod(0o000)
+    fake = FakeWorker(answer)
+    try:
+        with pytest.raises(EarError) as caught:
+            _ears(fake).hear(_audio(tmp_path), [(0.0, 3.0)])
+    finally:
+        snapshots.chmod(0o700)
+
+    assert "\n" not in str(caught.value)
+    assert fake.calls == []
+
+
+def test_no_working_directory_is_one_ear_error_before_anything_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path / "missing"))
+    fake = FakeWorker(answer)
+
+    with pytest.raises(EarError, match="No such file or directory") as caught:
+        _ears(fake).hear(_audio(tmp_path), [(0.0, 3.0)])
+
+    assert "\n" not in str(caught.value)
+    assert fake.calls == []
+
+
+def test_a_request_that_cannot_be_written_is_one_ear_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(Path, "write_text", full_disk)
+    fake = FakeWorker(answer)
+
+    with pytest.raises(EarError, match="No space left on device") as caught:
+        _ears(fake).hear(_audio(tmp_path), [(0.0, 3.0)])
+
+    assert "\n" not in str(caught.value)
+    assert [argv[0] for argv in fake.calls] == [FFMPEG]
+
+
 @pytest.mark.parametrize(
     ("names", "expected"),
     [
@@ -270,25 +318,31 @@ def test_the_cache_is_found_where_hugging_face_looks(
     )
 
 
+# Every character `str.splitlines` breaks on, drawn often: a key holding one is rare otherwise.
+_breaks = st.sampled_from(list("\n\r\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029"))
+_text = st.text(st.characters() | _breaks, max_size=4)
 _json = st.recursive(
-    st.none() | st.booleans() | st.integers() | st.floats() | st.text(max_size=4),
-    lambda inner: st.lists(inner, max_size=3) | st.dictionaries(st.text(max_size=4), inner),
+    st.none() | st.booleans() | st.integers() | st.floats() | _text,
+    lambda inner: st.lists(inner, max_size=3) | st.dictionaries(_text, inner),
     max_leaves=8,
 )
 _keys = st.sampled_from(["versions", "device", "dtype", "runtime_s", "texts", "other"])
 
 
-@given(st.one_of(st.binary(max_size=40), _json.map(json.dumps).map(str.encode)))
-def test_any_answer_either_parses_or_is_an_ear_error(raw: bytes) -> None:
-    with contextlib.suppress(EarError):
+def _parses_or_is_one_line(raw: bytes) -> None:
+    try:
         parse_output(COHERE, raw, 1)
+    except EarError as exc:
+        assert str(exc).splitlines() == [str(exc)]
+
+
+@given(st.one_of(st.binary(max_size=40), _json.map(json.dumps).map(str.encode)))
+def test_any_answer_either_parses_or_is_a_one_line_ear_error(raw: bytes) -> None:
+    _parses_or_is_one_line(raw)
 
 
 @given(_keys, _json)
-def test_a_well_formed_answer_with_one_field_changed_parses_or_is_an_ear_error(
+def test_a_well_formed_answer_with_one_field_changed_parses_or_is_a_one_line_ear_error(
     key: str, value: object
 ) -> None:
-    raw = json.dumps(answer([[0.0, 1.0]], **{key: value})).encode()
-
-    with contextlib.suppress(EarError):
-        parse_output(COHERE, raw, 1)
+    _parses_or_is_one_line(json.dumps(answer([[0.0, 1.0]], **{key: value})).encode())

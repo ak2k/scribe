@@ -96,7 +96,8 @@ def parse_output(raw: bytes, intervals: int) -> Diarization:
         parsed = _Output.model_validate_json(raw)
     except ValidationError as exc:
         first = exc.errors()[0]
-        where = ".".join(str(part) for part in first["loc"])
+        # A key holding a line break would otherwise split this one-line cause.
+        where = " ".join(".".join(str(part) for part in first["loc"]).split())
         raise ExternalServiceError(
             f"the diarizer wrote an unexpected answer: {first['msg']} (at {where or 'top level'})"
         ) from exc
@@ -210,15 +211,19 @@ class PyannoteDiarizer:
         """Diarize `audio` and embed each of `intervals` of it, in seconds.
 
         Raises:
-            ExternalServiceError: `resolve` failed, or the decode or the worker
-                failed, timed out, or left no readable answer.
+            ExternalServiceError: `resolve` failed, a working file could not be written,
+                or the decode or the worker failed, timed out, or left no readable answer.
 
         """
         tools = self.resolve()
-        # A directory left behind costs disk; failing on it would discard an answer in hand.
-        with tempfile.TemporaryDirectory(
-            prefix="scribe-diarize-", ignore_cleanup_errors=True
-        ) as workdir:
+        try:
+            # A directory left behind costs disk; failing on it would discard an answer in hand.
+            scratch = tempfile.TemporaryDirectory(
+                prefix="scribe-diarize-", ignore_cleanup_errors=True
+            )
+        except OSError as exc:
+            raise ExternalServiceError(f"cannot make a working directory: {exc}") from exc
+        with scratch as workdir:
             wav, request, out = (
                 Path(workdir) / name for name in ("audio.wav", "in.json", "out.json")
             )
@@ -227,17 +232,16 @@ class PyannoteDiarizer:
             self._spawn(
                 [*decode, "-ac", "1", "-ar", _RATE, str(wav)], "ffmpeg", child_env(*TOKENLESS)
             )
-            request.write_text(
-                json.dumps(
-                    {
-                        "audio": str(wav),
-                        "model": MODEL,
-                        "revision": REVISION,
-                        "intervals": [list(interval) for interval in intervals],
-                    }
-                ),
-                encoding="utf-8",
-            )
+            body = {
+                "audio": str(wav),
+                "model": MODEL,
+                "revision": REVISION,
+                "intervals": [list(interval) for interval in intervals],
+            }
+            try:
+                request.write_text(json.dumps(body), encoding="utf-8")
+            except OSError as exc:
+                raise ExternalServiceError(f"cannot write the diarizer's request: {exc}") from exc
             pins = [tools.uvx, "--python", PYTHON, "--exclude-newer", EXCLUDE_NEWER]
             pins += ["--from", f"{PACKAGE}=={VERSION}"]
             pins += [option for pin in WITH for option in ("--with", pin)]

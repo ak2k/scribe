@@ -14,8 +14,10 @@ A failure is one line on stderr starting with FAILED, and exit 1.
 
 from __future__ import annotations
 
+import contextlib
 import importlib.metadata
 import json
+import os
 import platform
 import sys
 import time
@@ -32,13 +34,30 @@ from transformers import (
 )
 
 FAILED = "scribe-ear: "
+# Where scribe hands this worker the Hugging Face token: scribe.diarizer.TOKEN_NAMES.
+TOKEN_NAMES = ("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN", "HF_TOKEN_PATH")
 _RATE = 16000
 # The vote was measured in bfloat16; float32 changed 45 of 164 of Qwen's texts.
 _DTYPE = torch.bfloat16
 
 
+def _hidden(text: str) -> str:
+    # A failure's text can quote the token, and scribe prints this worker's report.
+    # Hugging Face's client strips the value it reads, so that is the form quoted.
+    values = [os.environ.get(name, "").strip() for name in TOKEN_NAMES]
+    # The token the client finds itself, saved by a login or in HF_TOKEN_PATH's file;
+    # whatever breaks finding it, the failure is still reported.
+    with contextlib.suppress(Exception):
+        from huggingface_hub import get_token  # noqa: PLC0415  # imported only on failure, guarded
+
+        values.append((get_token() or "").strip())
+    for value in filter(None, values):
+        text = text.replace(value, "<hidden>")
+    return text
+
+
 def _fail(cause: str) -> int:
-    print(f"{FAILED}{' '.join(cause.split())}", file=sys.stderr, flush=True)
+    print(f"{FAILED}{' '.join(_hidden(cause).split())}", file=sys.stderr, flush=True)
     return 1
 
 
@@ -110,6 +129,6 @@ if __name__ == "__main__":
         code = main(sys.argv[1:])
     # Whatever the cause, scribe reads it from this one line, not from a traceback's end.
     except Exception as exc:  # noqa: BLE001  # reported, then the exit is nonzero
-        traceback.print_exc()
+        print(_hidden(traceback.format_exc()), end="", file=sys.stderr)
         code = _fail(f"{type(exc).__name__}: {exc}")
     sys.exit(code)
