@@ -350,9 +350,9 @@ def _asking_names(system: str, attendees: Sequence[str]) -> str:
         AppError: `system` lacks the reply rule, which would leave the block unasked for.
 
     """
-    asked = system.replace(_REPLY_RULE, _NAMES_RULE)
-    if _REPLY_RULE in asked or _NAMES_RULE not in asked:
+    if _REPLY_RULE not in system:
         raise _PromptMismatchError("the speaker prompt has no reply rule to ask for names in")
+    asked = system.replace(_REPLY_RULE, _NAMES_RULE)
     # Joined, never formatted, so a brace in a name is just a brace.
     return asked + "\nPeople at this meeting: " + ", ".join(attendees) + ".\n" + _NAMES
 
