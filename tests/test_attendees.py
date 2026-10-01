@@ -237,6 +237,24 @@ def test_a_label_needs_two_pointers_and_twice_any_rivals(
     assert named.names == names
 
 
+def test_a_speaker_naming_themself_twice_is_named() -> None:
+    runs: tuple[Run, ...] = (
+        (7, "Morning, everyone, quick update first."),
+        (3, "This is Connor, the deck is ready."),
+        (7, "Great, thanks for that."),
+        (3, "Connor again, one more thing on pricing."),
+    )
+    block = (
+        "Connor | Connor | self | This is Connor, the deck\n"
+        "Connor | Connor | self | Connor again, one more thing"
+    )
+
+    named, _ = _named_from_replies(runs, block)
+
+    assert named.names == {3: "Connor"}
+    assert named.says["Connor"] == {}
+
+
 @pytest.mark.parametrize(
     "block",
     [
