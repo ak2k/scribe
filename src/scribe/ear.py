@@ -37,8 +37,9 @@ PYTHON = "3.12"
 # dependency that moves can change the words. The measured environment resolved
 # at about this time, after transformers 5.18.0 was published at 16:46Z.
 EXCLUDE_NEWER = "2026-09-30T21:00:00Z"
-# About 1 s per clip per recognizer on Apple silicon once cached; a run with
-# downloads allowed may first fetch ~8 GB of weights and packages.
+# About 1 s per clip per recognizer on Apple silicon once cached. With downloads
+# allowed a run can fetch only uv's packages and the small processor files:
+# `resolve` refuses before any spawn unless both snapshots' weights are cached.
 DEFAULT_TIMEOUT_S = 3600.0
 # How the worker marks the one line that names its own failure.
 FAILED = "scribe-ear: "
