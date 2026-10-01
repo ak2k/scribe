@@ -131,7 +131,8 @@ class Disputes:
     fills_by_time: bool
 
 
-def _record(transcript: Transcript, path: Path) -> list[_Row]:
+def pick_record(transcript: Transcript, path: Path) -> list[_Row]:
+    """Read the spots the pick recorded in `transcript`, read from `path`."""
     recorded = transcript.engine.params.get("pick_record")
     if recorded is None:
         raise InputValidationError(
@@ -295,7 +296,7 @@ def find_disputes(transcript: Transcript, path: Path) -> Disputes:
             before 0 among them, or a count runs past the transcript's words.
 
     """
-    rows = _record(transcript, path)
+    rows = pick_record(transcript, path)
     engine = transcript.engine
     reference = _engine_param(transcript, path, "pick_reference", None)
     filler = _engine_param(transcript, path, "fill_reference", reference)

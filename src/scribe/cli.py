@@ -42,6 +42,7 @@ from scribe.disputes import (
     clips_directory,
     cut_clips,
     find_disputes,
+    pick_record,
     render_disputes,
     summarize,
 )
@@ -58,6 +59,7 @@ from scribe.pick import (
     RESTORED_ADD,
     find_spots,
     pick_readings,
+    replay_readings,
 )
 from scribe.schema import Engine, Source, Transcript, from_xai_response
 from scribe.speakers import (
@@ -95,7 +97,7 @@ if TYPE_CHECKING:
     from scribe.diarizer import Diarization
     from scribe.fidelity import Fidelity
     from scribe.outputs import OutputPlan
-    from scribe.pick import Picking
+    from scribe.pick import Picking, Side
     from scribe.speakers import Relabeling
 
 # Enough of a stderr line to act on without pasting a whole transcript into it.
@@ -1364,12 +1366,19 @@ def fill_command(
     typer.echo(str(plan["--out"]))
 
 
-def _report_pick(picking: Picking, model: str) -> None:
+def _report_pick(
+    picking: Picking, model: str, version: str = PICK_PROMPT_VERSION, replayed: Path | None = None
+) -> None:
     picked = picking.picked
+    counts = (
+        f"the reference's reading at {picked.count('reference')} of "
+        f"{len(picked)} disputed spots ({picked.count('unsure')} unsure)"
+    )
     line = (
-        f"scribe: picked the reference's reading at {picked.count('reference')} of "
-        f"{len(picked)} disputed spots ({picked.count('unsure')} unsure) with {model}, "
-        f"prompt {PICK_PROMPT_VERSION}"
+        f"scribe: picked {counts} with {model}, prompt {version}"
+        if replayed is None
+        else f"scribe: replayed the sides {replayed} records, asking no model: {counts}, "
+        f"as {model} picked them with prompt {version}"
     )
     if guarded := picked.count("guarded"):
         line += (
@@ -1392,6 +1401,20 @@ def _report_pick(picking: Picking, model: str) -> None:
         )
 
 
+def _replayed(path: Path) -> tuple[list[tuple[float, float, str, str, Side]], str, str, int]:
+    """Read the spots and sides PICKED records, and the model, prompt and background behind them."""
+    picked = Transcript.load(path)
+    record = pick_record(picked, path)
+    params = picked.engine.params
+    named = (params.get(key) for key in ("pick_model", "pick_prompt_version", "pick_context_chars"))
+    model, version, chars = named
+    if not (isinstance(model, str) and isinstance(version, str) and isinstance(chars, int)):
+        raise InputValidationError(
+            f"--sides-from {path} names no pick_model, pick_prompt_version and pick_context_chars"
+        )
+    return record, model, version, chars
+
+
 @app.command(name="pick")
 def pick_command(
     transcript_path: Path = typer.Argument(
@@ -1408,6 +1431,12 @@ def pick_command(
     model: str = typer.Option(DEFAULT_PICK_MODEL, "--model", help="Model the pick is asked for."),
     context: str | None = typer.Option(
         None, "--context", help="Background on the recording. Never added to the transcript."
+    ),
+    sides_from: Path | None = typer.Option(
+        None,
+        "--sides-from",
+        metavar="PICKED",
+        help="Take each spot's side from PICKED, a pick of the same two inputs; ask no model.",
     ),
 ) -> None:
     """Pick, where two transcripts of one recording disagree, which reading was said.
@@ -1436,9 +1465,13 @@ def pick_command(
     The result records each spot and its pick in its engine params, and has
     no turns: run `scribe turns` on it next.
 
+    --sides-from replays the sides PICKED records, as they stand, with no call;
+    --model and --context are then unused.
+
     Both inputs' word starts must not decrease. Exit 2 is a bad input, inputs
-    that record different audio sha256, a TRANSCRIPT picked before, an
-    unwritable output, or no usable claude CLI, found before any call. Exit 4
+    that record different audio sha256, a TRANSCRIPT picked before, a PICKED
+    whose spots are not these inputs', an unwritable output, or no usable
+    claude CLI, found before any call. Exit 4
     means every call failed; the result is written anyway, with TRANSCRIPT's
     words.
     """
@@ -1457,14 +1490,26 @@ def pick_command(
                 f"{transcript_path}: their sha256 differ"
             )
         destination = sibling(transcript_path, ".picked.json") if out is None else out
+        inputs = {"TRANSCRIPT": transcript_path, "REFERENCE": reference_path}
         plan = plan_outputs(
-            {"--out": destination}, {"TRANSCRIPT": transcript_path, "REFERENCE": reference_path}
+            {"--out": destination},
+            inputs if sides_from is None else inputs | {"PICKED": sides_from},
         )
         # Before the calls, which are paid for.
         prove_writable(plan)
-        backend = ClaudeCliBackend(model=model, disable_tools=True)
-        backend.resolve()
-        picking = pick_readings(transcript, reference, backend, context=context)
+        if sides_from is None:
+            backend = ClaudeCliBackend(model=model, disable_tools=True)
+            backend.resolve()
+            picking = pick_readings(transcript, reference, backend, context=context)
+            model, version = backend.model, PICK_PROMPT_VERSION
+        else:
+            record, model, version, chars = _replayed(sides_from)
+            try:
+                picking = replay_readings(
+                    transcript, reference, record, model=model, version=version, context_chars=chars
+                )
+            except InputValidationError as exc:
+                raise InputValidationError(f"--sides-from {sides_from}: {exc}") from exc
         try:
             picking.transcript.dump(plan["--out"])
         except (OSError, ValueError) as exc:
@@ -1474,7 +1519,7 @@ def pick_command(
     except AppError as exc:
         _fail(exc)
 
-    _report_pick(picking, backend.model)
+    _report_pick(picking, model, version, sides_from)
     typer.echo(str(plan["--out"]))
     if picking.chunks and len(picking.failed) == len(picking.chunks):
         raise typer.Exit(_EXIT_NO_CHUNK)

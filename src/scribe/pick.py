@@ -33,7 +33,7 @@ import anyio
 import structlog
 from pydantic import BaseModel, ConfigDict
 
-from scribe.errors import AppError
+from scribe.errors import AppError, InputValidationError
 from scribe.schema import Word
 from scribe.speakers import DEFAULT_CONCURRENCY, SpeakerBackend, ask_all, cut_points, render
 from scribe.spoken_numbers import digitize
@@ -709,11 +709,8 @@ def pick_readings(
         ValueError: A word of either transcript starts before the word ahead of it.
 
     """
-    for role, words in (("transcript", transcript.words), ("reference", reference.words)):
-        if (index := first_decrease(words)) is not None:
-            raise ValueError(f"{role} word {index} starts before word {index - 1}")
     said, heard = transcript.words, reference.words
-    spots = find_spots(said, heard)
+    spots = _spots(transcript, reference)
     readings = [
         (
             _joined(said[spot.transcript.start : spot.transcript.stop]),
@@ -775,23 +772,110 @@ def pick_readings(
             picked[number - 1] = side
         chunks.append(ChunkPick(index, ids))
 
-    engine = reference.engine
     picking = Picking(transcript, tuple(spots), tuple(picked), tuple(chunks))
-    params: dict[str, float | int | bool | str] = {
-        "pick_model": backend.model,
-        "pick_prompt_version": PICK_PROMPT_VERSION,
+    params = _params(
+        reference,
+        picked,
+        chunks,
+        model=backend.model,
+        version=PICK_PROMPT_VERSION,
+        context_chars=len((context or "").strip()),
+    )
+    return replace(picking, transcript=assemble(transcript, reference, spots, picked, params))
+
+
+def replay_readings(
+    transcript: Transcript,
+    reference: Transcript,
+    record: Sequence[tuple[float, float, str, str, Side]],
+    *,
+    model: str,
+    version: str,
+    context_chars: int,
+) -> Picking:
+    """Take each spot's side from `record`, a pick_record of the same two transcripts; ask nothing.
+
+    Args:
+        transcript: As `pick_readings` takes it.
+        reference: As `pick_readings` takes it.
+        record: The pick_record whose sides are taken as they stand: its
+            guard and restore are not decided again.
+        model: The model that picked `record`'s sides.
+        version: The prompt version it was asked with.
+        context_chars: How long the background it was given was.
+
+    Returns:
+        The picking `pick_readings` returns for those sides, with no chunk:
+        nothing was asked.
+
+    Raises:
+        ValueError: A word of either transcript starts before the word ahead of it.
+        InputValidationError: `record` does not hold the spots these
+            transcripts have, each with its start, end and readings.
+
+    """
+    spots = _spots(transcript, reference)
+    if len(record) != len(spots):
+        raise InputValidationError(
+            f"the record holds {len(record)} spots where these transcripts have {len(spots)}"
+        )
+    for number, (row, spot) in enumerate(zip(record, spots, strict=True), 1):
+        found = _row(transcript.words, reference.words, spot)
+        if tuple(row[:4]) != found:
+            raise InputValidationError(
+                f"its spot {number} is {json.dumps(row[:4])}, "
+                f"where these transcripts have {json.dumps(found)}"
+            )
+    sides: list[Side] = [row[4] for row in record]
+    params = _params(
+        reference, sides, (), model=model, version=version, context_chars=context_chars
+    )
+    delivered = assemble(transcript, reference, spots, sides, params)
+    return Picking(delivered, tuple(spots), tuple(sides), ())
+
+
+def _spots(transcript: Transcript, reference: Transcript) -> list[Spot]:
+    for role, words in (("transcript", transcript.words), ("reference", reference.words)):
+        if (index := first_decrease(words)) is not None:
+            raise ValueError(f"{role} word {index} starts before word {index - 1}")
+    return find_spots(transcript.words, reference.words)
+
+
+def _params(
+    reference: Transcript,
+    picked: Sequence[Side],
+    chunks: Sequence[ChunkPick],
+    *,
+    model: str,
+    version: str,
+    context_chars: int,
+) -> dict[str, float | int | bool | str]:
+    engine = reference.engine
+    return {
+        "pick_model": model,
+        "pick_prompt_version": version,
         "pick_reference": engine.name if engine.model is None else f"{engine.name} {engine.model}",
-        "pick_context_chars": len((context or "").strip()),
-        "pick_spots": len(spots),
+        "pick_context_chars": context_chars,
+        "pick_spots": len(picked),
         "pick_to_reference": picked.count("reference"),
         "pick_guarded": picked.count("guarded"),
         "pick_restored": picked.count("restored"),
         "pick_unsure": picked.count("unsure"),
         "pick_failed": picked.count("failed"),
         "pick_chunks": len(chunks),
-        "pick_chunks_failed": len(picking.failed),
+        "pick_chunks_failed": sum(chunk.reason is not None for chunk in chunks),
     }
-    return replace(picking, transcript=assemble(transcript, reference, spots, picked, params))
+
+
+def _row(said: Sequence[Word], heard: Sequence[Word], spot: Spot) -> tuple[float, float, str, str]:
+    """Return a spot's pick_record row but its side: start, end, transcript and reference words."""
+    held = said[spot.transcript.start : spot.transcript.stop]
+    return (
+        held[0].start,
+        max(word.end for word in held),
+        _joined(held),
+        _joined(heard[spot.reference.start : spot.reference.stop]),
+    )
 
 
 def assemble(
@@ -813,16 +897,7 @@ def assemble(
     """
     said, heard = transcript.words, reference.words
     words = _apply(said, heard, spots, sides)
-    record = [
-        [
-            said[spot.transcript.start].start,
-            max(word.end for word in said[spot.transcript.start : spot.transcript.stop]),
-            _joined(said[spot.transcript.start : spot.transcript.stop]),
-            _joined(heard[spot.reference.start : spot.reference.stop]),
-            side,
-        ]
-        for spot, side in zip(spots, sides, strict=True)
-    ]
+    record = [[*_row(said, heard, spot), side] for spot, side in zip(spots, sides, strict=True)]
     recorded = transcript.engine.params | dict(params) | {"pick_record": json.dumps(record)}
     return transcript.model_copy(
         update={
