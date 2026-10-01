@@ -206,6 +206,37 @@ def test_a_label_two_names_win_stays_unnamed() -> None:
     assert named.unassigned == ATTENDEES
 
 
+_TOPICS = ("pricing", "hiring", "travel", "budget", "timing")
+
+
+def _asked(answerers: tuple[int, ...]) -> tuple[tuple[Run, ...], str]:
+    """Connor asked once per answerer, each answer given by that id, and the model's lines."""
+    runs: list[Run] = []
+    lines: list[str] = []
+    for answerer, topic in zip(answerers, _TOPICS, strict=False):
+        runs += [(7, f"Connor, what about {topic}?"), (answerer, f"The {topic} is fine.")]
+        lines.append(f"Connor | Connor | next | Connor, what about {topic}?")
+    return tuple(runs), "\n".join(lines)
+
+
+# Literal counts rather than the constants, so a changed constant fails here.
+@pytest.mark.parametrize(
+    ("answerers", "names"),
+    [
+        pytest.param((3,), {}, id="one-pointer-is-not-enough"),
+        pytest.param((3, 3), {3: "Connor"}, id="two-pointers-are"),
+        pytest.param((3, 3, 5), {3: "Connor"}, id="twice-the-rival"),
+        pytest.param((3, 3, 3, 5, 5), {}, id="less-than-twice-the-rival"),
+    ],
+)
+def test_a_label_needs_two_pointers_and_twice_any_rivals(
+    answerers: tuple[int, ...], names: dict[int, str]
+) -> None:
+    named, _ = _named_from_replies(*_asked(answerers))
+
+    assert named.names == names
+
+
 @pytest.mark.parametrize(
     "block",
     [
