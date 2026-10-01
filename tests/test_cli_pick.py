@@ -630,6 +630,36 @@ def test_when_the_ears_fail_the_picks_readings_stand_with_one_line(
     assert lines[0].endswith("; the pick's readings stand")
 
 
+@pytest.mark.parametrize(
+    ("texts", "words", "flipped"),
+    [
+        (["the hat sat on the bat"] * 2, "the hat sat on the bat", 2),
+        (["the hat sat on the mat", "the cat sat on the mat"], "the hat sat on the mat", 1),
+    ],
+)
+def test_the_failed_chunk_line_says_how_many_of_its_spots_the_ears_flipped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, texts: list[str], words: str, flipped: int
+) -> None:
+    _patch(monkeypatch, fail_when=lambda _target: True)
+    _, audio = _ears(tmp_path, monkeypatch, texts, texts)
+    inputs = _inputs(tmp_path)
+
+    result = runner.invoke(app, ["pick", *map(str, inputs), "--audio", str(audio)])
+
+    assert result.exit_code == 4
+    assert Transcript.load(tmp_path / "meeting.picked.json").text == words
+    assert result.stderr.splitlines()[-2:] == [
+        "scribe: the pick failed on 1 of 1 chunks (0); their 2 spots keep the transcript's "
+        f"words save {flipped} the third ear flipped to the reference's",
+        "scribe: third ear heard 2 spots with cohere-transcribe, qwen3-asr in 5 s; "
+        f"{flipped} flipped to the reference, 0 to the transcript",
+    ]
+    help_text = runner.invoke(app, ["pick", "--help"], terminal_width=200).stdout
+    assert "with TRANSCRIPT's words save where --audio flipped a spot" in " ".join(
+        help_text.split()
+    )
+
+
 @pytest.mark.parametrize("other", [False, True])
 def test_audio_not_the_transcripts_recording_exits_two_asking_no_model(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, other: bool
