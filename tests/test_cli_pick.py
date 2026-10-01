@@ -461,6 +461,16 @@ def _unnamed(_record: list[list[object]], params: dict[str, object]) -> str:
     return "names no pick_model"
 
 
+def _chars_true(_record: list[list[object]], params: dict[str, object]) -> str:
+    params["pick_context_chars"] = True
+    return "has a malformed pick_context_chars"
+
+
+def _chars_negative(_record: list[list[object]], params: dict[str, object]) -> str:
+    params["pick_context_chars"] = -1
+    return "has a malformed pick_context_chars"
+
+
 def _ears_fewer(_record: list[list[object]], params: dict[str, object]) -> str:
     params["ear_record"] = json.dumps([["reference", ["hat", "hat"], ["reference", "reference"]]])
     return "its ear_record holds 1 spots where its pick_record holds 2"
@@ -474,7 +484,17 @@ def _ears_malformed(_record: list[list[object]], params: dict[str, object]) -> s
 
 @pytest.mark.parametrize(
     "breakage",
-    [_fewer, _other_reading, _moved, _unrecorded, _unnamed, _ears_fewer, _ears_malformed],
+    [
+        _fewer,
+        _other_reading,
+        _moved,
+        _unrecorded,
+        _unnamed,
+        _chars_true,
+        _chars_negative,
+        _ears_fewer,
+        _ears_malformed,
+    ],
 )
 def test_sides_from_a_record_of_other_spots_exits_two_asking_no_model(
     tmp_path: Path,
