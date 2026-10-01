@@ -774,6 +774,27 @@ def test_without_attendees_the_sidecar_has_no_naming(
     assert result.stderr == ""
 
 
+def _said_twice(_target: str) -> str:
+    return "<names>\nAlice | Alice | about | Thanks Alice. Alice will join later.\n</names>"
+
+
+def test_the_sidecar_lists_each_label_a_mention_that_fits_two_places_may_be_by(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch(monkeypatch, trailer=_said_twice)
+    staged = _meeting(tmp_path, (7, "Thanks Alice."), (3, "Alice will join later."))
+
+    result = runner.invoke(app, ["turns", str(staged), "--attendees", "Alice"])
+
+    assert result.exit_code == 0, result.output
+    naming = cast("dict[str, object]", _sidecar(tmp_path / "talk.speakers.json")["naming"])
+    evidence = cast("list[dict[str, object]]", naming["evidence"])
+    assert [(entry["by"], entry["by_one_of"], entry["reason"]) for entry in evidence] == [
+        (None, ["Speaker 1", "Speaker 2"], "ambiguous")
+    ]
+    assert naming["says"] == {"Alice": {"Speaker 1": 1, "Speaker 2": 1}}
+
+
 def _names_but_in_the_last_chunk(target: str) -> str:
     return "" if "Goodbye" in target else "<names></names>"
 
