@@ -11,8 +11,10 @@ from typer.testing import CliRunner
 
 from scribe.claude_cli import ClaudeCliBackend
 from scribe.cli import app
+from scribe.ear import FAILED, RECOGNIZERS, LocalEars
 from scribe.pick import DEFAULT_PICK_MODEL, PICK_PROMPT_VERSION, system_prompt
 from scribe.schema import Transcript, Word
+from tests.diarizer_fakes import FakeWorker, found
 from tests.pick_fakes import answering, choosing, numbered, transcript
 from tests.speakers_fakes import FakeSpeakerBackend
 
@@ -466,3 +468,130 @@ def test_sides_from_a_record_of_other_spots_exits_two_asking_no_model(
     assert expected in result.stderr
     assert made == []
     assert not out.exists()
+
+
+def _ears(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *texts: list[str],
+    host: tuple[str, str] = ("Darwin", "arm64"),
+    returncode: int = 0,
+) -> tuple[FakeWorker, Path]:
+    """Both recognizers cached and faked, each saying its `texts` in turn; and the audio."""
+    hub = tmp_path / "hub"
+    monkeypatch.setenv("HF_HUB_CACHE", str(hub))
+    for spec in RECOGNIZERS:
+        snapshot = hub / f"models--{spec.model.replace('/', '--')}" / "snapshots" / spec.revision
+        snapshot.mkdir(parents=True)
+        for name in ("config.json", "model.safetensors"):
+            (snapshot / name).write_text("{}", encoding="utf-8")
+    said = iter(texts)
+    versions = {"python": "3.12.13", "transformers": "5.18.0", "torch": "2.14.1"}
+    body = {"versions": versions, "device": "mps", "dtype": "bfloat16", "runtime_s": 2.5}
+    fake = FakeWorker(
+        lambda _: {**body, "texts": next(said, [])},
+        returncode=returncode,
+        stderr=f"{FAILED}out of memory\n",
+    )
+    ears = LocalEars(run=fake.run, which=found, host=lambda: host)
+    monkeypatch.setattr("scribe.cli.LocalEars", lambda: ears)
+    audio = tmp_path / "meeting.mp3"
+    audio.write_bytes(b"pretend this is audio")
+    return fake, audio
+
+
+@pytest.mark.parametrize("replay", [False, True])
+def test_audio_flips_a_spot_only_where_both_recognizers_heard_the_reading_set_aside(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, replay: bool
+) -> None:
+    inputs, picked = _picked(tmp_path, monkeypatch)
+    made = _patch(monkeypatch, reply=answering(_hat_then_unsure))
+    # Spot 1, "cat" or "hat", picked "hat"; spot 2, "mat" or "bat", unsure.
+    fake, audio = _ears(
+        tmp_path, monkeypatch, ["the cat sat on the bat"] * 2, ["the cat sat on the mat"] * 2
+    )
+    out = tmp_path / "heard.json"
+    sides = ["--sides-from", str(picked)] if replay else []
+
+    result = runner.invoke(
+        app, ["pick", *map(str, inputs), *sides, "--audio", str(audio), "--out", str(out)]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert len(made) == (0 if replay else 1)
+    assert result.stderr.splitlines()[1:] == [
+        "scribe: third ear heard 2 spots with cohere-transcribe, qwen3-asr in 5 s; "
+        "0 flipped to the reference, 1 to the transcript"
+    ]
+    said = Transcript.load(inputs[0]).words
+    windows = [[0.0, said[1].end + 5.0], [0.0, said[5].end + 5.0]]
+    assert [json.loads(request)["intervals"] for request in fake.requests] == [windows] * 2
+    heard = Transcript.load(out)
+    assert heard.text == "the cat sat on the mat"
+    params = heard.engine.params
+    assert [row[4] for row in json.loads(str(params["pick_record"]))] == ["transcript", "unsure"]
+    assert json.loads(str(params["ear_record"])) == [
+        ["reference", ["cat", "cat"], ["transcript", "transcript"]],
+        ["unsure", ["bat", "mat"], ["reference", "transcript"]],
+    ]
+    assert (params["pick_to_reference"], params["pick_unsure"]) == (1, 1)
+    models = [f"{spec.name} {spec.model}@{spec.revision}" for spec in RECOGNIZERS]
+    assert {key: value for key, value in params.items() if key.startswith("ear_")} == {
+        "ear_rule": "ear-1",
+        "ear_models": json.dumps(models),
+        "ear_runtime": "transformers 5.18.0 torch 2.14.1 mps bfloat16",
+        "ear_pad_s": 5.0,
+        "ear_seconds": 5.0,
+        "ear_to_reference": 0,
+        "ear_to_transcript": 1,
+        "ear_record": params["ear_record"],
+    }
+
+
+@pytest.mark.parametrize(
+    ("host", "returncode", "cause"),
+    [
+        (("Linux", "x86_64"), 0, "the recognizers need Apple silicon (macOS on arm64)"),
+        (("Darwin", "arm64"), 1, "cohere-transcribe exited 1: out of memory"),
+    ],
+)
+def test_when_the_ears_fail_the_picks_readings_stand_with_one_line(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    host: tuple[str, str],
+    returncode: int,
+    cause: str,
+) -> None:
+    inputs, picked = _picked(tmp_path, monkeypatch)
+    _, audio = _ears(tmp_path, monkeypatch, host=host, returncode=returncode)
+    out = tmp_path / "heard.json"
+
+    result = runner.invoke(
+        app, ["pick", *map(str, inputs), "--audio", str(audio), "--out", str(out)]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert out.read_bytes() == picked.read_bytes()
+    _, *lines = result.stderr.splitlines()
+    assert len(lines) == 1
+    assert lines[0].startswith(f"scribe: no third ear: {cause}")
+    assert lines[0].endswith("; the pick's readings stand")
+
+
+@pytest.mark.parametrize("other", [False, True])
+def test_audio_not_the_transcripts_recording_exits_two_asking_no_model(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, other: bool
+) -> None:
+    inputs = _inputs(tmp_path)
+    _digested(inputs[0], "a" * 64)
+    made = _patch(monkeypatch)
+    audio = tmp_path / "other.mp3"
+    if other:
+        audio.write_bytes(b"other audio")
+
+    result = runner.invoke(app, ["pick", *map(str, inputs), "--audio", str(audio)])
+
+    assert result.exit_code == 2
+    assert len(result.stderr.splitlines()) == 1
+    assert str(audio) in result.stderr
+    assert made == []
