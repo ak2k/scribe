@@ -30,6 +30,11 @@ def test_attendees_are_read_in_order_with_their_spacing_trimmed() -> None:
         pytest.param("", "names nobody", id="empty-list"),
         pytest.param("  ", "names nobody", id="blank-list"),
         pytest.param("Jose, Connor, jose", "twice", id="duplicate"),
+        pytest.param(
+            "Jos\N{LATIN SMALL LETTER E WITH ACUTE}, Jose\N{COMBINING ACUTE ACCENT}",
+            "twice",
+            id="composed-and-decomposed",
+        ),
         pytest.param("Connor | Jose", "may not hold", id="pipe"),
         pytest.param("Con\nnor, Jose", "may not hold", id="newline"),
         pytest.param("Connor <spk:1>", "may not hold", id="angle-bracket"),
@@ -341,6 +346,20 @@ def test_a_quote_found_twice_is_ambiguous() -> None:
     )
 
     assert _reasons(runs, "Connor | Connor | about | Thanks, Connor, see you.") == ["ambiguous"]
+
+
+_COMPOSED = "Jos\N{LATIN SMALL LETTER E WITH ACUTE}"
+_DECOMPOSED = "Jose\N{COMBINING ACUTE ACCENT}"
+
+
+def test_a_name_is_one_attendee_however_its_accents_are_encoded() -> None:
+    words = _words((7, f"So, {_COMPOSED}, what do you think?"), (5, "Looks good to me."))
+    claim = _claim(words, f"{_COMPOSED} | {_COMPOSED} | next | So, {_COMPOSED}, what do you")
+
+    named = name_speakers(words, [word.speaker for word in words], [claim], (_DECOMPOSED,))
+
+    assert parse_attendees(_DECOMPOSED) == (_COMPOSED,)
+    assert [(mention.reason, mention.points_to) for mention in named.evidence] == [(None, 5)]
 
 
 def test_a_name_said_outside_its_quote_is_dropped() -> None:
