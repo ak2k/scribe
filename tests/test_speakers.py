@@ -695,6 +695,30 @@ def test_a_names_line_quoting_the_closing_tag_costs_no_correction() -> None:
     ]
 
 
+@pytest.mark.parametrize(
+    "before",
+    [
+        pytest.param("The places, between <names> and </names>:", id="instruction-echoed"),
+        pytest.param("<names></names>", id="empty-block"),
+    ],
+)
+def test_a_names_block_after_another_is_read_too(before: str) -> None:
+    words = _said((1, 5), (2, 5))
+
+    def trailer(_target: str) -> str:
+        return f"{before}\n<names>\nAlice | w1 | next | w0 w1 w2 w3\n</names>"
+
+    result = relabel(
+        [word.text for word in words],
+        [word.speaker for word in words],
+        FakeSpeakerBackend(trailer=trailer),
+        attendees=_ATTENDEES,
+    )
+
+    assert (0, 0, 10, "Alice", "w1", "next", "w0 w1 w2 w3") in _claims(result)
+    assert result.names_blocks_missing == ()
+
+
 def test_without_attendees_a_names_block_is_ignored() -> None:
     words = _said((1, 1000), (2, 1000))
     texts, speakers = [word.text for word in words], [word.speaker for word in words]
