@@ -14,6 +14,7 @@ A failure is one line on stderr starting with FAILED, and exit 1.
 
 from __future__ import annotations
 
+import contextlib
 import importlib.metadata
 import json
 import os
@@ -43,10 +44,15 @@ _DTYPE = torch.bfloat16
 def _hidden(text: str) -> str:
     # A failure's text can quote the token, and scribe prints this worker's report.
     # Hugging Face's client strips the value it reads, so that is the form quoted.
-    for name in TOKEN_NAMES:
-        value = os.environ.get(name, "").strip()
-        if value:
-            text = text.replace(value, "<hidden>")
+    values = [os.environ.get(name, "").strip() for name in TOKEN_NAMES]
+    # The token the client finds itself, saved by a login or in HF_TOKEN_PATH's file;
+    # whatever breaks finding it, the failure is still reported.
+    with contextlib.suppress(Exception):
+        from huggingface_hub import get_token  # noqa: PLC0415  # imported only on failure, guarded
+
+        values.append((get_token() or "").strip())
+    for value in filter(None, values):
+        text = text.replace(value, "<hidden>")
     return text
 
 
