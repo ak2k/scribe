@@ -208,6 +208,34 @@ def test_a_label_two_names_win_stays_unnamed() -> None:
     assert named.unassigned == ATTENDEES
 
 
+def test_a_mention_does_not_hide_a_pointer_later_in_its_turn() -> None:
+    # As CONTESTED, with Connor talked about just before he is asked in the
+    # second turn: listing that mention must not decide the contest.
+    runs: tuple[Run, ...] = (
+        (7, "Connor, can you share the deck?"),
+        (3, "Sure, sharing it now."),
+        (7, "Connor's deck looks great. Connor, are you still with us?"),
+        (5, "I think he dropped."),
+        (7, "Connor, one more thing about pricing."),
+        (3, "Yes, pricing is settled."),
+        (7, "Connor, did you hear that one?"),
+        (5, "He dropped again, sorry."),
+    )
+    block = (
+        "Connor | Connor's | about | Connor's deck looks great.\n"
+        "Connor | Connor | next | Connor, can you share the deck?\n"
+        "Connor | Connor | next | Connor, are you still with us?\n"
+        "Connor | Connor | next | Connor, one more thing about pricing.\n"
+        "Connor | Connor | next | Connor, did you hear that one?"
+    )
+
+    named, _ = _named_from_replies(runs, block)
+
+    assert [mention.reason for mention in named.evidence] == [None] * 5
+    assert named.pointed["Connor"] == {3: 2, 5: 2}
+    assert named.names == {}
+
+
 _TOPICS = ("pricing", "hiring", "travel", "budget", "timing")
 
 
