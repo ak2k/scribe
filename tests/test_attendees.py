@@ -188,6 +188,55 @@ def test_contradicted_evidence_names_no_label(runs: tuple[Run, ...], block: str)
     assert "Alice" not in _labels(named, words)
 
 
+@pytest.mark.parametrize(
+    ("runs", "block"),
+    [
+        pytest.param(
+            (
+                (7, "I agree with Alice completely today."),
+                (3, "Alice please start the update now."),
+                (7, "I agree with Alice completely again."),
+                (3, "Alice please cover the budget now."),
+            ),
+            "Alice | Alice | next | with Alice completely today. Alice please start\n"
+            "Alice | Alice | next | with Alice completely again. Alice please cover",
+            id="said-twice-in-a-quote-across-a-handoff",
+        ),
+        pytest.param(
+            (
+                *SAID_BY_THE_ANSWERER[:3],
+                (3, "Yes, pricing is settled."),
+                (7, "Thanks Alice."),
+                (3, "Alice will join later."),
+            ),
+            "Alice | Alice | next | Alice, can you share the deck?\n"
+            "Alice | Alice | next | Alice, one more thing about pricing.\n"
+            "Alice | Alice | about | Thanks Alice. Alice will join later.",
+            id="said-twice-in-a-quote-by-the-answerer",
+        ),
+        pytest.param(
+            (
+                *SAID_BY_THE_ANSWERER[:3],
+                (3, "Thanks, Alice, see you."),
+                (7, "Thanks, Alice, see you."),
+            ),
+            "Alice | Alice | next | Alice, can you share the deck?\n"
+            "Alice | Alice | next | Alice, one more thing about pricing.\n"
+            "Alice | Alice | about | Thanks, Alice, see you.",
+            id="quote-found-twice-once-by-the-answerer",
+        ),
+    ],
+)
+def test_a_mention_that_fits_two_places_counts_against_both_speakers(
+    runs: tuple[Run, ...], block: str
+) -> None:
+    named, _ = _named_from_replies(runs, block)
+
+    assert named.names == {}
+    assert "ambiguous" in [mention.reason for mention in named.evidence]
+    assert named.says["Alice"].get(3)
+
+
 def test_a_label_two_names_win_stays_unnamed() -> None:
     runs: tuple[Run, ...] = (
         (7, "Alice, can you share the deck?"),
