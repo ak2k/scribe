@@ -284,6 +284,32 @@ def test_no_working_directory_is_one_ear_error_before_anything_runs(
     assert fake.calls == []
 
 
+@pytest.mark.parametrize("separator", ["\n", "\r", "\u2028"], ids=["lf", "cr", "ls"])
+def test_a_missing_cache_whose_path_holds_a_line_break_is_one_line(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, separator: str
+) -> None:
+    monkeypatch.setenv("HF_HUB_CACHE", str(tmp_path / f"missing{separator}cache"))
+    fake = FakeWorker(answer)
+
+    with pytest.raises(EarError, match="is not in the Hugging Face cache") as caught:
+        _ears(fake).resolve()
+
+    assert str(caught.value).splitlines() == [str(caught.value)]
+    assert fake.calls == []
+
+
+def test_a_program_whose_path_holds_a_line_break_is_one_line(tmp_path: Path) -> None:
+    fake = FakeWorker(answer, error=OSError("exec format error"))
+
+    def found_in_odd_place(name: str) -> str | None:
+        return {"uvx": "/opt/no\nwhere/uvx", "ffmpeg": FFMPEG}.get(name)
+
+    with pytest.raises(EarError, match="cannot run") as caught:
+        _ears(fake, which=found_in_odd_place).hear(_audio(tmp_path), [(0.0, 3.0)])
+
+    assert str(caught.value).splitlines() == [str(caught.value)]
+
+
 def test_a_request_that_cannot_be_written_is_one_ear_error(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
