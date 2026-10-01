@@ -11,7 +11,7 @@ from typer.testing import CliRunner
 
 from scribe.claude_cli import ClaudeCliBackend
 from scribe.cli import app
-from scribe.schema import Engine, Source, Transcript, Word
+from scribe.schema import Engine, Source, Transcript, Turn, Word
 from scribe.speakers import DEFAULT_SPEAKER_MODEL, SPEAKER_PROMPT_VERSION
 from scribe.turns import build_turns
 from scribe.writers import to_markdown, to_srt, to_vtt
@@ -825,6 +825,24 @@ def test_attendees_with_no_pass_to_ride_name_nobody_and_say_so(tmp_path: Path) -
     written = Transcript.load(tmp_path / "talk.turns.json")
     assert [turn.speaker for turn in written.turns] == ["Speaker 1"]
     assert "speaker_names" not in written.engine.params
+
+
+def test_attendees_on_turns_without_words_say_there_are_no_words(tmp_path: Path) -> None:
+    staged = tmp_path / "talk.json"
+    Transcript(
+        source=Source(kind="other", ref="notes"),
+        engine=Engine(name="xai-stt"),
+        text="Hi. Hello.",
+        turns=[
+            Turn(speaker="Speaker 1", start=0.0, end=1.0, text="Hi."),
+            Turn(speaker="Speaker 2", start=1.0, end=2.0, text="Hello."),
+        ],
+    ).dump(staged)
+
+    result = runner.invoke(app, ["turns", str(staged), "--attendees", "Connor"])
+
+    assert result.exit_code == 0, result.output
+    assert "no speaker pass ran (the input has no words)" in result.stderr
 
 
 def test_attendees_and_the_new_exits_are_documented() -> None:
