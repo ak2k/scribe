@@ -439,7 +439,21 @@ def _unnamed(_record: list[list[object]], params: dict[str, object]) -> str:
     return "names no pick_model"
 
 
-@pytest.mark.parametrize("breakage", [_fewer, _other_reading, _moved, _unrecorded, _unnamed])
+def _ears_fewer(_record: list[list[object]], params: dict[str, object]) -> str:
+    params["ear_record"] = json.dumps([["reference", ["hat", "hat"], ["reference", "reference"]]])
+    return "its ear_record holds 1 spots where its pick_record holds 2"
+
+
+def _ears_malformed(_record: list[list[object]], params: dict[str, object]) -> str:
+    unheard = [None, None]
+    params["ear_record"] = json.dumps([["heard", unheard, unheard], ["unsure", unheard, unheard]])
+    return "has a malformed ear_record row 0"
+
+
+@pytest.mark.parametrize(
+    "breakage",
+    [_fewer, _other_reading, _moved, _unrecorded, _unnamed, _ears_fewer, _ears_malformed],
+)
 def test_sides_from_a_record_of_other_spots_exits_two_asking_no_model(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -546,6 +560,43 @@ def test_audio_flips_a_spot_only_where_both_recognizers_heard_the_reading_set_as
         "ear_to_reference": 0,
         "ear_to_transcript": 1,
         "ear_record": params["ear_record"],
+    }
+
+
+def test_sides_from_a_heard_pick_replays_the_picks_own_sides(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    inputs, picked = _picked(tmp_path, monkeypatch)
+    _patch(monkeypatch, reply=answering(_hat_then_unsure))
+    # Both flip both spots: "hat" to "cat", and the unsure "mat" to "bat".
+    _, audio = _ears(
+        tmp_path, monkeypatch, ["the cat sat on the bat"] * 2, ["the cat sat on the bat"] * 2
+    )
+    heard = tmp_path / "heard.json"
+    command = ["pick", *map(str, inputs), "--audio", str(audio), "--out", str(heard)]
+    assert runner.invoke(app, command).exit_code == 0
+    assert Transcript.load(heard).text == "the cat sat on the bat"
+    made = _patch(monkeypatch)
+    out = tmp_path / "replayed.json"
+
+    result = runner.invoke(
+        app, ["pick", *map(str, inputs), "--sides-from", str(heard), "--out", str(out)]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert made == []
+    assert result.stderr == (
+        f"scribe: replayed the sides {heard} records, asking no model: the reference's "
+        f"reading at 1 of 2 disputed spots (1 unsure), as {DEFAULT_PICK_MODEL} picked them "
+        f"with prompt {PICK_PROMPT_VERSION}\n"
+    )
+    replayed, original = Transcript.load(out), Transcript.load(picked)
+    assert replayed.words == original.words
+    # The pick's own record and counts, and no ear_* param: the ears did not run.
+    params = dict(replayed.engine.params)
+    assert params.pop("pick_chunks") == 0
+    assert params == {
+        key: value for key, value in original.engine.params.items() if key != "pick_chunks"
     }
 
 
