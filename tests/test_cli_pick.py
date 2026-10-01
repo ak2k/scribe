@@ -414,6 +414,28 @@ def test_sides_from_replays_a_pick_and_asks_no_model(
     assert {key: params[key] for key in same} == {key: before[key] for key in same}
 
 
+def test_sides_from_a_pick_with_a_failed_chunk_says_how_many_spots_it_failed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch(monkeypatch, fail_when=lambda target: "[#1 " in target)
+    inputs = _long_inputs(tmp_path)
+    picked = tmp_path / "long.picked.json"
+    assert runner.invoke(app, ["pick", *map(str, inputs)]).exit_code == 0
+    out = tmp_path / "replayed.json"
+
+    result = runner.invoke(
+        app, ["pick", *map(str, inputs), "--sides-from", str(picked), "--out", str(out)]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert result.stderr == (
+        f"scribe: replayed the sides {picked} records, asking no model: the reference's "
+        f"reading at 1 of 2 disputed spots (0 unsure), as {DEFAULT_PICK_MODEL} picked them "
+        f"with prompt {PICK_PROMPT_VERSION}; 1 recorded failed, keeping the transcript's words\n"
+    )
+    assert Transcript.load(out).words == Transcript.load(picked).words
+
+
 def _fewer(record: list[list[object]], _params: dict[str, object]) -> str:
     del record[1]
     return "the record holds 1 spots where these transcripts have 2"
