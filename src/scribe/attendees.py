@@ -106,6 +106,8 @@ class Mention:
     by: int | None = None
     points_to: int | None = None
     reason: DropReason | None = None
+    # Where the line fits more than one place, the speaker id of each place.
+    by_one_of: tuple[int | None, ...] = ()
 
     @property
     def status(self) -> Literal["counted", "dropped"]:
@@ -119,8 +121,9 @@ class SpeakerNames:
 
     names: Mapping[int, str]
     unassigned: tuple[str, ...]
-    # Per attendee and id: counted mentions pointing at the id, and counted
-    # mentions spoken in the id's runs other than the speaker naming themself.
+    # Per attendee and id: counted mentions pointing at the id, and mentions
+    # spoken, or that may be spoken, in the id's runs other than the speaker
+    # naming themself.
     pointed: Mapping[str, Mapping[int, int]]
     says: Mapping[str, Mapping[int, int]]
     evidence: tuple[Mention, ...]
@@ -148,21 +151,18 @@ def _line_fault(claim: Claim, attendee: str | None) -> DropReason | None:
     return next((reason for failed, reason in checks if failed), None)
 
 
-def _locate(words: Sequence[Word], claim: Claim) -> int | DropReason:
-    """The word SAID starts at, found through QUOTE among its chunk's words, or why not."""
+def _locate(words: Sequence[Word], claim: Claim) -> list[int] | DropReason:
+    """Each word SAID may start at, found through QUOTE among its chunk's words, or why none."""
     tokens = word_keys([word.text for word in words[claim.start : claim.end]])
     keys = [key for _, key in tokens]
     quote, said = text_keys(claim.quote), text_keys(claim.said)
     starts = [at for at in range(len(keys) - len(quote) + 1) if keys[at : at + len(quote)] == quote]
-    if len(starts) != 1:
-        return "ambiguous" if starts else "unlocated"
-    offset = next(
-        (at for at in range(len(quote) - len(said) + 1) if quote[at : at + len(said)] == said),
-        None,
-    )
-    if offset is None:
+    if not starts:
+        return "unlocated"
+    offsets = [at for at in range(len(quote) - len(said) + 1) if quote[at : at + len(said)] == said]
+    if not offsets:
         return "said_outside_quote"
-    return claim.start + tokens[starts[0] + offset][0]
+    return sorted({claim.start + tokens[at + offset][0] for at in starts for offset in offsets})
 
 
 def _checked(
@@ -178,15 +178,20 @@ def _checked(
     if isinstance(found, str):
         return replace(mention, reason=found)
     run_of, ids = runs
-    mention = replace(mention, word=found, time=words[found].start, by=ids[run_of[found]])
+    if len(found) > 1:
+        # Whichever place was meant, its speaker may be the one saying the name.
+        speakers = tuple(dict.fromkeys(ids[run_of[at]] for at in found))
+        return replace(mention, reason="ambiguous", by_one_of=speakers)
+    word = found[0]
+    mention = replace(mention, word=word, time=words[word].start, by=ids[run_of[word]])
     if claim.kind not in _POINTS:
         return mention
-    target = run_of[found] + _POINTS[claim.kind]
+    target = run_of[word] + _POINTS[claim.kind]
     if not 0 <= target < len(ids):
         return replace(mention, reason="no_turn")
     # Words nobody was found for may hold the answer, or the question: from them,
     # a pointer could name the asker's label, past the check that it never says the name.
-    if ids[run_of[found]] is None or ids[target] is None:
+    if ids[run_of[word]] is None or ids[target] is None:
         return replace(mention, reason="unattributed")
     return replace(mention, points_to=ids[target])
 
@@ -218,9 +223,12 @@ def name_speakers(
     """Decide which attendee, if any, each speaker id is, from where the words name them.
 
     A claim counts once it names an attendee, is one of the known kinds, and
-    its QUOTE occurs exactly once among its chunk's words with SAID inside
-    it. A `next` mention points at the run after the one it is said in,
-    `previous` at the run before, `self` at its own run, and `about` at none.
+    its QUOTE occurs exactly once among its chunk's words with SAID once
+    inside it. A claim that fits more than one place points at nothing, but
+    counts against the speaker of every place it fits, any of whom may be
+    the one saying the name. A `next` mention points at the run after the
+    one it is said in, `previous` at the run before, `self` at its own run,
+    and `about` at none.
     In a run, an attendee's first pointer counts and so does their first
     other mention; later ones repeat. A pointer spoken in, or pointing at,
     words no speaker was found for does not count. An id is named
@@ -259,12 +267,13 @@ def name_speakers(
     pointed = {name: Counter[int]() for name in attendees}
     says = {name: Counter[int]() for name in attendees}
     for mention in checked:
-        if mention.reason is not None:
-            continue
-        if mention.points_to is not None:
+        if mention.reason is None and mention.points_to is not None:
             pointed[mention.name][mention.points_to] += 1
-        if mention.kind != "self" and mention.by is not None:
-            says[mention.name][mention.by] += 1
+        if mention.kind == "self" or mention.reason not in {None, "ambiguous"}:
+            continue
+        for speaker in (mention.by, *mention.by_one_of):
+            if speaker is not None:
+                says[mention.name][speaker] += 1
     won: dict[int, list[str]] = {}
     for name in attendees:
         speaker = _winner(pointed[name], says[name])

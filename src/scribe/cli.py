@@ -679,6 +679,7 @@ def _naming_metadata(
             "word": mention.word,
             "time": mention.time,
             "by": None if mention.word is None else labels[mention.by],
+            "by_one_of": [labels[speaker] for speaker in mention.by_one_of],
             "points_to": None if mention.points_to is None else labels[mention.points_to],
             "status": mention.status,
             "reason": mention.reason,
