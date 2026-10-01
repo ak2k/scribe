@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING, Literal
 
 from scribe.errors import InputValidationError
 from scribe.speakers import text_keys, word_keys
-from scribe.turns import DEFAULT_MIN_TURN_SECONDS, DEFAULT_MIN_TURN_WORDS
+from scribe.turns import DEFAULT_MIN_TURN_SECONDS, DEFAULT_MIN_TURN_WORDS, ends_sentence
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -169,14 +169,33 @@ def _locate(words: Sequence[Word], claim: Claim) -> list[int] | DropReason:
     return sorted({claim.start + tokens[at + offset][0] for at in starts for offset in offsets})
 
 
+def _held(run_of: Sequence[int], run: int) -> range:
+    """The indexes of a run's words."""
+    first = run_of.index(run)
+    return range(first, first + run_of.count(run))
+
+
 def _brief(words: Sequence[Word], run_of: Sequence[int], run: int) -> bool:
     """Whether a run is short enough that turns would call it a micro-turn: maybe a backchannel."""
-    first = run_of.index(run)
-    held = words[first : first + run_of.count(run)]
+    held = [words[at] for at in _held(run_of, run)]
     return (
         len(held) < DEFAULT_MIN_TURN_WORDS
         and max(word.end for word in held) - min(word.start for word in held)
         < DEFAULT_MIN_TURN_SECONDS
+    )
+
+
+def _at_edge(words: Sequence[Word], run_of: Sequence[int], word: int, step: int) -> bool:
+    """Whether `word`'s sentence is its run's edge away from `step`, and the run goes on toward it.
+
+    A switch a sentence early or late leaves an address so placed in the
+    addressee's own run, and the run's other sentences may be their reply.
+    """
+    held = _held(run_of, run_of[word])
+    before, after = range(held.start, word), range(word, held.stop - 1)
+    toward, away = (after, before) if step > 0 else (before, after)
+    return any(ends_sentence(words[at]) for at in toward) and not any(
+        ends_sentence(words[at]) for at in away
     )
 
 
@@ -197,6 +216,8 @@ def _pointer_fault(
     # other than the speaker past it, either of the two may be the one addressed.
     beyond = target + step
     if 0 <= beyond < len(ids) and ids[beyond] != ids[run] and _brief(words, run_of, target):
+        return "ambiguous"
+    if step != 0 and _at_edge(words, run_of, word, step):
         return "ambiguous"
     return None
 
@@ -263,14 +284,17 @@ def name_speakers(
     one it is said in, `previous` at the run before, `self` at its own run,
     and `about` at none. In a run, an attendee's first pointer at each id
     counts and so does their first other mention; later ones repeat. A
-    pointer does not count when it is spoken in, or points at, words no
-    speaker was found for, when it has no run to point at, or when the run
-    it points at is as short as a backchannel and the run past that is not
-    the speaker's (either may be the one addressed); it still counts
-    against the speaker who said it. An id is named for an attendee
-    when at least MIN_POINTERS counted mentions point at it, at least
-    RIVAL_FACTOR times as many as at any other id, and none of its own turns
-    names the attendee; an id two attendees win stays unnamed.
+    pointer does not count, though it still counts against the speaker who
+    said it, when it is spoken in, or points at, words no speaker was found
+    for; when it has no run to point at; when the run it points at is as
+    short as a backchannel and the run past that is not the speaker's,
+    since either may be the one addressed; or when its sentence opens its
+    run (closes it, for `previous`) and the run goes on past that sentence,
+    since a switch a sentence off would leave the reply in that run. An id
+    is named for an attendee when at least MIN_POINTERS counted mentions
+    point at it, at least RIVAL_FACTOR times as many as at any other id,
+    and none of its own turns names the attendee; an id two attendees win
+    stays unnamed.
 
     Args:
         words: The transcript's words.

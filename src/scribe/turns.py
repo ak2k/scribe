@@ -50,7 +50,8 @@ def _is_micro(turn: _RawTurn, min_seconds: float, min_words: int) -> bool:
 _SENTENCE_ENDS = (".", "?", "!")
 
 
-def _ends_sentence(word: Word) -> bool:
+def ends_sentence(word: Word) -> bool:
+    """Whether a word closes a sentence, by its punctuation."""
     return word.text.rstrip().endswith(_SENTENCE_ENDS)
 
 
@@ -80,7 +81,7 @@ def _merge_flickers_once(
             and index + 1 < len(turns)
             and _is_micro(current, min_seconds, min_words)
             and kept[-1].speaker_id == turns[index + 1].speaker_id
-            and not _ends_sentence(kept[-1].words[-1])
+            and not ends_sentence(kept[-1].words[-1])
         ):
             # The merged turn replaces the previous one in place, so the next
             # micro-turn is measured against the merged result, not the original.
@@ -116,7 +117,7 @@ def _snap_switches(
     last words never change speaker.
     """
     snapped = list(speakers)
-    ends = {index for index, word in enumerate(words) if _ends_sentence(word)}
+    ends = {index for index, word in enumerate(words) if ends_sentence(word)}
     switch = 1
     while switch < len(snapped):
         before, after = snapped[switch - 1], snapped[switch]

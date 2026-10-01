@@ -610,8 +610,9 @@ def test_a_pointer_from_unattributed_words_is_dropped() -> None:
 
 
 def test_a_name_counts_once_per_turn() -> None:
+    # Opened by another sentence, so neither address is at the turn's edge.
     runs: tuple[Run, ...] = (
-        (7, "Alice, can you share the deck? Alice, are you there?"),
+        (7, "Okay. Alice, can you share the deck? Alice, are you there?"),
         (3, "Sorry, sharing it now."),
     )
 
