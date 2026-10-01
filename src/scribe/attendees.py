@@ -7,7 +7,7 @@ is in the words, which turn it points at and what that adds up to is decided
 here.
 
 A name off the list, or a listed name never said, names nothing. Whether a
-spoken form ("Kago") is a listed name ("Keigo") is the model's judgment,
+spoken form ("Dimitri") is a listed name ("Dmitri") is the model's judgment,
 recorded per mention as what was said.
 """
 

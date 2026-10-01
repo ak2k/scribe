@@ -630,13 +630,13 @@ def test_an_artifact_linked_into_a_read_only_dir_is_refused_before_any_call(
 
 
 MEETING = (
-    (7, "Okay, let's start. Connor, can you share the deck?"),
+    (7, "Okay, let's start. Alice, can you share the deck?"),
     (3, "Sure, sharing it now."),
-    (7, "Thanks. Jose, what do you think of it?"),
+    (7, "Thanks. Bruno, what do you think of it?"),
     (5, "Looks good to me."),
-    (7, "Great. Connor, one more thing about pricing."),
+    (7, "Great. Alice, one more thing about pricing."),
     (3, "Yes, pricing is settled."),
-    (7, "And Jose, the timeline?"),
+    (7, "And Bruno, the timeline?"),
     (5, "End of month."),
 )
 
@@ -661,11 +661,11 @@ def _meeting(tmp_path: Path, *runs: tuple[int, str]) -> Path:
 def _answered(_target: str) -> str:
     return (
         "<names>\n"
-        "Connor | Connor | next | Connor, can you share the deck?\n"
-        "Jose | Jose | next | Jose, what do you think of it?\n"
-        "Connor | Connor | next | Connor, one more thing about pricing.\n"
-        "Jose | Jose | next | And Jose, the timeline?\n"
-        "Maria | Maria | next | And Jose, the timeline?\n"
+        "Alice | Alice | next | Alice, can you share the deck?\n"
+        "Bruno | Bruno | next | Bruno, what do you think of it?\n"
+        "Alice | Alice | next | Alice, one more thing about pricing.\n"
+        "Bruno | Bruno | next | And Bruno, the timeline?\n"
+        "Maria | Maria | next | And Bruno, the timeline?\n"
         "</names>"
     )
 
@@ -694,13 +694,13 @@ def test_attendees_name_the_labels_the_words_point_at_in_every_output(
 
     unnamed = runner.invoke(app, ["turns", str(staged), "--out-dir", str(plain), *ALL_FORMATS])
     result = runner.invoke(
-        app, ["turns", str(staged), "--attendees", "Connor, Jose, Adam", *ALL_FORMATS]
+        app, ["turns", str(staged), "--attendees", "Alice, Bruno, Carol", *ALL_FORMATS]
     )
 
     assert unnamed.exit_code == 0, unnamed.output
     assert result.exit_code == 0, result.output
     assert "People at this meeting" not in made[0].calls[0][0]
-    assert "People at this meeting: Connor, Jose, Adam." in made[1].calls[0][0]
+    assert "People at this meeting: Alice, Bruno, Carol." in made[1].calls[0][0]
     written = Transcript.load(tmp_path / "talk.turns.json")
     before = Transcript.load(plain / "talk.turns.json")
     assert written.words == before.words
@@ -709,17 +709,17 @@ def test_attendees_name_the_labels_the_words_point_at_in_every_output(
     ]
     assert [turn.speaker for turn in written.turns] == [
         "Speaker 1",
-        "Connor",
+        "Alice",
         "Speaker 1",
-        "Jose",
+        "Bruno",
         "Speaker 1",
-        "Connor",
+        "Alice",
         "Speaker 1",
-        "Jose",
+        "Bruno",
     ]
     assert json.loads(str(written.engine.params["speaker_names"])) == {
-        "Speaker 2": "Connor",
-        "Speaker 3": "Jose",
+        "Speaker 2": "Alice",
+        "Speaker 3": "Bruno",
     }
     for suffix, render in ((".md", to_markdown), (".srt", to_srt), (".vtt", to_vtt)):
         assert (tmp_path / f"talk{suffix}").read_text(encoding="utf-8") == render(written)
@@ -727,17 +727,17 @@ def test_attendees_name_the_labels_the_words_point_at_in_every_output(
     assert sidecar["prompt_version"] == SPEAKER_PROMPT_VERSION
     assert sidecar["naming"] == {
         "prompt_version": "names-1",
-        "attendees": ["Connor", "Jose", "Adam"],
-        "names": {"Speaker 2": "Connor", "Speaker 3": "Jose"},
-        "unassigned": ["Adam"],
-        "pointed": {"Connor": {"Speaker 2": 2}, "Jose": {"Speaker 3": 2}, "Adam": {}},
-        "says": {"Connor": {"Speaker 1": 2}, "Jose": {"Speaker 1": 2}, "Adam": {}},
+        "attendees": ["Alice", "Bruno", "Carol"],
+        "names": {"Speaker 2": "Alice", "Speaker 3": "Bruno"},
+        "unassigned": ["Carol"],
+        "pointed": {"Alice": {"Speaker 2": 2}, "Bruno": {"Speaker 3": 2}, "Carol": {}},
+        "says": {"Alice": {"Speaker 1": 2}, "Bruno": {"Speaker 1": 2}, "Carol": {}},
         "names_blocks_missing": [],
         "evidence": [
-            _counted("Connor", 3, "Speaker 1", "Speaker 2"),
-            _counted("Jose", 14, "Speaker 1", "Speaker 3"),
-            _counted("Connor", 26, "Speaker 1", "Speaker 2"),
-            _counted("Jose", 37, "Speaker 1", "Speaker 3"),
+            _counted("Alice", 3, "Speaker 1", "Speaker 2"),
+            _counted("Bruno", 14, "Speaker 1", "Speaker 3"),
+            _counted("Alice", 26, "Speaker 1", "Speaker 2"),
+            _counted("Bruno", 37, "Speaker 1", "Speaker 3"),
             {
                 "chunk": 0,
                 "name": "Maria",
@@ -753,8 +753,8 @@ def test_attendees_name_the_labels_the_words_point_at_in_every_output(
         ],
     }
     assert result.stderr == (
-        "scribe: names from the words (prompt names-1): Speaker 2=Connor, Speaker 3=Jose; "
-        "unassigned: Adam\n"
+        "scribe: names from the words (prompt names-1): Speaker 2=Alice, Speaker 3=Bruno; "
+        "unassigned: Carol\n"
     )
 
 
@@ -777,7 +777,7 @@ def test_a_rerun_without_attendees_drops_the_names(
 ) -> None:
     _patch(monkeypatch, trailer=_answered)
     staged = _meeting(tmp_path, *MEETING)
-    named = runner.invoke(app, ["turns", str(staged), "--attendees", "Connor, Jose"])
+    named = runner.invoke(app, ["turns", str(staged), "--attendees", "Alice, Bruno"])
     assert named.exit_code == 0, named.output
     assert "speaker_names" in Transcript.load(tmp_path / "talk.turns.json").engine.params
 
@@ -794,8 +794,8 @@ def test_a_rerun_without_attendees_drops_the_names(
 @pytest.mark.parametrize(
     ("flags", "complaint"),
     [
-        pytest.param(["--attendees", "Connor", "--no-llm-speakers"], "speaker pass", id="no-pass"),
-        pytest.param(["--attendees", "Connor,,Jose"], "empty name", id="empty-name"),
+        pytest.param(["--attendees", "Alice", "--no-llm-speakers"], "speaker pass", id="no-pass"),
+        pytest.param(["--attendees", "Alice,,Bruno"], "empty name", id="empty-name"),
         pytest.param(["--attendees", "Speaker 2"], "speaker label", id="label"),
     ],
 )
@@ -815,9 +815,9 @@ def test_unusable_attendees_exit_two_before_any_call_or_write(
 
 
 def test_attendees_with_no_pass_to_ride_name_nobody_and_say_so(tmp_path: Path) -> None:
-    staged = _meeting(tmp_path, (3, "Connor here, just me today."))
+    staged = _meeting(tmp_path, (3, "Alice here, just me today."))
 
-    result = runner.invoke(app, ["turns", str(staged), "--attendees", "Connor"])
+    result = runner.invoke(app, ["turns", str(staged), "--attendees", "Alice"])
 
     assert result.exit_code == 0, result.output
     assert "no speaker pass ran" in result.stderr
@@ -839,7 +839,7 @@ def test_attendees_on_turns_without_words_say_there_are_no_words(tmp_path: Path)
         ],
     ).dump(staged)
 
-    result = runner.invoke(app, ["turns", str(staged), "--attendees", "Connor"])
+    result = runner.invoke(app, ["turns", str(staged), "--attendees", "Alice"])
 
     assert result.exit_code == 0, result.output
     assert "no speaker pass ran (the input has no words)" in result.stderr

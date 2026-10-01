@@ -19,29 +19,29 @@ if TYPE_CHECKING:
 
 
 def test_attendees_are_read_in_order_with_their_spacing_trimmed() -> None:
-    assert parse_attendees("Connor, Jose,Adam ,  Keigo") == ("Connor", "Jose", "Adam", "Keigo")
+    assert parse_attendees("Alice, Bruno,Carol ,  Dmitri") == ("Alice", "Bruno", "Carol", "Dmitri")
 
 
 @pytest.mark.parametrize(
     ("text", "complaint"),
     [
-        pytest.param("Connor,,Jose", "empty name", id="empty-item"),
-        pytest.param("Connor, Jose,", "empty name", id="trailing-comma"),
+        pytest.param("Alice,,Bruno", "empty name", id="empty-item"),
+        pytest.param("Alice, Bruno,", "empty name", id="trailing-comma"),
         pytest.param("", "names nobody", id="empty-list"),
         pytest.param("  ", "names nobody", id="blank-list"),
-        pytest.param("Jose, Connor, jose", "twice", id="duplicate"),
+        pytest.param("Bruno, Alice, bruno", "twice", id="duplicate"),
         pytest.param(
-            "Jos\N{LATIN SMALL LETTER E WITH ACUTE}, Jose\N{COMBINING ACUTE ACCENT}",
+            "Zo\N{LATIN SMALL LETTER E WITH ACUTE}, Zoe\N{COMBINING ACUTE ACCENT}",
             "twice",
             id="composed-and-decomposed",
         ),
-        pytest.param("Connor | Jose", "may not hold", id="pipe"),
-        pytest.param("Con\nnor, Jose", "may not hold", id="newline"),
-        pytest.param("Connor <spk:1>", "may not hold", id="angle-bracket"),
-        pytest.param("Connor >, Jose", "may not hold", id="closing-bracket"),
-        pytest.param("Jose, Speaker 2", "looks like a speaker label", id="numbered-label"),
-        pytest.param("Speaker ?, Jose", "looks like a speaker label", id="unattributed-label"),
-        pytest.param("Jose, sPEAKER  12", "looks like a speaker label", id="label-any-case"),
+        pytest.param("Alice | Bruno", "may not hold", id="pipe"),
+        pytest.param("Ali\nce, Bruno", "may not hold", id="newline"),
+        pytest.param("Alice <spk:1>", "may not hold", id="angle-bracket"),
+        pytest.param("Alice >, Bruno", "may not hold", id="closing-bracket"),
+        pytest.param("Bruno, Speaker 2", "looks like a speaker label", id="numbered-label"),
+        pytest.param("Speaker ?, Bruno", "looks like a speaker label", id="unattributed-label"),
+        pytest.param("Bruno, sPEAKER  12", "looks like a speaker label", id="label-any-case"),
     ],
 )
 def test_a_malformed_attendee_list_is_refused(text: str, complaint: str) -> None:
@@ -49,25 +49,25 @@ def test_a_malformed_attendee_list_is_refused(text: str, complaint: str) -> None
         parse_attendees(text)
 
 
-ATTENDEES = ("Connor", "Jose", "Adam", "Keigo")
+ATTENDEES = ("Alice", "Bruno", "Carol", "Dmitri")
 Run = tuple[int | None, str]
 
 MEETING: tuple[Run, ...] = (
-    (7, "Okay, let's start. Connor, can you share the deck?"),
+    (7, "Okay, let's start. Alice, can you share the deck?"),
     (3, "Sure, sharing it now."),
-    (7, "Thanks. Jose, what do you think of it?"),
+    (7, "Thanks. Bruno, what do you think of it?"),
     (5, "Looks good to me."),
-    (7, "Great. Connor, one more thing about pricing."),
+    (7, "Great. Alice, one more thing about pricing."),
     (3, "Yes, pricing is settled."),
-    (7, "And Jose, the timeline?"),
-    (5, "End of month. Keigo sent the notes yesterday."),
+    (7, "And Bruno, the timeline?"),
+    (5, "End of month. Dmitri sent the notes yesterday."),
 )
 # One NAME in another case: it still names the attendee, as listed.
 ANSWERED = """\
-Connor | Connor | next | Connor, can you share the deck?
-Jose | Jose | next | Jose, what do you think of it?
-connor | Connor | next | Connor, one more thing about pricing.
-Jose | Jose | next | And Jose, the timeline?"""
+Alice | Alice | next | Alice, can you share the deck?
+Bruno | Bruno | next | Bruno, what do you think of it?
+alice | Alice | next | Alice, one more thing about pricing.
+Bruno | Bruno | next | And Bruno, the timeline?"""
 
 
 def _words(*runs: Run) -> list[Word]:
@@ -103,59 +103,59 @@ def _labels(named: SpeakerNames, words: list[Word]) -> list[str]:
 def test_two_answers_each_name_the_labels_that_gave_them() -> None:
     named, words = _named_from_replies(MEETING, ANSWERED)
 
-    assert named.names == {3: "Connor", 5: "Jose"}
-    assert named.unassigned == ("Adam", "Keigo")
+    assert named.names == {3: "Alice", 5: "Bruno"}
+    assert named.unassigned == ("Carol", "Dmitri")
     assert _labels(named, words) == [
         "Speaker 1",
-        "Connor",
+        "Alice",
         "Speaker 1",
-        "Jose",
+        "Bruno",
         "Speaker 1",
-        "Connor",
+        "Alice",
         "Speaker 1",
-        "Jose",
+        "Bruno",
     ]
     assert [
         (mention.name, mention.kind, mention.by, mention.points_to, mention.status)
         for mention in named.evidence
     ] == [
-        ("Connor", "next", 7, 3, "counted"),
-        ("Jose", "next", 7, 5, "counted"),
-        ("Connor", "next", 7, 3, "counted"),
-        ("Jose", "next", 7, 5, "counted"),
+        ("Alice", "next", 7, 3, "counted"),
+        ("Bruno", "next", 7, 5, "counted"),
+        ("Alice", "next", 7, 3, "counted"),
+        ("Bruno", "next", 7, 5, "counted"),
     ]
     first = named.evidence[0]
-    assert (first.word, first.time, first.said) == (3, 3.0, "Connor")
-    assert named.pointed == {"Connor": {3: 2}, "Jose": {5: 2}, "Adam": {}, "Keigo": {}}
-    assert named.says == {"Connor": {7: 2}, "Jose": {7: 2}, "Adam": {}, "Keigo": {}}
+    assert (first.word, first.time, first.said) == (3, 3.0, "Alice")
+    assert named.pointed == {"Alice": {3: 2}, "Bruno": {5: 2}, "Carol": {}, "Dmitri": {}}
+    assert named.says == {"Alice": {7: 2}, "Bruno": {7: 2}, "Carol": {}, "Dmitri": {}}
 
 
 def test_an_attendee_only_talked_about_names_no_label() -> None:
     named, words = _named_from_replies(
-        MEETING, ANSWERED + "\nKeigo | Keigo | about | Keigo sent the notes yesterday."
+        MEETING, ANSWERED + "\nDmitri | Dmitri | about | Dmitri sent the notes yesterday."
     )
 
-    assert named.unassigned == ("Adam", "Keigo")
-    assert "Keigo" not in _labels(named, words)
+    assert named.unassigned == ("Carol", "Dmitri")
+    assert "Dmitri" not in _labels(named, words)
     assert (named.evidence[-1].status, named.evidence[-1].by) == ("counted", 5)
-    assert named.says["Keigo"] == {5: 1}
+    assert named.says["Dmitri"] == {5: 1}
 
 
 CONTESTED: tuple[Run, ...] = (
-    (7, "Connor, can you share the deck?"),
+    (7, "Alice, can you share the deck?"),
     (3, "Sure, sharing it now."),
-    (7, "Connor, are you still with us?"),
+    (7, "Alice, are you still with us?"),
     (5, "I think he dropped."),
-    (7, "Connor, one more thing about pricing."),
+    (7, "Alice, one more thing about pricing."),
     (3, "Yes, pricing is settled."),
-    (7, "Connor, did you hear that one?"),
+    (7, "Alice, did you hear that one?"),
     (5, "He dropped again, sorry."),
 )
 SAID_BY_THE_ANSWERER: tuple[Run, ...] = (
-    (7, "Connor, can you share the deck?"),
+    (7, "Alice, can you share the deck?"),
     (3, "Sure, sharing it now."),
-    (7, "Connor, one more thing about pricing."),
-    (3, "Pricing is settled, Connor told me so yesterday."),
+    (7, "Alice, one more thing about pricing."),
+    (3, "Pricing is settled, Alice told me so yesterday."),
 )
 
 
@@ -164,17 +164,17 @@ SAID_BY_THE_ANSWERER: tuple[Run, ...] = (
     [
         pytest.param(
             CONTESTED,
-            "Connor | Connor | next | Connor, can you share the deck?\n"
-            "Connor | Connor | next | Connor, are you still with us?\n"
-            "Connor | Connor | next | Connor, one more thing about pricing.\n"
-            "Connor | Connor | next | Connor, did you hear that one?",
+            "Alice | Alice | next | Alice, can you share the deck?\n"
+            "Alice | Alice | next | Alice, are you still with us?\n"
+            "Alice | Alice | next | Alice, one more thing about pricing.\n"
+            "Alice | Alice | next | Alice, did you hear that one?",
             id="two-labels-answer-twice-each",
         ),
         pytest.param(
             SAID_BY_THE_ANSWERER,
-            "Connor | Connor | next | Connor, can you share the deck?\n"
-            "Connor | Connor | next | Connor, one more thing about pricing.\n"
-            "Connor | Connor | about | settled, Connor told me so",
+            "Alice | Alice | next | Alice, can you share the deck?\n"
+            "Alice | Alice | next | Alice, one more thing about pricing.\n"
+            "Alice | Alice | about | settled, Alice told me so",
             id="the-answerer-says-the-name",
         ),
     ],
@@ -183,61 +183,61 @@ def test_contradicted_evidence_names_no_label(runs: tuple[Run, ...], block: str)
     named, words = _named_from_replies(runs, block)
 
     assert named.names == {}
-    assert "Connor" in named.unassigned
+    assert "Alice" in named.unassigned
     assert all(mention.status == "counted" for mention in named.evidence)
-    assert "Connor" not in _labels(named, words)
+    assert "Alice" not in _labels(named, words)
 
 
 def test_a_label_two_names_win_stays_unnamed() -> None:
     runs: tuple[Run, ...] = (
-        (7, "Connor, can you share the deck?"),
+        (7, "Alice, can you share the deck?"),
         (3, "Sure, sharing it now."),
-        (7, "Jose, can you share the notes?"),
+        (7, "Bruno, can you share the notes?"),
         (3, "Sharing those as well."),
-        (7, "Connor, one more thing about pricing."),
+        (7, "Alice, one more thing about pricing."),
         (3, "Yes, pricing is settled."),
-        (7, "Jose, and the timeline?"),
+        (7, "Bruno, and the timeline?"),
         (3, "End of month."),
     )
     block = (
-        "Connor | Connor | next | Connor, can you share the deck?\n"
-        "Jose | Jose | next | Jose, can you share the notes?\n"
-        "Connor | Connor | next | Connor, one more thing about pricing.\n"
-        "Jose | Jose | next | Jose, and the timeline?"
+        "Alice | Alice | next | Alice, can you share the deck?\n"
+        "Bruno | Bruno | next | Bruno, can you share the notes?\n"
+        "Alice | Alice | next | Alice, one more thing about pricing.\n"
+        "Bruno | Bruno | next | Bruno, and the timeline?"
     )
 
     named, _ = _named_from_replies(runs, block)
 
-    assert named.pointed["Connor"] == named.pointed["Jose"] == {3: 2}
+    assert named.pointed["Alice"] == named.pointed["Bruno"] == {3: 2}
     assert named.names == {}
     assert named.unassigned == ATTENDEES
 
 
 def test_a_mention_does_not_hide_a_pointer_later_in_its_turn() -> None:
-    # As CONTESTED, with Connor talked about just before he is asked in the
+    # As CONTESTED, with Alice talked about just before he is asked in the
     # second turn: listing that mention must not decide the contest.
     runs: tuple[Run, ...] = (
-        (7, "Connor, can you share the deck?"),
+        (7, "Alice, can you share the deck?"),
         (3, "Sure, sharing it now."),
-        (7, "Connor's deck looks great. Connor, are you still with us?"),
+        (7, "Alice's deck looks great. Alice, are you still with us?"),
         (5, "I think he dropped."),
-        (7, "Connor, one more thing about pricing."),
+        (7, "Alice, one more thing about pricing."),
         (3, "Yes, pricing is settled."),
-        (7, "Connor, did you hear that one?"),
+        (7, "Alice, did you hear that one?"),
         (5, "He dropped again, sorry."),
     )
     block = (
-        "Connor | Connor's | about | Connor's deck looks great.\n"
-        "Connor | Connor | next | Connor, can you share the deck?\n"
-        "Connor | Connor | next | Connor, are you still with us?\n"
-        "Connor | Connor | next | Connor, one more thing about pricing.\n"
-        "Connor | Connor | next | Connor, did you hear that one?"
+        "Alice | Alice's | about | Alice's deck looks great.\n"
+        "Alice | Alice | next | Alice, can you share the deck?\n"
+        "Alice | Alice | next | Alice, are you still with us?\n"
+        "Alice | Alice | next | Alice, one more thing about pricing.\n"
+        "Alice | Alice | next | Alice, did you hear that one?"
     )
 
     named, _ = _named_from_replies(runs, block)
 
     assert [mention.reason for mention in named.evidence] == [None] * 5
-    assert named.pointed["Connor"] == {3: 2, 5: 2}
+    assert named.pointed["Alice"] == {3: 2, 5: 2}
     assert named.names == {}
 
 
@@ -245,12 +245,12 @@ _TOPICS = ("pricing", "hiring", "travel", "budget", "timing")
 
 
 def _asked(answerers: tuple[int, ...]) -> tuple[tuple[Run, ...], str]:
-    """Connor asked once per answerer, each answer given by that id, and the model's lines."""
+    """Alice asked once per answerer, each answer given by that id, and the model's lines."""
     runs: list[Run] = []
     lines: list[str] = []
     for answerer, topic in zip(answerers, _TOPICS, strict=False):
-        runs += [(7, f"Connor, what about {topic}?"), (answerer, f"The {topic} is fine.")]
-        lines.append(f"Connor | Connor | next | Connor, what about {topic}?")
+        runs += [(7, f"Alice, what about {topic}?"), (answerer, f"The {topic} is fine.")]
+        lines.append(f"Alice | Alice | next | Alice, what about {topic}?")
     return tuple(runs), "\n".join(lines)
 
 
@@ -259,8 +259,8 @@ def _asked(answerers: tuple[int, ...]) -> tuple[tuple[Run, ...], str]:
     ("answerers", "names"),
     [
         pytest.param((3,), {}, id="one-pointer-is-not-enough"),
-        pytest.param((3, 3), {3: "Connor"}, id="two-pointers-are"),
-        pytest.param((3, 3, 5), {3: "Connor"}, id="twice-the-rival"),
+        pytest.param((3, 3), {3: "Alice"}, id="two-pointers-are"),
+        pytest.param((3, 3, 5), {3: "Alice"}, id="twice-the-rival"),
         pytest.param((3, 3, 3, 5, 5), {}, id="less-than-twice-the-rival"),
     ],
 )
@@ -275,19 +275,19 @@ def test_a_label_needs_two_pointers_and_twice_any_rivals(
 def test_a_speaker_naming_themself_twice_is_named() -> None:
     runs: tuple[Run, ...] = (
         (7, "Morning, everyone, quick update first."),
-        (3, "This is Connor, the deck is ready."),
+        (3, "This is Alice, the deck is ready."),
         (7, "Great, thanks for that."),
-        (3, "Connor again, one more thing on pricing."),
+        (3, "Alice again, one more thing on pricing."),
     )
     block = (
-        "Connor | Connor | self | This is Connor, the deck\n"
-        "Connor | Connor | self | Connor again, one more thing"
+        "Alice | Alice | self | This is Alice, the deck\n"
+        "Alice | Alice | self | Alice again, one more thing"
     )
 
     named, _ = _named_from_replies(runs, block)
 
-    assert named.names == {3: "Connor"}
-    assert named.says["Connor"] == {}
+    assert named.names == {3: "Alice"}
+    assert named.says["Alice"] == {}
 
 
 @pytest.mark.parametrize(
@@ -295,13 +295,13 @@ def test_a_speaker_naming_themself_twice_is_named() -> None:
     [
         pytest.param("", id="no-one-named"),
         pytest.param(
-            "Maria | Connor | next | Connor, can you share the deck?\n"
-            "Maria | Connor | next | Connor, one more thing about pricing.",
+            "Maria | Alice | next | Alice, can you share the deck?\n"
+            "Maria | Alice | next | Alice, one more thing about pricing.",
             id="off-the-list",
         ),
         pytest.param(
-            "Connor | Connor | next | Connor, will you share the slides?\n"
-            "Connor | Connor | next | Connor, two more things about pricing.",
+            "Alice | Alice | next | Alice, will you share the slides?\n"
+            "Alice | Alice | next | Alice, two more things about pricing.",
             id="not-in-the-words",
         ),
     ],
@@ -334,22 +334,22 @@ def test_a_quote_across_a_run_boundary_is_found_without_its_tag() -> None:
     # The tag the prompt shows between runs, glued to the words around it.
     assert _reasons(
         MEETING,
-        "Jose | Jose | next | pricing is settled.<spk:0>And Jose, the timeline?",
+        "Bruno | Bruno | next | pricing is settled.<spk:0>And Bruno, the timeline?",
     ) == [None]
 
 
 def test_a_quote_found_twice_is_ambiguous() -> None:
     runs: tuple[Run, ...] = (
-        (7, "Thanks, Connor, see you."),
+        (7, "Thanks, Alice, see you."),
         (3, "Bye."),
-        (7, "Thanks, Connor, see you."),
+        (7, "Thanks, Alice, see you."),
     )
 
-    assert _reasons(runs, "Connor | Connor | about | Thanks, Connor, see you.") == ["ambiguous"]
+    assert _reasons(runs, "Alice | Alice | about | Thanks, Alice, see you.") == ["ambiguous"]
 
 
-_COMPOSED = "Jos\N{LATIN SMALL LETTER E WITH ACUTE}"
-_DECOMPOSED = "Jose\N{COMBINING ACUTE ACCENT}"
+_COMPOSED = "Zo\N{LATIN SMALL LETTER E WITH ACUTE}"
+_DECOMPOSED = "Zoe\N{COMBINING ACUTE ACCENT}"
 
 
 def test_a_name_is_one_attendee_however_its_accents_are_encoded() -> None:
@@ -363,19 +363,19 @@ def test_a_name_is_one_attendee_however_its_accents_are_encoded() -> None:
 
 
 def test_a_name_said_outside_its_quote_is_dropped() -> None:
-    assert _reasons(MEETING, "Jose | Jose | next | Connor, can you share the deck?") == [
+    assert _reasons(MEETING, "Bruno | Bruno | next | Alice, can you share the deck?") == [
         "said_outside_quote"
     ]
 
 
 def test_a_pointer_at_unattributed_words_is_dropped() -> None:
     runs: tuple[Run, ...] = (
-        (7, "Okay. Connor, can you share the deck?"),
+        (7, "Okay. Alice, can you share the deck?"),
         (None, "Sure, sharing it."),
         (3, "There it is."),
     )
 
-    assert _reasons(runs, "Connor | Connor | next | Connor, can you share the deck?") == [
+    assert _reasons(runs, "Alice | Alice | next | Alice, can you share the deck?") == [
         "unattributed"
     ]
 
@@ -385,47 +385,47 @@ def test_a_pointer_from_unattributed_words_is_dropped() -> None:
     # the label beside them, and no check could see whose words they were.
     runs: tuple[Run, ...] = (
         (1, "Okay then, next item."),
-        (None, "Adam, what do you think?"),
+        (None, "Carol, what do you think?"),
         (2, "Looks fine to me."),
         (1, "Right, and pricing."),
-        (None, "Adam, what do you think about pricing?"),
+        (None, "Carol, what do you think about pricing?"),
         (2, "Also fine."),
     )
     lines = (
-        "Adam | Adam | next | next item. Adam, what do you think?",
-        "Adam | Adam | previous | Adam, what do you think about pricing?",
+        "Carol | Carol | next | next item. Carol, what do you think?",
+        "Carol | Carol | previous | Carol, what do you think about pricing?",
     )
 
     assert _reasons(runs, *lines) == ["unattributed", "unattributed"]
 
     assert _reasons(
         MEETING,
-        "Keigo | Keigo | next | Keigo sent the notes yesterday.",
-        "Connor | Connor | previous | Okay, let's start. Connor, can",
+        "Dmitri | Dmitri | next | Dmitri sent the notes yesterday.",
+        "Alice | Alice | previous | Okay, let's start. Alice, can",
     ) == ["no_turn", "no_turn"]
 
 
 def test_a_name_counts_once_per_turn() -> None:
     runs: tuple[Run, ...] = (
-        (7, "Connor, can you share the deck? Connor, are you there?"),
+        (7, "Alice, can you share the deck? Alice, are you there?"),
         (3, "Sorry, sharing it now."),
     )
 
     # The same place listed twice, and a second place in the same turn.
     assert _reasons(
         runs,
-        "Connor | Connor | next | Connor, can you share the deck?",
-        "Connor | Connor | next | Connor, can you share the",
-        "Connor | Connor | next | deck? Connor, are you there?",
+        "Alice | Alice | next | Alice, can you share the deck?",
+        "Alice | Alice | next | Alice, can you share the",
+        "Alice | Alice | next | deck? Alice, are you there?",
     ) == [None, "repeat", "repeat"]
 
 
 def test_an_unknown_kind_and_a_short_line_are_dropped() -> None:
     assert _reasons(
         MEETING,
-        "Connor | Connor | addressed | Connor, can you share the deck?",
-        "Connor | Connor | next",
-        "Jose | <spk:1> | next | Jose, what do you think of it?",
+        "Alice | Alice | addressed | Alice, can you share the deck?",
+        "Alice | Alice | next",
+        "Bruno | <spk:1> | next | Bruno, what do you think of it?",
     ) == ["bad_kind", "bad_line", "bad_line"]
 
 
@@ -438,7 +438,7 @@ _RUNS = st.lists(
 )
 _LINES = st.lists(
     st.tuples(
-        st.sampled_from(["Connor", "Jose", "Maria"]),
+        st.sampled_from(["Alice", "Bruno", "Maria"]),
         st.sampled_from(["next", "previous", "self", "about", "later"]),
         st.integers(min_value=0, max_value=29),
         st.integers(min_value=1, max_value=4),

@@ -532,7 +532,7 @@ _NAMES_RULE = (
     "then the <names> block described below, and nothing else.\n"
 )
 _NAMES_SECTION = """
-People at this meeting: Connor, Jo{s}e.
+People at this meeting: Alice, Bru{n}o.
 Naming them does not change the rules for <spk:N> tags above.
 After </out>, list each place in TARGET where one of these people is named, one line per \
 place, between <names> and </names>:
@@ -557,7 +557,7 @@ def test_with_attendees_the_prompt_asks_for_a_names_block_after_the_out_block() 
     plain = prompts(texts, ids, cut_points(texts))
 
     # A brace in a name reaches the prompt as written.
-    asked = prompts(texts, ids, cut_points(texts), attendees=("Connor", "Jo{s}e"))
+    asked = prompts(texts, ids, cut_points(texts), attendees=("Alice", "Bru{n}o"))
 
     assert len(asked) == len(plain) == 2
     for (system, user), (plain_system, plain_user) in zip(asked, plain, strict=True):
@@ -586,15 +586,15 @@ def test_a_prompt_without_the_rule_the_names_request_replaces_is_refused(
 
     assert prompts(["w0", "w1."], [0, 1], [(0, 2)])
     with pytest.raises(AppError, match="names"):
-        prompts(["w0", "w1."], [0, 1], [(0, 2)], attendees=("Connor",))
+        prompts(["w0", "w1."], [0, 1], [(0, 2)], attendees=("Alice",))
 
 
-_ATTENDEES = ("Connor", "Jose")
+_ATTENDEES = ("Alice", "Bruno")
 
 
 def _naming_first_word(target: str) -> str:
     first = target.split()[1]
-    return f"<names>\nConnor | {first} | next | {first} and | more\nnot a line\n\n</names>"
+    return f"<names>\nAlice | {first} | next | {first} and | more\nnot a line\n\n</names>"
 
 
 def _claims(result: Relabeling) -> list[tuple[int, int, int, str, str, str, str]]:
@@ -615,14 +615,14 @@ def test_each_names_line_comes_back_as_a_claim_with_its_chunks_span() -> None:
         attendees=_ATTENDEES,
     )
 
-    assert "People at this meeting: Connor, Jose." in backend.calls[0][0]
+    assert "People at this meeting: Alice, Bruno." in backend.calls[0][0]
     # A line short of four fields leaves the missing ones empty; a quote may hold a `|`.
     assert _claims(result) == [
-        (0, 0, 700, "Connor", "w0", "next", "w0 and | more"),
+        (0, 0, 700, "Alice", "w0", "next", "w0 and | more"),
         (0, 0, 700, "not a line", "", "", ""),
-        (1, 700, 1400, "Connor", "w700", "next", "w700 and | more"),
+        (1, 700, 1400, "Alice", "w700", "next", "w700 and | more"),
         (1, 700, 1400, "not a line", "", "", ""),
-        (2, 1400, 2000, "Connor", "w1400", "next", "w1400 and | more"),
+        (2, 1400, 2000, "Alice", "w1400", "next", "w1400 and | more"),
         (2, 1400, 2000, "not a line", "", "", ""),
     ]
     assert result.names_blocks_missing == ()
@@ -654,7 +654,7 @@ def _block_in_the_first_chunk_only(target: str) -> str:
         return "<names></names>"
     if first == "w700":
         return "No one on the list is named."
-    return f"<names>\nConnor | {first} | next | {first} and more"
+    return f"<names>\nAlice | {first} | next | {first} and more"
 
 
 def test_a_usable_reply_without_a_names_block_is_listed() -> None:

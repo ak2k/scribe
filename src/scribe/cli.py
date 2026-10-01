@@ -779,7 +779,7 @@ def turns(
     attendees: str | None = typer.Option(
         None,
         "--attendees",
-        help='Who was at the meeting, comma-separated ("Connor, Jose, Adam"); the speaker pass '
+        help='Who was at the meeting, comma-separated ("Alice, Bruno, Carol"); the speaker pass '
         "names a label for one where the words show who it is.",
     ),
     audio_speakers: bool = typer.Option(

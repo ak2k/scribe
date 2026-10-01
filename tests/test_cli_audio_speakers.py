@@ -211,7 +211,7 @@ def test_the_speaker_pass_sees_the_words_unattributed_and_cannot_move_a_name_fro
 
 def _two_vocatives(_target: str) -> str:
     # w29 is said just before the unattributed w30-w31, w5 before a turn of 7.
-    return "<names>\nConnor | w5 | next | w3 w4 w5\nConnor | w29 | next | w27 w28 w29\n</names>"
+    return "<names>\nAlice | w5 | next | w3 w4 w5\nAlice | w29 | next | w27 w28 w29\n</names>"
 
 
 def test_names_from_the_words_point_at_the_turns_the_audio_leaves(
@@ -226,7 +226,7 @@ def test_names_from_the_words_point_at_the_turns_the_audio_leaves(
 
     monkeypatch.setattr("scribe.cli.ClaudeCliBackend", factory)
 
-    result = runner.invoke(app, _turns(tmp_path, "--attendees", "Connor"))
+    result = runner.invoke(app, _turns(tmp_path, "--attendees", "Alice"))
 
     assert result.exit_code == 0, result.output
     sidecar = cast(
@@ -239,8 +239,8 @@ def test_names_from_the_words_point_at_the_turns_the_audio_leaves(
         ("Speaker 1", "counted"),
         ("Speaker 1", "counted"),
     ]
-    assert sidecar["naming"]["names"] == {"Speaker 1": "Connor"}
-    assert {turn.speaker for turn in _written(tmp_path).turns} == {"Connor", "Speaker 2"}
+    assert sidecar["naming"]["names"] == {"Speaker 1": "Alice"}
+    assert {turn.speaker for turn in _written(tmp_path).turns} == {"Alice", "Speaker 2"}
 
 
 def _drop_audio(request: bytes) -> bytes:

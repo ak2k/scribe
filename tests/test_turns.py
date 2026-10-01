@@ -411,7 +411,7 @@ def test_a_named_id_carries_its_name_and_the_others_keep_their_rank() -> None:
     speakers = [word.speaker for word in words]
     unnamed = turns_from_speakers(words, speakers)
 
-    named = turns_from_speakers(words, speakers, names={5: "Connor"})
+    named = turns_from_speakers(words, speakers, names={5: "Alice"})
 
     assert [turn.speaker for turn in unnamed] == [
         "Speaker 1",
@@ -420,7 +420,7 @@ def test_a_named_id_carries_its_name_and_the_others_keep_their_rank() -> None:
         "Speaker 1",
     ]
     # Rank 2 stays rank 2 although rank 1 now has a name.
-    assert [turn.speaker for turn in named] == ["Connor", "Speaker ?", "Speaker 2", "Connor"]
+    assert [turn.speaker for turn in named] == ["Alice", "Speaker ?", "Speaker 2", "Alice"]
     assert [(turn.start, turn.end, turn.text) for turn in named] == [
         (turn.start, turn.end, turn.text) for turn in unnamed
     ]
