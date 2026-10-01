@@ -91,7 +91,7 @@ from scribe.xai_stt import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Generator
+    from collections.abc import Generator, Sequence
 
     from scribe.attribution import Naming
     from scribe.cleanup import CleanResult, MalformedCause, NumberDiff
@@ -1368,10 +1368,24 @@ def fill_command(
     typer.echo(str(plan["--out"]))
 
 
+def _unpicked(picked: Sequence[Side], delivered: Sequence[Side]) -> str:
+    """Name the words held where no model picked: the transcript's, save any the ears flipped."""
+    flipped = sum(
+        was == "failed" and now != was for was, now in zip(picked, delivered, strict=True)
+    )
+    held = "the transcript's words"
+    return f"{held} save {flipped} the third ear flipped to the reference's" if flipped else held
+
+
 def _report_pick(
-    picking: Picking, model: str, version: str = PICK_PROMPT_VERSION, replayed: Path | None = None
+    picking: Picking,
+    model: str,
+    version: str = PICK_PROMPT_VERSION,
+    replayed: Path | None = None,
+    delivered: Sequence[Side] | None = None,
 ) -> None:
     picked = picking.picked
+    unpicked = _unpicked(picked, picked if delivered is None else delivered)
     counts = (
         f"the reference's reading at {picked.count('reference')} of "
         f"{len(picked)} disputed spots ({picked.count('unsure')} unsure)"
@@ -1398,7 +1412,7 @@ def _report_pick(
         spots = sum(len(chunk.spots) for chunk in picking.failed)
         typer.echo(
             f"scribe: the pick failed on {len(picking.failed)} of {len(picking.chunks)} chunks "
-            f"({listed}); their {spots} spots keep the transcript's words",
+            f"({listed}); their {spots} spots keep {unpicked}",
             err=True,
         )
 
@@ -1430,24 +1444,29 @@ def _replayed(path: Path) -> tuple[list[tuple[float, float, str, str, Side]], st
 
 def _hear(
     transcript: Transcript, reference: Transcript, picking: Picking, audio: Path
-) -> tuple[Picking, str]:
+) -> tuple[Picking, str, Sequence[Side]]:
     """Deliver the sides rule ear-1 makes of the pick's, or on any failure its own; say which."""
     windows = third_ear.clips(transcript, reference, picking.spots, picking.picked)
     if not windows:
-        return picking, "scribe: no third ear: there is no spot to hear; the pick's readings stand"
+        return (
+            picking,
+            "scribe: no third ear: there is no spot to hear; the pick's readings stand",
+            picking.picked,
+        )
     try:
         heard = LocalEars().hear(audio, windows)
     # OSError too: the run's temporary directory can fail to be made.
     except (EarError, OSError) as exc:
-        return picking, f"scribe: no third ear: {exc}; the pick's readings stand"
+        return picking, f"scribe: no third ear: {exc}; the pick's readings stand", picking.picked
     sides, params = third_ear.vote(transcript, reference, picking.spots, picking.picked, heard)
     delivered = assemble(transcript, reference, picking.spots, sides, {**picking.params, **params})
     names, seconds = ", ".join(ear.recognizer.name for ear in heard), params["ear_seconds"]
-    return dataclasses.replace(picking, transcript=delivered), (
+    line = (
         f"scribe: third ear heard {len(windows)} spots with {names} in {seconds:g} s; "
         f"{params['ear_to_reference']} flipped to the reference, "
         f"{params['ear_to_transcript']} to the transcript"
     )
+    return dataclasses.replace(picking, transcript=delivered), line, sides
 
 
 @app.command(name="pick")
@@ -1522,7 +1541,7 @@ def pick_command(
     whose spots are not these inputs', an AUDIO not TRANSCRIPT's recording, an
     unwritable output, or no usable claude CLI, found before any call. Exit 4
     means every call failed; the result is written anyway, with TRANSCRIPT's
-    words.
+    words save where --audio flipped a spot.
     """
     # stdout carries only the output path; unconfigured, structlog prints there.
     configure()
@@ -1560,9 +1579,9 @@ def pick_command(
                 )
             except InputValidationError as exc:
                 raise InputValidationError(f"--sides-from {sides_from}: {exc}") from exc
-        hearing = None
+        hearing, delivered = None, picking.picked
         if audio is not None:
-            picking, hearing = _hear(transcript, reference, picking, audio)
+            picking, hearing, delivered = _hear(transcript, reference, picking, audio)
         try:
             picking.transcript.dump(plan["--out"])
         except (OSError, ValueError) as exc:
@@ -1572,7 +1591,7 @@ def pick_command(
     except AppError as exc:
         _fail(exc)
 
-    _report_pick(picking, model, version, sides_from)
+    _report_pick(picking, model, version, sides_from, delivered)
     if hearing is not None:
         typer.echo(hearing, err=True)
     typer.echo(str(plan["--out"]))
