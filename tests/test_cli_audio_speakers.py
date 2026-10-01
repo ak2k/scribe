@@ -243,6 +243,55 @@ def test_names_from_the_words_point_at_the_turns_the_audio_leaves(
     assert {turn.speaker for turn in _written(tmp_path).turns} == {"Alice", "Speaker 2"}
 
 
+# Unattributed w33-w34 sit between two turns of 7, so whoever the audio gives
+# them to is beside neither side of the gap.
+INSIDE: list[tuple[int | None, int]] = [
+    *[(7, 3), (4, 3)] * 5,
+    (7, 3),
+    (None, 2),
+    (7, 3),
+    *[(4, 3), (7, 3)] * 5,
+]
+
+
+def _asked_before_turns_of_4(_target: str) -> str:
+    # w2 is said just before a turn of 4, w32 just before the unattributed w33-w34.
+    return "<names>\nAlice | w2 | next | w0 w1 w2\nAlice | w32 | next | w30 w31 w32\n</names>"
+
+
+def test_a_pointer_lands_on_the_turn_the_audio_gives_a_gap_beside_neither_side(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _stage(tmp_path, INSIDE)
+    _swap(monkeypatch, FakeWorker(_reply(INSIDE, cluster=4, heard_as=4)))
+
+    def factory(*, model: str, disable_tools: bool) -> FakeSpeakerBackend:
+        assert disable_tools
+        return FakeSpeakerBackend(model=model, trailer=_asked_before_turns_of_4)
+
+    monkeypatch.setattr("scribe.cli.ClaudeCliBackend", factory)
+
+    result = runner.invoke(app, _turns(tmp_path, "--attendees", "Alice"))
+
+    assert result.exit_code == 0, result.output
+    sidecar = cast(
+        "dict[str, dict[str, object]]",
+        json.loads((tmp_path / "out" / "t.speakers.json").read_text(encoding="utf-8")),
+    )
+    evidence = cast("list[dict[str, object]]", sidecar["naming"]["evidence"])
+    # The turns as written put 4 right after both questions, as the words would have.
+    assert [(mention["points_to"], mention["status"]) for mention in evidence] == [
+        ("Speaker 2", "counted"),
+        ("Speaker 2", "counted"),
+    ]
+    assert sidecar["naming"]["names"] == {"Speaker 2": "Alice"}
+    assert [turn.speaker for turn in _written(tmp_path).turns][10:13] == [
+        "Speaker 1",
+        "Alice",
+        "Speaker 1",
+    ]
+
+
 def _drop_audio(request: bytes) -> bytes:
     decoded = cast("dict[str, object]", json.loads(request))
     del decoded["audio"]
