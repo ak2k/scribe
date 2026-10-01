@@ -33,6 +33,7 @@ def test_attendees_are_read_in_order_with_their_spacing_trimmed() -> None:
         pytest.param("Connor | Jose", "may not hold", id="pipe"),
         pytest.param("Con\nnor, Jose", "may not hold", id="newline"),
         pytest.param("Connor <spk:1>", "may not hold", id="angle-bracket"),
+        pytest.param("Connor >, Jose", "may not hold", id="closing-bracket"),
         pytest.param("Jose, Speaker 2", "looks like a speaker label", id="numbered-label"),
         pytest.param("Speaker ?, Jose", "looks like a speaker label", id="unattributed-label"),
         pytest.param("Jose, sPEAKER  12", "looks like a speaker label", id="label-any-case"),
