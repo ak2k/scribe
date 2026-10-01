@@ -11,7 +11,9 @@ from typing import TYPE_CHECKING, NoReturn
 
 import pytest
 
+from scribe.diarizer import TOKEN_NAMES
 from scribe.ear import FAILED, RECOGNIZERS
+from tests.diarizer_fakes import TOKEN
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -24,12 +26,19 @@ _GATED = (
 )
 
 
-def _refuse(*_args: object, **_kwargs: object) -> NoReturn:
-    raise OSError(_GATED)
-
-
-def _run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, spec: Recognizer, *, mps: bool) -> object:
+def _run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    spec: Recognizer,
+    *,
+    mps: bool,
+    refusal: str = _GATED,
+) -> object:
     """Run the worker as uvx does, over stand-ins for what it imports; no model loads."""
+
+    def refuse(*_args: object, **_kwargs: object) -> NoReturn:
+        raise OSError(refusal)
+
     gpu = SimpleNamespace(mps=SimpleNamespace(is_available=lambda: mps))
     classes = (
         "AutoProcessor",
@@ -39,7 +48,7 @@ def _run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, spec: Recognizer, *, m
     stand_ins: dict[str, dict[str, object]] = {
         "numpy": {},
         "torch": {"bfloat16": "bfloat16", "backends": gpu},
-        "transformers": {name: SimpleNamespace(from_pretrained=_refuse) for name in classes},
+        "transformers": {name: SimpleNamespace(from_pretrained=refuse) for name in classes},
     }
     for name, attributes in stand_ins.items():
         module = ModuleType(name)
@@ -86,3 +95,25 @@ def test_a_gpu_torch_cannot_use_is_one_line(
     assert code == 1
     assert err.splitlines() == [f"{FAILED}torch cannot use the Metal GPU (mps) here"]
     assert not (tmp_path / "out.json").exists()
+
+
+@pytest.mark.parametrize("name", TOKEN_NAMES)
+def test_a_failure_that_quotes_the_token_does_not_show_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    name: str,
+) -> None:
+    # The others set but empty, as `NAME=` leaves them; the token with the newline a file ends in.
+    for other in TOKEN_NAMES:
+        monkeypatch.setenv(other, "")
+    monkeypatch.setenv(name, f"{TOKEN}\n")
+
+    code = _run(tmp_path, monkeypatch, RECOGNIZERS[0], mps=True, refusal=f"401 {TOKEN}")
+
+    out, err = capsys.readouterr()
+    assert code == 1
+    assert TOKEN not in out + err
+    assert [line for line in err.splitlines() if line.startswith(FAILED)] == [
+        f"{FAILED}OSError: 401 <hidden>"
+    ]
