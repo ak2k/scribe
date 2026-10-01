@@ -24,7 +24,7 @@ from scribe.diarizer import (
 )
 from scribe.errors import ExternalServiceError, ToolMissingError
 from tests.child_env_cases import ALL_BUT_THE_WORKER, DROPPED, KEPT, TOKENS
-from tests.diarizer_fakes import FFMPEG, TOKEN, UVX, FakeWorker, answer, found
+from tests.diarizer_fakes import FFMPEG, TOKEN, UVX, FakeWorker, answer, found, full_disk
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -204,6 +204,19 @@ def test_a_failed_run_is_one_service_error_naming_its_cause(
 
     assert expected in str(caught.value)
     assert "\n" not in str(caught.value)
+
+
+def test_a_request_that_cannot_be_written_is_one_service_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(Path, "write_text", full_disk)
+    fake = FakeWorker()
+
+    with pytest.raises(ExternalServiceError, match="No space left on device") as caught:
+        _backend(fake).diarize(_audio(tmp_path), [(0.0, 3.0)])
+
+    assert "\n" not in str(caught.value)
+    assert [argv[0] for argv in fake.calls] == [FFMPEG]
 
 
 def test_a_long_report_keeps_both_ends() -> None:

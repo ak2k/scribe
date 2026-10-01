@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import contextlib
 import json
+import os
 import subprocess
+import tempfile
 from importlib import resources
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -16,7 +18,7 @@ from hypothesis import strategies as st
 from scribe.ear import DEFAULT_TIMEOUT_S, FAILED, RECOGNIZERS, Heard, LocalEars, parse_output
 from scribe.errors import EarError
 from tests.child_env_cases import ALL_BUT_THE_WORKER, TOKENS
-from tests.diarizer_fakes import FFMPEG, TOKEN, UVX, FakeWorker, found
+from tests.diarizer_fakes import FFMPEG, TOKEN, UVX, FakeWorker, found, full_disk
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -241,6 +243,49 @@ def test_an_uncached_snapshot_is_refused_before_anything_runs(
     with pytest.raises(EarError, match=f"{spec.model} at {spec.revision} is not in the Hugging"):
         _ears(fake).hear(_audio(tmp_path), [(0.0, 3.0)])
     assert fake.calls == []
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads a 0o000 directory, so nothing fails")
+def test_an_unreadable_cache_is_one_ear_error_before_anything_runs(
+    tmp_path: Path, cache: Path
+) -> None:
+    snapshots = _snapshot(cache, COHERE.model, COHERE.revision).parent
+    snapshots.chmod(0o000)
+    fake = FakeWorker(answer)
+    try:
+        with pytest.raises(EarError) as caught:
+            _ears(fake).hear(_audio(tmp_path), [(0.0, 3.0)])
+    finally:
+        snapshots.chmod(0o700)
+
+    assert "\n" not in str(caught.value)
+    assert fake.calls == []
+
+
+def test_no_working_directory_is_one_ear_error_before_anything_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path / "missing"))
+    fake = FakeWorker(answer)
+
+    with pytest.raises(EarError, match="No such file or directory") as caught:
+        _ears(fake).hear(_audio(tmp_path), [(0.0, 3.0)])
+
+    assert "\n" not in str(caught.value)
+    assert fake.calls == []
+
+
+def test_a_request_that_cannot_be_written_is_one_ear_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(Path, "write_text", full_disk)
+    fake = FakeWorker(answer)
+
+    with pytest.raises(EarError, match="No space left on device") as caught:
+        _ears(fake).hear(_audio(tmp_path), [(0.0, 3.0)])
+
+    assert "\n" not in str(caught.value)
+    assert [argv[0] for argv in fake.calls] == [FFMPEG]
 
 
 @pytest.mark.parametrize(
