@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING
 from scribe.schema import Turn
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Iterable, Mapping, Sequence
 
     from scribe.schema import Word
 
@@ -148,8 +148,8 @@ def _snap_switches(
 UNATTRIBUTED = "Speaker ?"
 
 
-def _labels(turns: Sequence[_RawTurn]) -> dict[int | None, str]:
-    """Rank surviving speakers by first appearance.
+def rank_labels(speakers: Iterable[int | None]) -> dict[int | None, str]:
+    """Label each id "Speaker N" by its rank of first appearance.
 
     The API's diarization integers are not documented as 0- or 1-based and are
     not ordered by appearance, so the rank is the only stable display label.
@@ -157,7 +157,7 @@ def _labels(turns: Sequence[_RawTurn]) -> dict[int | None, str]:
     unranked: no engine said who spoke them, and a rank would pass them off
     as one more person.
     """
-    order = dict.fromkeys(turn.speaker_id for turn in turns)
+    order = dict.fromkeys(speakers)
     if list(order) == [None]:
         return {None: "Speaker 1"}
     ranked = (speaker_id for speaker_id in order if speaker_id is not None)
@@ -204,11 +204,17 @@ def word_speakers(
     return speakers
 
 
-def turns_from_speakers(words: Sequence[Word], speakers: Sequence[int | None]) -> list[Turn]:
+def turns_from_speakers(
+    words: Sequence[Word],
+    speakers: Sequence[int | None],
+    names: Mapping[int, str] | None = None,
+) -> list[Turn]:
     """Group words into labeled turns by the speaker id given for each word.
 
     Unlike `build_turns` this merges and snaps nothing: every switch in
-    `speakers` becomes a turn boundary.
+    `speakers` becomes a turn boundary. An id in `names` is labeled with its
+    name; every other id keeps its rank among all ids, so naming one speaker
+    renumbers no other.
 
     Raises:
         ValueError: `speakers` does not hold exactly one id per word.
@@ -218,7 +224,8 @@ def turns_from_speakers(words: Sequence[Word], speakers: Sequence[int | None]) -
         _RawTurn(speaker_id, tuple(word for word, _ in run))
         for speaker_id, run in groupby(zip(words, speakers, strict=True), key=lambda pair: pair[1])
     ]
-    labels = _labels(raw)
+    labels = rank_labels(turn.speaker_id for turn in raw)
+    labels.update((names or {}).items())
     return [
         Turn(
             speaker=labels[turn.speaker_id],
