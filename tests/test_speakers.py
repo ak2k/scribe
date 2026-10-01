@@ -673,6 +673,28 @@ def test_a_usable_reply_without_a_names_block_is_listed() -> None:
     assert result.names_blocks_missing == (1, 2)
 
 
+def _quoting_the_closing_tag(_target: str) -> str:
+    return "<names>\nAlice | Alice | next | Alice, is </out> the closing tag?\n</names>"
+
+
+def test_a_names_line_quoting_the_closing_tag_costs_no_correction() -> None:
+    texts, speakers = _talk((5, "Alice, is </out> the closing tag?"), (6, "Yes, it ends a reply."))
+
+    plain = relabel(texts, speakers, FakeSpeakerBackend(reply=_swap_ranks))
+    named = relabel(
+        texts,
+        speakers,
+        FakeSpeakerBackend(reply=_swap_ranks, trailer=_quoting_the_closing_tag),
+        attendees=_ATTENDEES,
+    )
+
+    assert named.failed == ()
+    assert named.speakers == plain.speakers != tuple(speakers)
+    assert _claims(named) == [
+        (0, 0, len(texts), "Alice", "Alice", "next", "Alice, is </out> the closing tag?")
+    ]
+
+
 def test_without_attendees_a_names_block_is_ignored() -> None:
     words = _said((1, 1000), (2, 1000))
     texts, speakers = [word.text for word in words], [word.speaker for word in words]
