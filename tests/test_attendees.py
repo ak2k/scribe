@@ -333,7 +333,24 @@ def test_a_pointer_at_unattributed_words_is_dropped() -> None:
     ]
 
 
-def test_a_pointer_past_the_last_turn_is_dropped() -> None:
+def test_a_pointer_from_unattributed_words_is_dropped() -> None:
+    # The asker's own words lost their speaker: counted, the answers would name
+    # the label beside them, and no check could see whose words they were.
+    runs: tuple[Run, ...] = (
+        (1, "Okay then, next item."),
+        (None, "Adam, what do you think?"),
+        (2, "Looks fine to me."),
+        (1, "Right, and pricing."),
+        (None, "Adam, what do you think about pricing?"),
+        (2, "Also fine."),
+    )
+    lines = (
+        "Adam | Adam | next | next item. Adam, what do you think?",
+        "Adam | Adam | previous | Adam, what do you think about pricing?",
+    )
+
+    assert _reasons(runs, *lines) == ["unattributed", "unattributed"]
+
     assert _reasons(
         MEETING,
         "Keigo | Keigo | next | Keigo sent the notes yesterday.",
@@ -414,6 +431,11 @@ def test_no_name_lands_on_two_labels_or_without_its_pointers(
     assert None not in named.names
     assert len(set(named.names.values())) == len(named.names)
     assert set(named.names.values()) <= set(ATTENDEES)
+    assert all(
+        mention.by is not None
+        for mention in named.evidence
+        if mention.status == "counted" and mention.points_to is not None
+    )
     for speaker, name in named.names.items():
         counted = [
             mention
