@@ -90,6 +90,35 @@ def test_a_slot_that_is_both_readings_names_neither() -> None:
     assert verdict(Slot(("the", "hat"), ("the",), ()), ["hat"], ["the", "hat"], ([], [])) == "third"
 
 
+_SAW_THE, _SAT_DOWN = ["saw", "the"], ["sat", "down"]
+
+
+@pytest.mark.parametrize("heard", [["saw"], ["the"], ["down"], ["the", "saw"]])
+@pytest.mark.parametrize("words", [(), ("um",), ("you", "know"), ("like",)])
+def test_a_slot_of_no_word_names_no_reading_made_of_the_words_around_it(
+    words: tuple[str, ...], heard: list[str]
+) -> None:
+    # Set beside "saw the" and "sat down", `heard` collapses into them as a repeat.
+    assert verdict(Slot(words, (), ()), ["cat"], heard, (_SAW_THE, _SAT_DOWN)) == "third"
+
+
+def test_a_slot_doubling_the_word_after_the_spot_names_no_reading_made_of_the_words_around_it() -> (
+    None
+):
+    said = _timed("we saw the cat sat down")
+    found = slot(said, Spot(range(3, 4), range(3, 4)), (0, 11), "we saw the sat sat down")
+
+    assert found == Slot(("sat",), (), ())
+    assert verdict(found, ["cat"], ["the"], (_SAW_THE, _SAT_DOWN)) == "third"
+
+
+@pytest.mark.parametrize("words", [("the",), ("The,",)])
+def test_a_slot_that_is_a_reading_made_of_the_words_around_it_names_it(
+    words: tuple[str, ...],
+) -> None:
+    assert verdict(Slot(words, (), ()), ["cat"], ["the"], (_SAW_THE, _SAT_DOWN)) == "reference"
+
+
 @pytest.mark.parametrize(
     ("side", "verdicts", "delivered"),
     [
