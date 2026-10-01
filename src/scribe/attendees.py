@@ -14,6 +14,7 @@ recorded per mention as what was said.
 from __future__ import annotations
 
 import re
+import unicodedata
 from collections import Counter
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Literal
@@ -57,17 +58,17 @@ _FORBIDDEN = ("|", "<", ">")
 
 
 def parse_attendees(text: str) -> tuple[str, ...]:
-    """Read a comma-separated attendee list, each name trimmed, in the order given.
+    """Read a comma-separated attendee list, each name trimmed and NFC-normalized, in order.
 
     Raises:
         InputValidationError: the list names nobody, an item is empty, a name
-            repeats in any case, holds a line break, `|`, `<` or `>`, or reads
-            like a speaker label.
+            repeats in any case or encoding, holds a line break, `|`, `<` or
+            `>`, or reads like a speaker label.
 
     """
     if not text.strip():
         raise InputValidationError("--attendees names nobody")
-    names = tuple(item.strip() for item in text.split(","))
+    names = tuple(unicodedata.normalize("NFC", item.strip()) for item in text.split(","))
     seen: set[str] = set()
     for name in names:
         if not name:
@@ -78,10 +79,15 @@ def parse_attendees(text: str) -> tuple[str, ...]:
             )
         if _LABEL.fullmatch(name):
             raise InputValidationError(f"--attendees name {name!r} looks like a speaker label")
-        if name.casefold() in seen:
+        if _folded(name) in seen:
             raise InputValidationError(f"--attendees lists {name!r} twice")
-        seen.add(name.casefold())
+        seen.add(_folded(name))
     return names
+
+
+def _folded(name: str) -> str:
+    """The form names are compared in: an accent typed either way, and any case, match."""
+    return unicodedata.normalize("NFC", name).casefold()
 
 
 @dataclass(frozen=True)
@@ -166,7 +172,7 @@ def _checked(
     runs: tuple[list[int], list[int | None]],
 ) -> Mention:
     """Everything one claim can be checked for on its own, before repeats are counted."""
-    attendee = listed.get(claim.name.casefold())
+    attendee = listed.get(_folded(claim.name))
     mention = Mention(claim.chunk, attendee or claim.name, claim.said, claim.kind)
     found = _line_fault(claim, attendee) or _locate(words, claim)
     if isinstance(found, str):
@@ -233,7 +239,7 @@ def name_speakers(
         one checked mention per claim, in claim order.
 
     """
-    listed = {name.casefold(): name for name in attendees}
+    listed = {_folded(name): name for name in attendees}
     runs = _runs(speakers)
     checked = [_checked(claim, words, listed, runs) for claim in claims]
     located = sorted(
