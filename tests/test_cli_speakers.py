@@ -794,7 +794,7 @@ def test_a_rerun_without_attendees_drops_the_names(
 @pytest.mark.parametrize(
     ("flags", "complaint"),
     [
-        pytest.param(["--attendees", "Connor", "--no-llm-speakers"], "--attendees", id="no-pass"),
+        pytest.param(["--attendees", "Connor", "--no-llm-speakers"], "speaker pass", id="no-pass"),
         pytest.param(["--attendees", "Connor,,Jose"], "empty name", id="empty-name"),
         pytest.param(["--attendees", "Speaker 2"], "speaker label", id="label"),
     ],
