@@ -34,8 +34,9 @@ VERSION = "5.18.0"
 WITH = ("torch==2.14.1", "numpy==2.5.3", "librosa==1.0.0")
 PYTHON = "3.12"
 # Dependencies as published by then: uvx otherwise resolves them afresh, and a
-# dependency that moves can change the words.
-EXCLUDE_NEWER = "2026-09-30T00:00:00Z"
+# dependency that moves can change the words. The measured environment resolved
+# at about this time, after transformers 5.18.0 was published at 16:46Z.
+EXCLUDE_NEWER = "2026-09-30T21:00:00Z"
 # About 1 s per clip per recognizer on Apple silicon once cached; a run with
 # downloads allowed may first fetch ~8 GB of weights and packages.
 DEFAULT_TIMEOUT_S = 3600.0
