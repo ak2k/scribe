@@ -99,7 +99,8 @@ def parse_output(raw: bytes) -> list[Word]:
         parsed = _Output.model_validate_json(raw)
     except ValidationError as exc:
         first = exc.errors()[0]
-        where = ".".join(str(part) for part in first["loc"])
+        # A key holding a line break would otherwise split this one-line cause.
+        where = " ".join(".".join(str(part) for part in first["loc"]).split())
         raise ExternalServiceError(
             f"parakeet-mlx wrote an unexpected transcript: {first['msg']} "
             f"(at {where or 'top level'})"

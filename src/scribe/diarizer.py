@@ -96,7 +96,8 @@ def parse_output(raw: bytes, intervals: int) -> Diarization:
         parsed = _Output.model_validate_json(raw)
     except ValidationError as exc:
         first = exc.errors()[0]
-        where = ".".join(str(part) for part in first["loc"])
+        # A key holding a line break would otherwise split this one-line cause.
+        where = " ".join(".".join(str(part) for part in first["loc"]).split())
         raise ExternalServiceError(
             f"the diarizer wrote an unexpected answer: {first['msg']} (at {where or 'top level'})"
         ) from exc
