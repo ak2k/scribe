@@ -318,6 +318,29 @@ def test_a_mention_does_not_hide_a_pointer_later_in_its_turn() -> None:
     assert named.names == {}
 
 
+def test_a_pointer_does_not_hide_one_at_another_label_later_in_its_turn() -> None:
+    runs: tuple[Run, ...] = (
+        (5, "Ok sure, sounds good."),
+        (7, "Thanks Alice for that. Now go ahead please, Alice."),
+        (3, "Here is my update."),
+        (5, "Ok sure, sounds fine."),
+        (7, "Thanks Alice for this. Now go on please, Alice."),
+        (3, "Another update from me."),
+    )
+    block = (
+        "Alice | Alice | previous | Thanks Alice for that.\n"
+        "Alice | Alice | next | Now go ahead please, Alice.\n"
+        "Alice | Alice | previous | Thanks Alice for this.\n"
+        "Alice | Alice | next | Now go on please, Alice."
+    )
+
+    named, _ = _named_from_replies(runs, block)
+
+    assert named.names == {}
+    assert named.pointed["Alice"] == {5: 2, 3: 2}
+    assert [mention.reason for mention in named.evidence] == [None] * 4
+
+
 _TOPICS = ("pricing", "hiring", "travel", "budget", "timing")
 
 
