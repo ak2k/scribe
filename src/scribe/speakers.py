@@ -458,12 +458,16 @@ def _split_reply(text: str, texts: Sequence[str]) -> tuple[str, str]:
 
 
 def _claims(after: str, chunk: int, start: int, end: int) -> tuple[Claim, ...] | None:
-    """The lines of the names block after a usable reply's <out> block; None without one."""
-    found = _NAMES_BLOCK.search(after)
-    if found is None:
+    """The lines of every names block after a usable reply's <out> block; None without one.
+
+    A block that echoes the instruction, or comes back empty, hides no line of
+    one after it.
+    """
+    blocks = [found.group(1) for found in _NAMES_BLOCK.finditer(after)]
+    if not blocks:
         return None
     claims: list[Claim] = []
-    for line in found.group(1).splitlines():
+    for line in "\n".join(blocks).splitlines():
         if not line.strip():
             continue
         fields = [field.strip() for field in line.split("|", 3)]
