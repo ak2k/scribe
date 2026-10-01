@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import os
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import pytest
 from typer.testing import CliRunner
@@ -367,3 +368,101 @@ def test_the_help_says_what_leaves_the_machine_and_what_exit_four_means() -> Non
     assert result.exit_code == 0
     assert "not the audio, go to Anthropic" in " ".join(result.stdout.split())
     assert "Exit 4" in result.stdout
+
+
+def _hat_then_unsure(number: int, a: str, _b: str) -> str:
+    return "unsure" if number == 2 else ("A" if a == "hat" else "B")
+
+
+def _picked(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[list[Path], Path]:
+    """The inputs, and their pick: "hat" taken at spot 1, spot 2 unsure."""
+    _patch(monkeypatch, reply=answering(_hat_then_unsure))
+    inputs = _inputs(tmp_path)
+    picked = tmp_path / "meeting.picked.json"
+    assert runner.invoke(app, ["pick", *map(str, inputs), "--out", str(picked)]).exit_code == 0
+    return inputs, picked
+
+
+def test_sides_from_replays_a_pick_and_asks_no_model(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    inputs, picked = _picked(tmp_path, monkeypatch)
+    made = _patch(monkeypatch)
+    out = tmp_path / "replayed.json"
+
+    result = runner.invoke(
+        app, ["pick", *map(str, inputs), "--sides-from", str(picked), "--out", str(out)]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert made == []
+    assert result.stdout == f"{out}\n"
+    assert result.stderr == (
+        f"scribe: replayed the sides {picked} records, asking no model: the reference's "
+        f"reading at 1 of 2 disputed spots (1 unsure), as {DEFAULT_PICK_MODEL} picked them "
+        f"with prompt {PICK_PROMPT_VERSION}\n"
+    )
+    replayed, original = Transcript.load(out), Transcript.load(picked)
+    assert replayed.text == original.text == "the hat sat on the mat"
+    assert replayed.words == original.words
+    params, before = replayed.engine.params, original.engine.params
+    assert params["pick_record"] == before["pick_record"]
+    assert (params["pick_chunks"], params["pick_chunks_failed"], before["pick_chunks"]) == (0, 0, 1)
+    same = ("pick_model", "pick_prompt_version", "pick_context_chars", "pick_unsure")
+    assert {key: params[key] for key in same} == {key: before[key] for key in same}
+
+
+def _fewer(record: list[list[object]], _params: dict[str, object]) -> str:
+    del record[1]
+    return "the record holds 1 spots where these transcripts have 2"
+
+
+def _other_reading(record: list[list[object]], _params: dict[str, object]) -> str:
+    record[1][3] = "cat"
+    return 'its spot 2 is [5.0, 5.4, "mat", "cat"], where these transcripts have [5.0, 5.4, "mat", '
+
+
+def _moved(record: list[list[object]], _params: dict[str, object]) -> str:
+    record[0][0] = 0.5
+    return "its spot 1 is [0.5, 1.4"
+
+
+def _unrecorded(_record: list[list[object]], params: dict[str, object]) -> str:
+    del params["pick_record"]
+    return "has no pick_record"
+
+
+def _unnamed(_record: list[list[object]], params: dict[str, object]) -> str:
+    del params["pick_model"]
+    return "names no pick_model"
+
+
+@pytest.mark.parametrize("breakage", [_fewer, _other_reading, _moved, _unrecorded, _unnamed])
+def test_sides_from_a_record_of_other_spots_exits_two_asking_no_model(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    breakage: Callable[[list[list[object]], dict[str, object]], str],
+) -> None:
+    inputs, picked = _picked(tmp_path, monkeypatch)
+    loaded = Transcript.load(picked)
+    params: dict[str, object] = dict(loaded.engine.params)
+    record = cast("list[list[object]]", json.loads(str(params["pick_record"])))
+    expected = breakage(record, params)
+    if "pick_record" in params:
+        params["pick_record"] = json.dumps(record)
+    engine = loaded.engine.model_copy(update={"params": params})
+    loaded.model_copy(update={"engine": engine}).dump(picked)
+    made = _patch(monkeypatch)
+    out = tmp_path / "replayed.json"
+
+    result = runner.invoke(
+        app, ["pick", *map(str, inputs), "--sides-from", str(picked), "--out", str(out)]
+    )
+
+    assert result.exit_code == 2
+    assert result.stdout == ""
+    assert len(result.stderr.splitlines()) == 1
+    assert result.stderr.startswith("scribe: ")
+    assert expected in result.stderr
+    assert made == []
+    assert not out.exists()
