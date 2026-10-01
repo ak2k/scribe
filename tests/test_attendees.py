@@ -400,6 +400,51 @@ def test_a_pointer_at_a_backchannel_counts_only_where_no_third_speaker_is_past_i
     assert named.says["Alice"] == {7: 2}
 
 
+@pytest.mark.parametrize(
+    ("runs", "block"),
+    [
+        pytest.param(
+            (
+                (7, "Okay, thanks for that."),
+                (3, "Alice, can you share the deck? Sure, sharing it now."),
+                (9, "Noted, thank you."),
+                (7, "Good, next item."),
+                (3, "Alice, is pricing settled? Yes, pricing is settled."),
+                (9, "Great, noted."),
+            ),
+            "Alice | Alice | next | Alice, can you share the deck?\n"
+            "Alice | Alice | next | Alice, is pricing settled?",
+            id="an-address-opening-the-reply",
+        ),
+        pytest.param(
+            (
+                (9, "Let us hear the pricing update."),
+                (3, "Pricing is settled for this quarter. Thanks, Alice."),
+                (7, "Moving on to hiring."),
+                (9, "Let us hear the hiring update."),
+                (3, "Hiring is on track this month. Thanks, Alice."),
+                (7, "Good, moving on."),
+            ),
+            "Alice | Alice | previous | for this quarter. Thanks, Alice.\n"
+            "Alice | Alice | previous | track this month. Thanks, Alice.",
+            id="thanks-closing-the-update",
+        ),
+    ],
+)
+def test_an_address_a_switch_may_have_left_in_the_reply_names_nobody(
+    runs: tuple[Run, ...], block: str
+) -> None:
+    words = _words(*runs)
+    # Every switch sits on a sentence end, so the turns move none of them.
+    assert word_speakers(words) == [word.speaker for word in words]
+
+    named, _ = _named_from_replies(runs, block)
+
+    assert named.names == {}
+    assert [mention.reason for mention in named.evidence] == ["ambiguous", "ambiguous"]
+    assert named.says["Alice"] == {3: 2}
+
+
 _TOPICS = ("pricing", "hiring", "travel", "budget", "timing")
 
 
