@@ -31,7 +31,7 @@ from typing import TYPE_CHECKING, Literal, Protocol
 
 import anyio
 import structlog
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, NonNegativeInt
 
 from scribe.errors import AppError, InputValidationError
 from scribe.schema import Word
@@ -460,6 +460,18 @@ class _Reply(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
     picks: list[_Pick]
+
+
+# Strict: a pick_context_chars of true would otherwise be read as 1. Extra keys
+# are ignored, as a pick's engine params also hold its engine's own and its counts.
+class PickedBy(BaseModel):
+    """The model, prompt version and background length a pick records in its engine params."""
+
+    model_config = ConfigDict(extra="ignore", frozen=True, strict=True)
+
+    pick_model: str
+    pick_prompt_version: str
+    pick_context_chars: NonNegativeInt
 
 
 @dataclass(frozen=True)

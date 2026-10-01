@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, NoReturn
 
 import typer
+from pydantic import ValidationError
 
 from scribe import attribution, ensemble, gemini_stt, third_ear
 from scribe.claude_cli import DEFAULT_MAX_BUDGET_USD, ClaudeCliBackend
@@ -58,6 +59,7 @@ from scribe.pick import (
     GUARDED_DROP,
     PICK_PROMPT_VERSION,
     RESTORED_ADD,
+    PickedBy,
     assemble,
     find_spots,
     pick_readings,
@@ -1435,14 +1437,17 @@ def _replayed(path: Path) -> tuple[list[tuple[float, float, str, str, Side]], st
                 f"where its pick_record holds {len(record)}"
             )
         record = [(*row[:4], side) for row, side in zip(record, own, strict=True)]
-    params = picked.engine.params
-    named = (params.get(key) for key in ("pick_model", "pick_prompt_version", "pick_context_chars"))
-    model, version, chars = named
-    if not (isinstance(model, str) and isinstance(version, str) and isinstance(chars, int)):
+    try:
+        by = PickedBy.model_validate(picked.engine.params)
+    except ValidationError as exc:
+        first = exc.errors()[0]
+        key = first["loc"][0]
         raise InputValidationError(
-            f"--sides-from {path} names no pick_model, pick_prompt_version and pick_context_chars"
-        )
-    return record, model, version, chars
+            f"--sides-from {path} names no {key}"
+            if first["type"] == "missing"
+            else f"--sides-from {path} has a malformed {key}: {first['msg']}"
+        ) from exc
+    return record, by.pick_model, by.pick_prompt_version, by.pick_context_chars
 
 
 def _hear(
