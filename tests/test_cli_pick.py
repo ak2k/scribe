@@ -485,11 +485,11 @@ def _ears(
         snapshot.mkdir(parents=True)
         for name in ("config.json", "model.safetensors"):
             (snapshot / name).write_text("{}", encoding="utf-8")
-    said = iter(texts)
+    said, unheard = iter(texts), list[str]()
     versions = {"python": "3.12.13", "transformers": "5.18.0", "torch": "2.14.1"}
     body = {"versions": versions, "device": "mps", "dtype": "bfloat16", "runtime_s": 2.5}
     fake = FakeWorker(
-        lambda _: {**body, "texts": next(said, [])},
+        lambda _: {**body, "texts": next(said, unheard)},
         returncode=returncode,
         stderr=f"{FAILED}out of memory\n",
     )
@@ -529,7 +529,8 @@ def test_audio_flips_a_spot_only_where_both_recognizers_heard_the_reading_set_as
     heard = Transcript.load(out)
     assert heard.text == "the cat sat on the mat"
     params = heard.engine.params
-    assert [row[4] for row in json.loads(str(params["pick_record"]))] == ["transcript", "unsure"]
+    record = cast("list[list[object]]", json.loads(str(params["pick_record"])))
+    assert [row[4] for row in record] == ["transcript", "unsure"]
     assert json.loads(str(params["ear_record"])) == [
         ["reference", ["cat", "cat"], ["transcript", "transcript"]],
         ["unsure", ["bat", "mat"], ["reference", "transcript"]],
@@ -595,3 +596,25 @@ def test_audio_not_the_transcripts_recording_exits_two_asking_no_model(
     assert len(result.stderr.splitlines()) == 1
     assert str(audio) in result.stderr
     assert made == []
+
+
+def test_with_no_spot_to_hear_no_recognizer_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch(monkeypatch)
+    said, _ = _inputs(tmp_path)
+    same = tmp_path / "copy.json"
+    same.write_bytes(said.read_bytes())
+    fake, audio = _ears(tmp_path, monkeypatch)
+
+    result = runner.invoke(app, ["pick", str(said), str(same), "--audio", str(audio)])
+
+    assert result.exit_code == 0, result.output
+    assert fake.calls == []
+    assert result.stderr.splitlines()[1:] == [
+        "scribe: no third ear: there is no spot to hear; the pick's readings stand"
+    ]
+    assert not any(
+        key.startswith("ear_")
+        for key in Transcript.load(tmp_path / "meeting.picked.json").engine.params
+    )

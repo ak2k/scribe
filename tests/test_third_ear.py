@@ -148,7 +148,8 @@ def test_no_flip_goes_against_the_guard_or_the_restore(
 
 def test_guarded_and_restored_spots_are_never_heard() -> None:
     said, heard = _timed("we saw the cat sat on the mat"), _timed("we saw the hat sat on the bat")
-    spots, picked = find_spots(said, heard), ["guarded", "unsure"]
+    spots = find_spots(said, heard)
+    picked: list[Side] = ["guarded", "unsure"]
     text = ("we saw the cat sat on the bat",)
 
     windows = clips(transcript(said), transcript(heard), spots, picked)

@@ -25,7 +25,7 @@ import math
 import random
 import re
 import unicodedata
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from itertools import pairwise
 from typing import TYPE_CHECKING, Literal, Protocol
 
@@ -209,6 +209,13 @@ def _same(first: Sequence[str], second: Sequence[str]) -> bool:
     return list(first) == list(second) or set(first) == set(second) or _respaced(first, second)
 
 
+def alike(
+    first: Sequence[str], second: Sequence[str], before: Sequence[str], after: Sequence[str]
+) -> bool:
+    """Whether two readings between the same matched tokens say the same, as spots compare them."""
+    return _same(_in_context(first, before, after), _in_context(second, before, after))
+
+
 def _respaced(first: Sequence[str], second: Sequence[str]) -> bool:
     """Whether two readings differ only in one word written apart ("everyday", "every day").
 
@@ -340,8 +347,15 @@ def find_spots(transcript: Sequence[Word], reference: Sequence[Word]) -> list[Sp
         where either side holds only fillers other than "like".
 
     """
+    return list(spot_contexts(transcript, reference))
+
+
+def spot_contexts(
+    transcript: Sequence[Word], reference: Sequence[Word]
+) -> dict[Spot, tuple[list[str], list[str]]]:
+    """Find the spots `find_spots` does, each with the matched tokens before and after it."""
     aligned = _Alignment.of(transcript, reference)
-    spots: list[Spot] = []
+    spots: dict[Spot, tuple[list[str], list[str]]] = {}
     for start, stop in aligned.spans():
         spot = Spot(_words(aligned.transcript[start:stop]), _words(aligned.reference[start:stop]))
         said = [word.text for word in transcript[spot.transcript.start : spot.transcript.stop]]
@@ -349,8 +363,8 @@ def find_spots(transcript: Sequence[Word], reference: Sequence[Word]) -> list[Sp
         if _fillers_only(said) or _fillers_only(heard):
             continue
         before, after = aligned.context(start, stop)
-        if not _same(_in_context(said, before, after), _in_context(heard, before, after)):
-            spots.append(spot)
+        if not alike(said, heard, before, after):
+            spots[spot] = (before, after)
     return spots
 
 
@@ -473,6 +487,8 @@ class Picking:
     # words longer or more, fillers and repeats aside.
     picked: tuple[Side, ...]
     chunks: tuple[ChunkPick, ...]
+    # The engine params recorded with the picks, pick_record aside.
+    params: Mapping[str, float | int | bool | str]
 
     @property
     def failed(self) -> tuple[ChunkPick, ...]:
@@ -580,6 +596,23 @@ def surplus(mine: str, theirs: str) -> int:
     Fillers, filler pairs and repeats never decide a spot, so they add none.
     """
     return len(normalized(theirs)) - len(normalized(mine))
+
+
+def guarded(said: Sequence[Word], heard: Sequence[Word], spot: Spot) -> bool:
+    """Whether the reference's reading at `spot` is GUARDED_DROP or more spoken words shorter."""
+    dropped = _spoken_count(said, spot.transcript) - _spoken_count(heard, spot.reference)
+    return dropped >= GUARDED_DROP
+
+
+def restored(said: Sequence[Word], heard: Sequence[Word], spot: Spot) -> bool:
+    """Whether the reference's reading at `spot` is RESTORED_ADD or more words longer.
+
+    Counted as spots compare readings, and it must hold more spoken words too.
+    """
+    longer = _spoken_count(heard, spot.reference) > _spoken_count(said, spot.transcript)
+    mine = _joined(said[spot.transcript.start : spot.transcript.stop])
+    theirs = _joined(heard[spot.reference.start : spot.reference.stop])
+    return longer and surplus(mine, theirs) >= RESTORED_ADD
 
 
 def _target(words: Sequence[Word], start: int, end: int, marks: dict[int, tuple[int, str]]) -> str:
@@ -760,19 +793,13 @@ def pick_readings(
         for number in ids:
             side = _side(labels[number], reference_is_a=orders[number - 1])
             spot = spots[number - 1]
-            dropped = _spoken_count(said, spot.transcript) - _spoken_count(heard, spot.reference)
-            if side == "reference" and dropped >= GUARDED_DROP:
+            if side == "reference" and guarded(said, heard, spot):
                 side = "guarded"
-            elif (
-                side != "reference"
-                and dropped < 0
-                and surplus(*readings[number - 1]) >= RESTORED_ADD
-            ):
+            elif side != "reference" and restored(said, heard, spot):
                 side = "restored"
             picked[number - 1] = side
         chunks.append(ChunkPick(index, ids))
 
-    picking = Picking(transcript, tuple(spots), tuple(picked), tuple(chunks))
     params = _params(
         reference,
         picked,
@@ -781,7 +808,8 @@ def pick_readings(
         version=PICK_PROMPT_VERSION,
         context_chars=len((context or "").strip()),
     )
-    return replace(picking, transcript=assemble(transcript, reference, spots, picked, params))
+    delivered = assemble(transcript, reference, spots, picked, params)
+    return Picking(delivered, tuple(spots), tuple(picked), tuple(chunks), params)
 
 
 def replay_readings(
@@ -831,7 +859,7 @@ def replay_readings(
         reference, sides, (), model=model, version=version, context_chars=context_chars
     )
     delivered = assemble(transcript, reference, spots, sides, params)
-    return Picking(delivered, tuple(spots), tuple(sides), ())
+    return Picking(delivered, tuple(spots), tuple(sides), (), params)
 
 
 def _spots(transcript: Transcript, reference: Transcript) -> list[Spot]:

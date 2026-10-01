@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING, NoReturn
 
 import typer
 
-from scribe import attribution, ensemble, gemini_stt
+from scribe import attribution, ensemble, gemini_stt, third_ear
 from scribe.claude_cli import DEFAULT_MAX_BUDGET_USD, ClaudeCliBackend
 from scribe.cleanup import (
     CLEANUP_PROMPT_VERSION,
@@ -46,7 +46,8 @@ from scribe.disputes import (
     render_disputes,
     summarize,
 )
-from scribe.errors import AppError, ExternalServiceError, InputValidationError
+from scribe.ear import LocalEars
+from scribe.errors import AppError, EarError, ExternalServiceError, InputValidationError
 from scribe.fidelity import check_fidelity
 from scribe.gaps import check_gaps, clock, format_gap
 from scribe.log import configure
@@ -57,6 +58,7 @@ from scribe.pick import (
     GUARDED_DROP,
     PICK_PROMPT_VERSION,
     RESTORED_ADD,
+    assemble,
     find_spots,
     pick_readings,
     replay_readings,
@@ -1415,6 +1417,28 @@ def _replayed(path: Path) -> tuple[list[tuple[float, float, str, str, Side]], st
     return record, model, version, chars
 
 
+def _hear(
+    transcript: Transcript, reference: Transcript, picking: Picking, audio: Path
+) -> tuple[Picking, str]:
+    """Deliver the sides rule ear-1 makes of the pick's, or on any failure its own; say which."""
+    windows = third_ear.clips(transcript, reference, picking.spots, picking.picked)
+    if not windows:
+        return picking, "scribe: no third ear: there is no spot to hear; the pick's readings stand"
+    try:
+        heard = LocalEars().hear(audio, windows)
+    # OSError too: the run's temporary directory can fail to be made.
+    except (EarError, OSError) as exc:
+        return picking, f"scribe: no third ear: {exc}; the pick's readings stand"
+    sides, params = third_ear.vote(transcript, reference, picking.spots, picking.picked, heard)
+    delivered = assemble(transcript, reference, picking.spots, sides, {**picking.params, **params})
+    names, seconds = ", ".join(ear.recognizer.name for ear in heard), params["ear_seconds"]
+    return dataclasses.replace(picking, transcript=delivered), (
+        f"scribe: third ear heard {len(windows)} spots with {names} in {seconds:g} s; "
+        f"{params['ear_to_reference']} flipped to the reference, "
+        f"{params['ear_to_transcript']} to the transcript"
+    )
+
+
 @app.command(name="pick")
 def pick_command(
     transcript_path: Path = typer.Argument(
@@ -1437,6 +1461,12 @@ def pick_command(
         "--sides-from",
         metavar="PICKED",
         help="Take each spot's side from PICKED, a pick of the same two inputs; ask no model.",
+    ),
+    audio: Path | None = typer.Option(
+        None,
+        "--audio",
+        metavar="AUDIO",
+        help="TRANSCRIPT's recording, for two local recognizers to hear each spot in.",
     ),
 ) -> None:
     """Pick, where two transcripts of one recording disagree, which reading was said.
@@ -1468,10 +1498,16 @@ def pick_command(
     --sides-from replays the sides PICKED records, as they stand, with no call;
     --model and --context are then unused.
 
+    --audio has two recognizers, run on this machine, hear each spot in its
+    own clip of AUDIO. A spot takes the reading the pick set aside only where
+    both heard that one, and never against the guard or the restore; a spot
+    guarded or restored is not heard. Should they fail, one line says so and
+    the pick's readings stand.
+
     Both inputs' word starts must not decrease. Exit 2 is a bad input, inputs
     that record different audio sha256, a TRANSCRIPT picked before, a PICKED
-    whose spots are not these inputs', an unwritable output, or no usable
-    claude CLI, found before any call. Exit 4
+    whose spots are not these inputs', an AUDIO not TRANSCRIPT's recording, an
+    unwritable output, or no usable claude CLI, found before any call. Exit 4
     means every call failed; the result is written anyway, with TRANSCRIPT's
     words.
     """
@@ -1491,10 +1527,11 @@ def pick_command(
             )
         destination = sibling(transcript_path, ".picked.json") if out is None else out
         inputs = {"TRANSCRIPT": transcript_path, "REFERENCE": reference_path}
-        plan = plan_outputs(
-            {"--out": destination},
-            inputs if sides_from is None else inputs | {"PICKED": sides_from},
-        )
+        if sides_from is not None:
+            inputs["PICKED"] = sides_from
+        if audio is not None:
+            inputs["AUDIO"] = _source_audio(transcript.source, audio)
+        plan = plan_outputs({"--out": destination}, inputs)
         # Before the calls, which are paid for.
         prove_writable(plan)
         if sides_from is None:
@@ -1510,6 +1547,9 @@ def pick_command(
                 )
             except InputValidationError as exc:
                 raise InputValidationError(f"--sides-from {sides_from}: {exc}") from exc
+        hearing = None
+        if audio is not None:
+            picking, hearing = _hear(transcript, reference, picking, audio)
         try:
             picking.transcript.dump(plan["--out"])
         except (OSError, ValueError) as exc:
@@ -1520,6 +1560,8 @@ def pick_command(
         _fail(exc)
 
     _report_pick(picking, model, version, sides_from)
+    if hearing is not None:
+        typer.echo(hearing, err=True)
     typer.echo(str(plan["--out"]))
     if picking.chunks and len(picking.failed) == len(picking.chunks):
         raise typer.Exit(_EXIT_NO_CHUNK)
