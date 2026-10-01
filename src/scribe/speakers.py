@@ -444,10 +444,22 @@ def _unusable(
     return next((reason for failed, reason in checks if failed), None)
 
 
-def _claims(text: str, chunk: int, start: int, end: int) -> tuple[Claim, ...] | None:
+def _split_reply(text: str, texts: Sequence[str]) -> tuple[str, str]:
+    """A reply up to the `</out>` closing exactly the chunk's words, and what follows that.
+
+    A names line may quote `</out>`, which the greedy match would take for the
+    block's end. Where no `</out>` closes the chunk's words, the reply is whole
+    and nothing follows it.
+    """
+    for found in re.finditer("</out>", text):
+        if _same_words(texts, parse_reply(text[: found.end()])):
+            return text[: found.end()], text[found.end() :]
+    return text, ""
+
+
+def _claims(after: str, chunk: int, start: int, end: int) -> tuple[Claim, ...] | None:
     """The lines of the names block after a usable reply's <out> block; None without one."""
-    out = _OUT.search(text)
-    found = None if out is None else _NAMES_BLOCK.search(text, out.end())
+    found = _NAMES_BLOCK.search(after)
     if found is None:
         return None
     claims: list[Claim] = []
@@ -520,9 +532,14 @@ def relabel(
                 _warn_failed(index, reason)
             chunks.append(ChunkOutcome(index, start, end, "failed", reason=reason))
             continue
-        reply = parse_reply(answer.text)
+        kept, after = (
+            _split_reply(answer.text, texts[start:end]) if attendees else (answer.text, "")
+        )
+        reply = parse_reply(kept)
         labels, aligned = align_labels(texts[start:end], ids[start:end], reply, allowed)
-        reason = _unusable(answer, texts[start:end], reply, aligned)
+        reason = _unusable(
+            answer.model_copy(update={"text": kept}), texts[start:end], reply, aligned
+        )
         if reason is not None:
             _warn_failed(index, reason, stop_reason=answer.stop_reason)
             chunks.append(
@@ -539,7 +556,7 @@ def relabel(
             )
             continue
         out[start:end] = labels
-        named = _claims(answer.text, index, start, end) if attendees else ()
+        named = _claims(after, index, start, end) if attendees else ()
         if named is None:
             missing.append(index)
         else:
