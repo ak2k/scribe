@@ -44,9 +44,9 @@ EXCLUDE_NEWER = "2026-09-24T00:00:00Z"
 DEFAULT_TIMEOUT_S = 3600.0
 DIMENSION = 256
 # Where the worker's Hugging Face client looks for the token the gated model
-# needs. No other child is given these; a token saved on disk by `hf auth login`
-# stays readable to any of them.
-_TOKEN = ("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN", "HF_TOKEN_PATH")
+# needs. Only a worker loading a gated model is given these; a token saved on
+# disk by `hf auth login` stays readable to any child.
+TOKEN_NAMES = ("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN", "HF_TOKEN_PATH")
 # How the worker marks the one line that names its own failure.
 FAILED = "scribe-diarize: "
 _RATE = "16000"
@@ -244,7 +244,7 @@ class PyannoteDiarizer:
             with resources.as_file(resources.files("scribe") / "diarize_worker.py") as worker:
                 # -P keeps the worker's own directory, which holds scribe's modules, off its path.
                 argv = [*pins, "python", "-P", str(worker), str(request), str(out)]
-                completed = self._spawn(argv, "the diarizer", child_env(*_TOKEN))
+                completed = self._spawn(argv, "the diarizer", child_env(*TOKEN_NAMES))
             try:
                 raw = out.read_bytes()
             except OSError:

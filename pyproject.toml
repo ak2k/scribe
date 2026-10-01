@@ -110,9 +110,9 @@ docstring-code-format = true
 # --- basedpyright: types ---
 [tool.basedpyright]
 include = ["src", "tests"]
-# Runs in its own uvx interpreter beside torch and pyannote, which this project
-# does not install, so every import in it would be unresolved here.
-exclude = ["src/scribe/diarize_worker.py"]
+# Each runs in its own uvx interpreter beside torch, which this project does not
+# install, so every import in it would be unresolved here.
+exclude = ["src/scribe/diarize_worker.py", "src/scribe/ear_worker.py"]
 pythonVersion = "3.12"
 typeCheckingMode = "strict"
 reportMissingTypeStubs = "warning"
@@ -144,8 +144,8 @@ markers = [
 [tool.coverage.run]
 source = ["src"]
 branch = true
-# Runs only in its own uvx interpreter, never under the test suite's.
-omit = ["src/scribe/diarize_worker.py"]
+# Each runs only in its own uvx interpreter, never under the test suite's.
+omit = ["src/scribe/diarize_worker.py", "src/scribe/ear_worker.py"]
 
 [tool.coverage.report]
 exclude_also = [

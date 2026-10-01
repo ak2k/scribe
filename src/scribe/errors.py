@@ -34,5 +34,9 @@ class ToolMissingError(ExternalServiceError):
     """Raised when an external program a step runs is not on PATH."""
 
 
+class EarError(AppError):
+    """Raised when the local recognizers cannot run here, or a run of one fails."""
+
+
 class SpendCapError(AppError):
     """Raised when a paid call could take a run's spending past its cap."""
