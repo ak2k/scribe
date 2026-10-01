@@ -1404,9 +1404,20 @@ def _report_pick(
 
 
 def _replayed(path: Path) -> tuple[list[tuple[float, float, str, str, Side]], str, str, int]:
-    """Read the spots and sides PICKED records, and the model, prompt and background behind them."""
+    """Read the spots and sides PICKED records, and the model, prompt and background behind them.
+
+    Each side is the pick's own: where the ears flipped a spot, not the one delivered.
+    """
     picked = Transcript.load(path)
-    record = pick_record(picked, path)
+    record: list[tuple[float, float, str, str, Side]] = pick_record(picked, path)
+    own = third_ear.own_sides(picked, path)
+    if own is not None:
+        if len(own) != len(record):
+            raise InputValidationError(
+                f"--sides-from {path}: its ear_record holds {len(own)} spots "
+                f"where its pick_record holds {len(record)}"
+            )
+        record = [(*row[:4], side) for row, side in zip(record, own, strict=True)]
     params = picked.engine.params
     named = (params.get(key) for key in ("pick_model", "pick_prompt_version", "pick_context_chars"))
     model, version, chars = named
@@ -1460,7 +1471,8 @@ def pick_command(
         None,
         "--sides-from",
         metavar="PICKED",
-        help="Take each spot's side from PICKED, a pick of the same two inputs; ask no model.",
+        help="Take each spot's side as the pick chose it in PICKED, a pick of the same two "
+        "inputs; ask no model.",
     ),
     audio: Path | None = typer.Option(
         None,
@@ -1495,7 +1507,8 @@ def pick_command(
     The result records each spot and its pick in its engine params, and has
     no turns: run `scribe turns` on it next.
 
-    --sides-from replays the sides PICKED records, as they stand, with no call;
+    --sides-from replays the sides the pick chose in PICKED, as they stand,
+    with no call; where its ears flipped a spot, only --audio flips it again.
     --model and --context are then unused.
 
     --audio has two recognizers, run on this machine, hear each spot in its

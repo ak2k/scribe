@@ -13,15 +13,19 @@ import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
-from scribe.pick import alike, guarded, normalized, restored, spot_contexts
+from pydantic import ConfigDict, Json, TypeAdapter, ValidationError
+
+from scribe.errors import InputValidationError
+from scribe.pick import Side, alike, guarded, normalized, restored, spot_contexts
 from scribe.schema import Word
 from scribe.vote import align_words, norm_tokens
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+    from pathlib import Path
 
     from scribe.ear import Heard
-    from scribe.pick import Side, Spot
+    from scribe.pick import Spot
     from scribe.schema import Transcript
 
 RULE = "ear-1"
@@ -34,6 +38,12 @@ _EARS = 2
 _UNHEARD = frozenset({"guarded", "restored"})
 
 Verdict = Literal["transcript", "reference", "third"]
+
+# Strict: a side or verdict misspelled, or a slot that is not text, is drift.
+_RECORD = TypeAdapter(
+    Json[list[tuple[Side, list[str | None], list[Verdict | None]]]],
+    config=ConfigDict(strict=True),
+)
 
 
 @dataclass(frozen=True)
@@ -195,3 +205,23 @@ def vote(
         "ear_to_transcript": flips.count("transcript"),
         "ear_record": json.dumps(record),
     }
+
+
+def own_sides(transcript: Transcript, path: Path) -> list[Side] | None:
+    """Return the side the pick gave each spot, from `transcript`'s ear_record, read from `path`.
+
+    Its pick_record holds the side delivered, which the ears may have
+    flipped. None when the ears did not run.
+    """
+    recorded = transcript.engine.params.get("ear_record")
+    if recorded is None:
+        return None
+    try:
+        rows = _RECORD.validate_python(recorded)
+    except ValidationError as exc:
+        first = exc.errors()[0]
+        row = f" row {first['loc'][0]}" if first["loc"] else ""
+        raise InputValidationError(
+            f"{path} has a malformed ear_record{row}: {first['msg']}"
+        ) from exc
+    return [side for side, _, _ in rows]
