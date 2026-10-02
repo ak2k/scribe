@@ -272,16 +272,16 @@ def test_guarded_and_restored_spots_are_never_heard() -> None:
 @pytest.mark.parametrize(
     ("said", "heard", "side", "background", "delivered"),
     [
-        # The pick took the reference's "Keigo", a name in its background; both ears heard "Kago".
-        ("Kago", "Keigo", "reference", "People at this meeting: Adam, Keigo.", "reference"),
-        ("Kago", "Keigo", "reference", None, "transcript"),
+        # The pick took the reference's "Dmitri", a name in its background; both ears heard "Demitri".
+        ("Demitri", "Dmitri", "reference", "People at this meeting: Alice, Dmitri.", "reference"),
+        ("Demitri", "Dmitri", "reference", None, "transcript"),
         # Toward a word of the background is not away from one.
-        ("Kago", "Keigo", "reference", "Present: Kago", "transcript"),
+        ("Demitri", "Dmitri", "reference", "Present: Demitri", "transcript"),
         # Unsure keeps the transcript's reading.
-        ("Keigo,", "Kago", "unsure", "With Keigo", "unsure"),
+        ("Dmitri,", "Demitri", "unsure", "With Dmitri", "unsure"),
         # Only a capitalized word counts, and only as written.
-        ("these", "this", "reference", "People at this meeting: Keigo", "transcript"),
-        ("Kago", "keigo", "reference", "People at this meeting: Keigo", "transcript"),
+        ("these", "this", "reference", "People at this meeting: Dmitri", "transcript"),
+        ("Demitri", "dmitri", "reference", "People at this meeting: Dmitri", "transcript"),
     ],
 )
 def test_no_flip_goes_away_from_a_reading_holding_a_capitalized_background_word_the_other_lacks(
