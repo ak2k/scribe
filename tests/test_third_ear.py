@@ -92,6 +92,23 @@ def test_with_no_word_matched_beside_the_spot_its_slot_runs_to_the_clip_edge() -
     assert found == Slot(("zulu",), ("we", "saw", "the"), ("sat", "down"))
 
 
+def test_a_word_beside_the_spot_heard_in_its_clip_is_never_its_slot() -> None:
+    # The first "hat" starts inside the clip, (5.0, 15.5), and ends well past it.
+    said = _spanned(("we", 0, 0.5), ("hat", 8, 24), ("cat", 10, 10.5), ("omega", 12, 12.5))
+    heard = _spanned(("we", 0, 0.5), ("hat", 8, 24), ("hat", 10, 10.5), ("omega", 12, 12.5))
+    spots = find_spots(said, heard)
+    text = ("hat omega",)
+
+    sides, params = vote(
+        transcript(said), transcript(heard), spots, ["transcript"], _heard(text, text)
+    )
+
+    assert spots == [Spot(range(2, 3), range(2, 3))]
+    assert sides == ("transcript",)
+    assert json.loads(str(params["ear_record"])) == [["transcript", ["", ""], ["third", "third"]]]
+    assert slot(said, spots[0], (5.0, 15.5), "hat omega") == Slot((), (), ())
+
+
 @pytest.mark.parametrize("text", ["", "  ", "..."])
 def test_an_empty_text_gives_no_slot(text: str) -> None:
     assert slot(_timed("we saw the cat"), Spot(range(3, 4), range(3, 4)), (0, 9), text) is None
