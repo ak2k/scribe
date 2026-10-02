@@ -272,7 +272,7 @@ def test_guarded_and_restored_spots_are_never_heard() -> None:
 @pytest.mark.parametrize(
     ("said", "heard", "side", "background", "delivered"),
     [
-        # The pick took the reference's "Dmitri", a name in its background; both ears heard "Demitri".
+        # The pick took the reference's "Dmitri", a background name; both ears heard "Demitri".
         ("Demitri", "Dmitri", "reference", "People at this meeting: Alice, Dmitri.", "reference"),
         ("Demitri", "Dmitri", "reference", None, "transcript"),
         # Toward a word of the background is not away from one.
