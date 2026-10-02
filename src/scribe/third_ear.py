@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Literal
 from pydantic import ConfigDict, Json, TypeAdapter, ValidationError
 
 from scribe.errors import InputValidationError
-from scribe.pick import Side, alike, guarded, normalized, restored, spot_contexts
+from scribe.pick import Side, alike, guarded, restored, spot_contexts
 from scribe.schema import Word
 from scribe.vote import align_words, norm_tokens
 
@@ -118,12 +118,14 @@ def verdict(
     names neither.
     """
     frames = ((slot.left, slot.right), ((), slot.right), (slot.left, ()), ((), ()))
-    tokens = normalized(" ".join(slot.words))
+    tokens = norm_tokens(" ".join(slot.words))
 
     def names(reading: Sequence[str]) -> bool:
         # Such a reading repeats its context, so a slot of no word, of
         # fillers, or of a word beside it doubled collapses into it too.
-        if alike((), reading, *context) and tokens != normalized(" ".join(reading)):
+        # Fillers count here: "like" alone is such a reading, and with
+        # fillers dropped an empty slot would equal it.
+        if alike((), reading, *context) and tokens != norm_tokens(" ".join(reading)):
             return False
         return any(alike(slot.words, [*left, *reading, *right], *context) for left, right in frames)
 
