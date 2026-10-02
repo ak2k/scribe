@@ -35,6 +35,7 @@ class FakeSpeakerBackend:
     """Answers each chunk with `reply(target)` inside <out> tags, from any thread.
 
     With `wrap=False` the reply is returned as is, <out> tags and all left to it.
+    A `trailer` answer follows the reply on a new line, as a names block would.
     """
 
     name = "fake-backend"
@@ -47,6 +48,7 @@ class FakeSpeakerBackend:
         fail_when: Callable[[str], bool] | None = None,
         fail_with: Callable[[], BaseException] = service_error,
         wrap: bool = True,
+        trailer: Callable[[str], str] | None = None,
         delay_s: float = 0.0,
         stop_reason: str = "end_turn",
     ) -> None:
@@ -55,6 +57,7 @@ class FakeSpeakerBackend:
         self._fail_when = fail_when
         self._fail_with = fail_with
         self._wrap = wrap
+        self._trailer = trailer
         self._delay_s = delay_s
         self._stop_reason = stop_reason
         self._lock = threading.Lock()
@@ -76,8 +79,12 @@ class FakeSpeakerBackend:
             if self._fail_when is not None and self._fail_when(target):
                 raise self._fail_with()
             text = self._reply(target)
+            if self._wrap:
+                text = f"<out>\n{text}\n</out>"
+            if self._trailer is not None:
+                text += "\n" + self._trailer(target)
             return Completion(
-                text=f"<out>\n{text}\n</out>" if self._wrap else text,
+                text=text,
                 model=self.model,
                 stop_reason=self._stop_reason,
             )

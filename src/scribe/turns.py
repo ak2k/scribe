@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING
 from scribe.schema import Turn
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Iterable, Mapping, Sequence
 
     from scribe.schema import Word
 
@@ -50,7 +50,8 @@ def _is_micro(turn: _RawTurn, min_seconds: float, min_words: int) -> bool:
 _SENTENCE_ENDS = (".", "?", "!")
 
 
-def _ends_sentence(word: Word) -> bool:
+def ends_sentence(word: Word) -> bool:
+    """Whether a word closes a sentence, by its punctuation."""
     return word.text.rstrip().endswith(_SENTENCE_ENDS)
 
 
@@ -80,7 +81,7 @@ def _merge_flickers_once(
             and index + 1 < len(turns)
             and _is_micro(current, min_seconds, min_words)
             and kept[-1].speaker_id == turns[index + 1].speaker_id
-            and not _ends_sentence(kept[-1].words[-1])
+            and not ends_sentence(kept[-1].words[-1])
         ):
             # The merged turn replaces the previous one in place, so the next
             # micro-turn is measured against the merged result, not the original.
@@ -116,7 +117,7 @@ def _snap_switches(
     last words never change speaker.
     """
     snapped = list(speakers)
-    ends = {index for index, word in enumerate(words) if _ends_sentence(word)}
+    ends = {index for index, word in enumerate(words) if ends_sentence(word)}
     switch = 1
     while switch < len(snapped):
         before, after = snapped[switch - 1], snapped[switch]
@@ -148,8 +149,8 @@ def _snap_switches(
 UNATTRIBUTED = "Speaker ?"
 
 
-def _labels(turns: Sequence[_RawTurn]) -> dict[int | None, str]:
-    """Rank surviving speakers by first appearance.
+def rank_labels(speakers: Iterable[int | None]) -> dict[int | None, str]:
+    """Label each id "Speaker N" by its rank of first appearance.
 
     The API's diarization integers are not documented as 0- or 1-based and are
     not ordered by appearance, so the rank is the only stable display label.
@@ -157,7 +158,7 @@ def _labels(turns: Sequence[_RawTurn]) -> dict[int | None, str]:
     unranked: no engine said who spoke them, and a rank would pass them off
     as one more person.
     """
-    order = dict.fromkeys(turn.speaker_id for turn in turns)
+    order = dict.fromkeys(speakers)
     if list(order) == [None]:
         return {None: "Speaker 1"}
     ranked = (speaker_id for speaker_id in order if speaker_id is not None)
@@ -204,11 +205,17 @@ def word_speakers(
     return speakers
 
 
-def turns_from_speakers(words: Sequence[Word], speakers: Sequence[int | None]) -> list[Turn]:
+def turns_from_speakers(
+    words: Sequence[Word],
+    speakers: Sequence[int | None],
+    names: Mapping[int, str] | None = None,
+) -> list[Turn]:
     """Group words into labeled turns by the speaker id given for each word.
 
     Unlike `build_turns` this merges and snaps nothing: every switch in
-    `speakers` becomes a turn boundary.
+    `speakers` becomes a turn boundary. An id in `names` is labeled with its
+    name; every other id keeps its rank among all ids, so naming one speaker
+    renumbers no other.
 
     Raises:
         ValueError: `speakers` does not hold exactly one id per word.
@@ -218,7 +225,8 @@ def turns_from_speakers(words: Sequence[Word], speakers: Sequence[int | None]) -
         _RawTurn(speaker_id, tuple(word for word, _ in run))
         for speaker_id, run in groupby(zip(words, speakers, strict=True), key=lambda pair: pair[1])
     ]
-    labels = _labels(raw)
+    labels = rank_labels(turn.speaker_id for turn in raw)
+    labels.update((names or {}).items())
     return [
         Turn(
             speaker=labels[turn.speaker_id],

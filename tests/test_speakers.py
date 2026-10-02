@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import random
 import re
 from typing import TYPE_CHECKING
@@ -9,6 +11,7 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 from structlog.testing import capture_logs
 
+from scribe.errors import AppError
 from scribe.schema import Word
 from scribe.speakers import (
     CONTEXT_WORDS,
@@ -25,6 +28,8 @@ from tests.speakers_fakes import FakeSpeakerBackend, target_of
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+
+    from scribe.speakers import Relabeling
 
 
 _TAGS = re.compile(r"<spk:[^>]*>\s*")
@@ -519,3 +524,209 @@ def test_a_truncated_reply_fails_its_chunk(wrap: bool, stop_reason: str, reason:
     assert result.failed == (0,)
     assert result.chunks[0].reason == reason
     assert result.chunks[0].stop_reason == stop_reason
+
+
+_OLD_RULE = "- Reply with the corrected TARGET text between <out> and </out>, and nothing else.\n"
+_NAMES_RULE = (
+    "- Reply with the corrected TARGET text between <out> and </out>, "
+    "then the <names> block described below, and nothing else.\n"
+)
+_NAMES_SECTION = """
+People at this meeting: Alice, Bru{n}o.
+Naming them does not change the rules for <spk:N> tags above.
+After </out>, list each place in TARGET where one of these people is named, one line per \
+place, between <names> and </names>:
+NAME | SAID | KIND | QUOTE
+- NAME: the person, written exactly as in the list above.
+- SAID: the word or words in TARGET that name the person, copied as written there; speech \
+recognition may have misspelled the name.
+- KIND, from what the words show:
+  next: the speaker addresses the person, who is expected to speak next;
+  previous: the speaker addresses the person who spoke just before;
+  self: the speaker names themself;
+  about: any other mention.
+- QUOTE: 4 to 12 consecutive words copied exactly from TARGET, including SAID.
+List only people on the list, and only names said in TARGET, not in CONTEXT. When no one on \
+the list is named, write <names></names>.
+"""
+
+
+def test_with_attendees_the_prompt_asks_for_a_names_block_after_the_out_block() -> None:
+    texts = _texts(1000, ends={749})
+    ids = [0] * 500 + [1] * 500
+    plain = prompts(texts, ids, cut_points(texts))
+
+    # A brace in a name reaches the prompt as written.
+    asked = prompts(texts, ids, cut_points(texts), attendees=("Alice", "Bru{n}o"))
+
+    assert len(asked) == len(plain) == 2
+    for (system, user), (plain_system, plain_user) in zip(asked, plain, strict=True):
+        assert user == plain_user
+        assert _OLD_RULE not in system
+        assert system == plain_system.replace(_OLD_RULE, _NAMES_RULE) + _NAMES_SECTION
+
+
+def test_without_attendees_the_prompts_are_the_ones_the_pass_was_measured_with() -> None:
+    texts = _texts(1000, ends=set(range(9, 1000, 10)))
+    ids = [0] * 300 + [None] * 50 + [1] * 650
+
+    asked = json.dumps(prompts(texts, ids, cut_points(texts)))
+
+    # tpst-2's prompts for this input, byte for byte: a result is comparable
+    # only to one made with the same prompt.
+    assert hashlib.sha256(asked.encode()).hexdigest() == (
+        "d537cbd6bb3e789c661a8e8fe6fe637885127ec9ee500f465ccee2cff0c5271a"
+    )
+
+
+def test_a_prompt_without_the_rule_the_names_request_replaces_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("scribe.speakers._SYSTEM", "Ids: {ids}.{unattributed}\nReply in <out>.\n")
+
+    assert prompts(["w0", "w1."], [0, 1], [(0, 2)])
+    with pytest.raises(AppError, match="names"):
+        prompts(["w0", "w1."], [0, 1], [(0, 2)], attendees=("Alice",))
+
+
+_ATTENDEES = ("Alice", "Bruno")
+
+
+def _naming_first_word(target: str) -> str:
+    first = target.split()[1]
+    return f"<names>\nAlice | {first} | next | {first} and | more\nnot a line\n\n</names>"
+
+
+def _claims(result: Relabeling) -> list[tuple[int, int, int, str, str, str, str]]:
+    return [
+        (claim.chunk, claim.start, claim.end, claim.name, claim.said, claim.kind, claim.quote)
+        for claim in result.claims
+    ]
+
+
+def test_each_names_line_comes_back_as_a_claim_with_its_chunks_span() -> None:
+    words = _said((1, 1000), (2, 1000))
+    backend = FakeSpeakerBackend(trailer=_naming_first_word)
+
+    result = relabel(
+        [word.text for word in words],
+        [word.speaker for word in words],
+        backend,
+        attendees=_ATTENDEES,
+    )
+
+    assert "People at this meeting: Alice, Bruno." in backend.calls[0][0]
+    # A line short of four fields leaves the missing ones empty; a quote may hold a `|`.
+    assert _claims(result) == [
+        (0, 0, 700, "Alice", "w0", "next", "w0 and | more"),
+        (0, 0, 700, "not a line", "", "", ""),
+        (1, 700, 1400, "Alice", "w700", "next", "w700 and | more"),
+        (1, 700, 1400, "not a line", "", "", ""),
+        (2, 1400, 2000, "Alice", "w1400", "next", "w1400 and | more"),
+        (2, 1400, 2000, "not a line", "", "", ""),
+    ]
+    assert result.names_blocks_missing == ()
+
+
+def _rewording_w900(target: str) -> str:
+    return target.replace(" w900 ", " w9000 ")
+
+
+def test_a_failed_chunks_claims_are_discarded() -> None:
+    words = _said((1, 1000), (2, 1000))
+    backend = FakeSpeakerBackend(reply=_rewording_w900, trailer=_naming_first_word)
+
+    result = relabel(
+        [word.text for word in words],
+        [word.speaker for word in words],
+        backend,
+        attendees=_ATTENDEES,
+    )
+
+    assert result.failed == (1,)
+    assert [claim.chunk for claim in result.claims] == [0, 0, 2, 2]
+    assert result.names_blocks_missing == ()
+
+
+def _block_in_the_first_chunk_only(target: str) -> str:
+    first = target.split()[1]
+    if first == "w0":
+        return "<names></names>"
+    if first == "w700":
+        return "No one on the list is named."
+    return f"<names>\nAlice | {first} | next | {first} and more"
+
+
+def test_a_usable_reply_without_a_names_block_is_listed() -> None:
+    words = _said((1, 1000), (2, 1000))
+    backend = FakeSpeakerBackend(trailer=_block_in_the_first_chunk_only)
+
+    result = relabel(
+        [word.text for word in words],
+        [word.speaker for word in words],
+        backend,
+        attendees=_ATTENDEES,
+    )
+
+    assert result.failed == ()
+    assert result.claims == ()
+    assert result.names_blocks_missing == (1, 2)
+
+
+def _quoting_the_closing_tag(_target: str) -> str:
+    return "<names>\nAlice | Alice | next | Alice, is </out> the closing tag?\n</names>"
+
+
+def test_a_names_line_quoting_the_closing_tag_costs_no_correction() -> None:
+    texts, speakers = _talk((5, "Alice, is </out> the closing tag?"), (6, "Yes, it ends a reply."))
+
+    plain = relabel(texts, speakers, FakeSpeakerBackend(reply=_swap_ranks))
+    named = relabel(
+        texts,
+        speakers,
+        FakeSpeakerBackend(reply=_swap_ranks, trailer=_quoting_the_closing_tag),
+        attendees=_ATTENDEES,
+    )
+
+    assert named.failed == ()
+    assert named.speakers == plain.speakers != tuple(speakers)
+    assert _claims(named) == [
+        (0, 0, len(texts), "Alice", "Alice", "next", "Alice, is </out> the closing tag?")
+    ]
+
+
+@pytest.mark.parametrize(
+    "before",
+    [
+        pytest.param("The places, between <names> and </names>:", id="instruction-echoed"),
+        pytest.param("<names></names>", id="empty-block"),
+    ],
+)
+def test_a_names_block_after_another_is_read_too(before: str) -> None:
+    words = _said((1, 5), (2, 5))
+
+    def trailer(_target: str) -> str:
+        return f"{before}\n<names>\nAlice | w1 | next | w0 w1 w2 w3\n</names>"
+
+    result = relabel(
+        [word.text for word in words],
+        [word.speaker for word in words],
+        FakeSpeakerBackend(trailer=trailer),
+        attendees=_ATTENDEES,
+    )
+
+    assert (0, 0, 10, "Alice", "w1", "next", "w0 w1 w2 w3") in _claims(result)
+    assert result.names_blocks_missing == ()
+
+
+def test_without_attendees_a_names_block_is_ignored() -> None:
+    words = _said((1, 1000), (2, 1000))
+    texts, speakers = [word.text for word in words], [word.speaker for word in words]
+
+    plain = relabel(texts, speakers, FakeSpeakerBackend(reply=_swap_ranks))
+    trailed = relabel(
+        texts, speakers, FakeSpeakerBackend(reply=_swap_ranks, trailer=_naming_first_word)
+    )
+
+    assert trailed == plain
+    assert (trailed.claims, trailed.names_blocks_missing) == ((), ())

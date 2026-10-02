@@ -22,6 +22,7 @@ import typer
 from pydantic import ValidationError
 
 from scribe import attribution, ensemble, gemini_stt, third_ear
+from scribe.attendees import name_speakers, parse_attendees
 from scribe.claude_cli import DEFAULT_MAX_BUDGET_USD, ClaudeCliBackend
 from scribe.cleanup import (
     CLEANUP_PROMPT_VERSION,
@@ -68,6 +69,7 @@ from scribe.pick import (
 from scribe.schema import Engine, Source, Transcript, from_xai_response
 from scribe.speakers import (
     DEFAULT_SPEAKER_MODEL,
+    NAMES_PROMPT_VERSION,
     SPEAKER_PROMPT_VERSION,
     needs_relabeling,
     relabel,
@@ -76,6 +78,7 @@ from scribe.turns import (
     DEFAULT_MIN_TURN_SECONDS,
     DEFAULT_MIN_TURN_WORDS,
     DEFAULT_SNAP_WORDS,
+    rank_labels,
     turns_from_speakers,
     word_speakers,
 )
@@ -93,8 +96,9 @@ from scribe.xai_stt import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Generator, Sequence
+    from collections.abc import Generator, Mapping, Sequence
 
+    from scribe.attendees import SpeakerNames
     from scribe.attribution import Naming
     from scribe.cleanup import CleanResult, MalformedCause, NumberDiff
     from scribe.coverage import Fill
@@ -102,6 +106,7 @@ if TYPE_CHECKING:
     from scribe.fidelity import Fidelity
     from scribe.outputs import OutputPlan
     from scribe.pick import Picking, Side
+    from scribe.schema import Word
     from scribe.speakers import Relabeling
 
 # Enough of a stderr line to act on without pasting a whole transcript into it.
@@ -631,8 +636,14 @@ def _fingerprint(path: Path) -> tuple[int, int, int] | None:
     return found.st_ino, found.st_size, found.st_mtime_ns
 
 
-def _speakers_metadata(result: Relabeling, backend: ClaudeCliBackend, *, words: int) -> str:
-    metadata = {
+def _speakers_metadata(
+    result: Relabeling,
+    backend: ClaudeCliBackend,
+    *,
+    words: int,
+    naming: dict[str, object] | None,
+) -> str:
+    metadata: dict[str, object] = {
         "backend": backend.name,
         "model": backend.model,
         "prompt_version": SPEAKER_PROMPT_VERSION,
@@ -641,7 +652,99 @@ def _speakers_metadata(result: Relabeling, backend: ClaudeCliBackend, *, words: 
         "chunks_failed": list(result.failed),
         "chunks": [dataclasses.asdict(chunk) for chunk in result.chunks],
     }
+    if naming is not None:
+        metadata["naming"] = naming
     return json.dumps(metadata, indent=2) + "\n"
+
+
+def _by_label(
+    by_speaker: Mapping[int, str | int], labels: Mapping[int | None, str]
+) -> dict[str, object]:
+    """`by_speaker` keyed by rank label instead of speaker id, in rank order."""
+    return {
+        label: by_speaker[speaker]
+        for speaker, label in labels.items()
+        if speaker is not None and speaker in by_speaker
+    }
+
+
+def _naming_metadata(
+    found: SpeakerNames,
+    missing: tuple[int, ...],
+    attendees: tuple[str, ...],
+    labels: Mapping[int | None, str],
+) -> dict[str, object]:
+    # Where each mention is, by word and time, but not its quote: the sidecar
+    # holds no copy of the words.
+    evidence = [
+        {
+            "chunk": mention.chunk,
+            "name": mention.name,
+            "said": mention.said,
+            "kind": mention.kind,
+            "word": mention.word,
+            "time": mention.time,
+            "by": None if mention.word is None else labels[mention.by],
+            "by_one_of": [labels[speaker] for speaker in mention.by_one_of],
+            "points_to": None if mention.points_to is None else labels[mention.points_to],
+            "status": mention.status,
+            "reason": mention.reason,
+        }
+        for mention in found.evidence
+    ]
+    return {
+        "prompt_version": NAMES_PROMPT_VERSION,
+        "attendees": list(attendees),
+        "names": _by_label(found.names, labels),
+        "unassigned": list(found.unassigned),
+        "pointed": {name: _by_label(counts, labels) for name, counts in found.pointed.items()},
+        "says": {name: _by_label(counts, labels) for name, counts in found.says.items()},
+        "names_blocks_missing": list(missing),
+        "evidence": evidence,
+    }
+
+
+def _name_from_words(
+    words: Sequence[Word],
+    speakers: Sequence[int | None],
+    relabeled: Relabeling | None,
+    attendees: tuple[str, ...],
+    engine: Engine,
+) -> tuple[Mapping[int, str], Engine, dict[str, object] | None]:
+    """Name speakers where the words point at attendees, recorded in `engine` and on stderr.
+
+    Returns:
+        The names by speaker id, `engine` with them, and the sidecar's
+        account of them; None for that where no attendees were given or no
+        speaker pass ran.
+
+    """
+    if not attendees:
+        return {}, engine, None
+    if relabeled is None:
+        why = "fewer than two speakers" if words else "the input has no words"
+        _warn(f"names from the words: no speaker pass ran ({why}), so nobody was named")
+        return {}, engine, None
+    # On the speakers the turns are built from, so each pointer lands on a turn.
+    labels = rank_labels(speakers)
+    found = name_speakers(words, speakers, relabeled.claims, attendees)
+    named = _by_label(found.names, labels)
+    shown = ", ".join(f"{label}={name}" for label, name in named.items()) or "none"
+    missing = relabeled.names_blocks_missing
+    # A missing list leaves out whatever that chunk would have counted, for or against.
+    lacking = (
+        f"; {len(missing)} of {len(relabeled.chunks)} chunks returned no names list"
+        if missing
+        else ""
+    )
+    _warn(
+        f"names from the words (prompt {NAMES_PROMPT_VERSION}): {shown}; "
+        f"unassigned: {', '.join(found.unassigned) or 'none'}{lacking}"
+    )
+    # A string, like the diarizer's runs: engine params hold no objects.
+    params = engine.params | {"speaker_names": json.dumps(named)}
+    metadata = _naming_metadata(found, missing, attendees, labels)
+    return found.names, engine.model_copy(update={"params": params}), metadata
 
 
 def _report_speakers(result: Relabeling, backend: ClaudeCliBackend, *, words: int) -> str:
@@ -687,6 +790,12 @@ def turns(
     speaker_model: str = typer.Option(
         DEFAULT_SPEAKER_MODEL, "--speaker-model", help="Model the speaker pass is asked for."
     ),
+    attendees: str | None = typer.Option(
+        None,
+        "--attendees",
+        help='Who was at the meeting, comma-separated ("Alice, Bruno, Carol"); the speaker pass '
+        "names a label for one where the words show who it is.",
+    ),
     audio_speakers: bool = typer.Option(
         True,
         "--audio-speakers/--no-audio-speakers",
@@ -714,6 +823,18 @@ def turns(
     checked. A chunk whose call fails keeps the diarizer's
     speakers, with one stderr line saying so.
 
+    With --attendees the same calls also list where the words name each
+    attendee: addressing whoever speaks next or spoke last, the speaker naming
+    themself, or a mention. A label takes an attendee's name only where at
+    least two such places point at it, at least twice as many as at any
+    other label, and none of its own turns says that name; otherwise it stays
+    "Speaker N". One stderr line lists the names, who was left unassigned,
+    and how many chunks returned no names list. A name off the list, or a
+    listed name never said, names no label; whether a spoken form is a
+    listed name is the model's judgment. The sidecar holds each place, what
+    was said there, and why it counted or not. A named label is a new key
+    for `cleanup --speaker`.
+
     Unless --no-audio-speakers is given, the words no engine attributed
     ("Speaker ?") are then named from the audio, when there are any and at
     least two speakers: pyannote's Community-1 diarizes the recording locally,
@@ -731,14 +852,17 @@ def turns(
 
     Exit 2 is a bad input, an unwritable output, or, with the pass on, no usable
     claude CLI, found before anything is written; so are --audio with
-    --no-audio-speakers and an --audio that does not exist or is not a regular
-    file. Exit 4 means every model call failed; the artifacts are written
+    --no-audio-speakers, an --audio that does not exist or is not a regular
+    file, --attendees with --no-llm-speakers, and an --attendees list that is
+    empty, repeats a name, or holds an empty name, a label, a line break, "|",
+    "<" or ">". Exit 4 means every model call failed; the artifacts are written
     anyway, with the diarizer's speakers.
     """
     # With --stdout the markdown is the output; unconfigured, structlog prints there.
     configure()
     try:
         _check_audio(audio, audio_speakers=audio_speakers)
+        listed = _check_attendees(attendees, llm_speakers=llm_speakers)
         transcript = Transcript.load(input_path)
         if not transcript.words and not transcript.turns:
             raise InputValidationError(f"{input_path} has neither words nor turns")
@@ -786,30 +910,44 @@ def turns(
     relabeled = (
         None
         if backend is None
-        else (relabel([word.text for word in words], speakers, backend), backend)
+        else (relabel([word.text for word in words], speakers, backend, attendees=listed), backend)
     )
     if relabeled is not None:
         speakers = list(relabeled[0].speakers)
     # The words keep their own speakers, so an earlier run's names are not in them: its
     # counts would describe turns this run builds only if it names the words again.
-    engine = _without_diarizer(transcript.engine)
+    engine = _without_naming(transcript.engine)
     # After the pass: it leaves unattributed words alone, and could undo a name from audio.
     if audio_speakers:
         speakers, engine = _name_from_audio(transcript, speakers, audio, engine)
+    # After the audio names, which can add a turn for a pointer to land on.
+    names, engine, naming = _name_from_words(
+        words, speakers, None if relabeled is None else relabeled[0], listed, engine
+    )
     built = (
         transcript
         if not words
         else transcript.model_copy(
-            update={"engine": engine, "turns": turns_from_speakers(words, speakers)}
+            update={"engine": engine, "turns": turns_from_speakers(words, speakers, names)}
         )
     )
 
     if plan is None:
         typer.echo(to_markdown(built), nl=False)
     else:
-        _write_turn_artifacts(plan, directory, formats, built, relabeled)
+        _write_turn_artifacts(plan, directory, formats, built, relabeled, naming)
     if relabeled is not None:
         _finish_speakers(*relabeled, words=len(words), printed=plan is None)
+
+
+def _check_attendees(attendees: str | None, *, llm_speakers: bool) -> tuple[str, ...]:
+    if attendees is None:
+        return ()
+    if not llm_speakers:
+        raise InputValidationError(
+            "--attendees rides the speaker pass, which --no-llm-speakers skips"
+        )
+    return parse_attendees(attendees)
 
 
 def _check_audio(audio: Path | None, *, audio_speakers: bool) -> None:
@@ -867,11 +1005,11 @@ def _name_from_audio(
     return list(naming.speakers), _diarizer_engine(engine, naming, diarization)
 
 
-def _without_diarizer(engine: Engine) -> Engine:
+def _without_naming(engine: Engine) -> Engine:
     params = {
         key: value
         for key, value in engine.params.items()
-        if key != "diarizer" and not key.startswith("diarizer_")
+        if key not in {"diarizer", "speaker_names"} and not key.startswith("diarizer_")
     }
     return engine.model_copy(update={"params": params})
 
@@ -934,6 +1072,7 @@ def _write_turn_artifacts(
     formats: list[Format],
     built: Transcript,
     relabeled: tuple[Relabeling, ClaudeCliBackend] | None,
+    naming: dict[str, object] | None,
 ) -> None:
     try:
         if Format.json in formats:
@@ -946,7 +1085,8 @@ def _write_turn_artifacts(
             plan[Format.vtt].write_text(to_vtt(built), encoding="utf-8")
         if relabeled is not None:
             plan[_SPEAKERS_SIDECAR].write_text(
-                _speakers_metadata(*relabeled, words=len(built.words)), encoding="utf-8"
+                _speakers_metadata(*relabeled, words=len(built.words), naming=naming),
+                encoding="utf-8",
             )
     except OSError as exc:
         _fail(InputValidationError(f"cannot write artifacts to {directory}: {exc}"))
