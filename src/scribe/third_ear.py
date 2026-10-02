@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Literal
 from pydantic import ConfigDict, Json, TypeAdapter, ValidationError
 
 from scribe.errors import InputValidationError
-from scribe.pick import Side, alike, guarded, restored, spot_contexts
+from scribe.pick import Side, alike, guarded, normalized, restored, spot_contexts
 from scribe.schema import Word
 from scribe.vote import align_words, norm_tokens
 
@@ -41,7 +41,12 @@ Verdict = Literal["transcript", "reference", "third"]
 
 # Strict: a side or verdict misspelled, or a slot that is not text, is drift.
 _RECORD = TypeAdapter(
-    Json[list[tuple[Side, list[str | None], list[Verdict | None]]]],
+    Json[
+        list[
+            tuple[Side, list[str | None], list[Verdict | None]]
+            | tuple[Side, list[str | None], list[Verdict | None], Literal["context"]]
+        ]
+    ],
     config=ConfigDict(strict=True),
 )
 
@@ -163,18 +168,27 @@ def vote(
     spots: Sequence[Spot],
     picked: Sequence[Side],
     heard: Sequence[Heard],
+    *,
+    background: str | None = None,
 ) -> tuple[tuple[Side, ...], dict[str, float | int | bool | str]]:
     """Apply rule ear-1 at `spots`, `heard` holding each recognizer's text of every `clips` clip.
+
+    The recognizers never see `background`, the pick's: no spot is flipped
+    away from a reading holding a word of it that the other reading lacks,
+    words compared as the pick compares readings.
 
     Returns:
         The side delivered at each spot, and the ear_* engine params: the
         rule, the recognizers, what they ran on, the pad, their seconds, the
         flips each way, and ear_record, each spot as [the pick's side, each
-        recognizer's slot or null, each one's verdict or null].
+        recognizer's slot or null, each one's verdict or null], then
+        "context" where the background kept the pick's side.
 
     """
     said, other = transcript.words, reference.words
     contexts = spot_contexts(said, other)
+    # Word by word: read as one text, "Jo" before "Jose" would drop as a false start.
+    named = frozenset(token for word in (background or "").split() for token in normalized(word))
     # Each recognizer's texts are of the spots heard, in order.
     at = 0
     sides: list[Side] = []
@@ -192,9 +206,15 @@ def vote(
             for found in slots
         ]
         guard, restore = guarded(said, other, spot), restored(said, other, spot)
-        sides.append(deliver(side, verdicts, guard=guard, restore=restore))
+        delivered = deliver(side, verdicts, guard=guard, restore=restore)
         heard_there = [None if found is None else " ".join(found.words) for found in slots]
-        record.append([side, heard_there, verdicts])
+        row: list[object] = [side, heard_there, verdicts]
+        kept, aside = (theirs, mine) if side == "reference" else (mine, theirs)
+        if delivered != side and _holds(kept, aside, named):
+            delivered = side
+            row.append("context")
+        sides.append(delivered)
+        record.append(row)
     flips = [now for was, now in zip(picked, sides, strict=True) if now != was]
     runtimes = (
         f"transformers {ear.versions.get('transformers')} torch {ear.versions.get('torch')} "
@@ -233,4 +253,11 @@ def own_sides(transcript: Transcript, path: Path) -> list[Side] | None:
         raise InputValidationError(
             f"{path} has a malformed ear_record{row}: {first['msg']}"
         ) from exc
-    return [side for side, _, _ in rows]
+    return [row[0] for row in rows]
+
+
+def _holds(reading: Sequence[str], other: Sequence[str], words: frozenset[str]) -> bool:
+    """Whether `reading` holds one of `words` that `other` lacks, as the pick compares readings."""
+    return not words.isdisjoint(
+        set(normalized(" ".join(reading))) - set(normalized(" ".join(other)))
+    )

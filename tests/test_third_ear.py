@@ -267,3 +267,38 @@ def test_guarded_and_restored_spots_are_never_heard() -> None:
         ["unsure", ["bat", "bat"], ["reference", "reference"]],
     ]
     assert (params["ear_to_reference"], params["ear_to_transcript"]) == (1, 0)
+
+
+@pytest.mark.parametrize(
+    ("said", "heard", "side", "background", "delivered"),
+    [
+        # The pick took the reference's "Keigo", a name in its background; both ears heard "Kago".
+        ("Kago", "Keigo", "reference", "Present: keigo.", "reference"),
+        ("Kago", "Keigo", "reference", None, "transcript"),
+        # Toward a word of the background is not away from one.
+        ("Kago", "Keigo", "reference", "Present: Kago", "transcript"),
+        # Unsure keeps the transcript's reading, which the background holds as the pick reads it.
+        ("two", "too", "unsure", "The 2 of us", "unsure"),
+    ],
+)
+def test_no_flip_goes_away_from_a_reading_holding_a_word_of_the_background_the_other_lacks(
+    said: str, heard: str, side: Side, background: str | None, delivered: Side
+) -> None:
+    words, other = _timed(f"we met {said} today"), _timed(f"we met {heard} today")
+    aside = heard if side != "reference" else said
+    text = (f"we met {aside} today",)
+
+    sides, params = vote(
+        transcript(words),
+        transcript(other),
+        find_spots(words, other),
+        [side],
+        _heard(text, text),
+        background=background,
+    )
+
+    kept = delivered == side
+    assert sides == (delivered,)
+    assert json.loads(str(params["ear_record"]))[0][3:] == (["context"] if kept else [])
+    flips = (params["ear_to_reference"], params["ear_to_transcript"])
+    assert flips == ((0, 0) if kept else (0, 1))

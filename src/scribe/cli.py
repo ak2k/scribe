@@ -1459,7 +1459,11 @@ def _replayed(
 
 
 def _hear(
-    transcript: Transcript, reference: Transcript, picking: Picking, audio: Path
+    transcript: Transcript,
+    reference: Transcript,
+    picking: Picking,
+    audio: Path,
+    context: str | None,
 ) -> tuple[Picking, str, Sequence[Side]]:
     """Deliver the sides rule ear-1 makes of the pick's, or on any failure its own; say which."""
     windows = third_ear.clips(transcript, reference, picking.spots, picking.picked)
@@ -1474,7 +1478,9 @@ def _hear(
     # OSError too: the run's temporary directory can fail to be made.
     except (EarError, OSError) as exc:
         return picking, f"scribe: no third ear: {exc}; the pick's readings stand", picking.picked
-    sides, params = third_ear.vote(transcript, reference, picking.spots, picking.picked, heard)
+    sides, params = third_ear.vote(
+        transcript, reference, picking.spots, picking.picked, heard, background=context
+    )
     delivered = assemble(transcript, reference, picking.spots, sides, {**picking.params, **params})
     names, seconds = ", ".join(ear.recognizer.name for ear in heard), params["ear_seconds"]
     line = (
@@ -1544,13 +1550,14 @@ def pick_command(
 
     --sides-from replays the sides the pick chose in PICKED, as they stand,
     with no call; where its ears flipped a spot, only --audio flips it again.
-    --model and --context are then unused.
+    --model is then unused, and --context is read only by --audio.
 
     --audio has two recognizers, run on this machine, hear each spot in its
     own clip of AUDIO. A spot takes the reading the pick set aside only where
-    both heard that one, and never against the guard or the restore; a spot
-    guarded or restored is not heard. Should they fail, one line says so and
-    the pick's readings stand.
+    both heard that one; never against the guard or the restore, nor away
+    from a reading holding a word of --context the other lacks, as the
+    recognizers never see it. A spot guarded or restored is not heard.
+    Should they fail, one line says so and the pick's readings stand.
 
     Both inputs' word starts must not decrease. Exit 2 is a bad input, inputs
     that record different audio sha256, a TRANSCRIPT picked before, a PICKED
@@ -1600,7 +1607,7 @@ def pick_command(
                 raise InputValidationError(f"--sides-from {sides_from}: {exc}") from exc
         hearing, delivered = None, picking.picked
         if audio is not None:
-            picking, hearing, delivered = _hear(transcript, reference, picking, audio)
+            picking, hearing, delivered = _hear(transcript, reference, picking, audio, context)
         try:
             picking.transcript.dump(plan["--out"])
         except (OSError, ValueError) as exc:
