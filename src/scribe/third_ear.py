@@ -59,8 +59,13 @@ def clip(
     said: Sequence[Word], heard: Sequence[Word], spot: Spot, duration: float | None
 ) -> tuple[float, float]:
     """Return the seconds a spot is heard in: both its readings, PAD_S each side, in the audio."""
-    low = min(said[spot.transcript.start].start, heard[spot.reference.start].start)
-    high = max(said[spot.transcript.stop - 1].end, heard[spot.reference.stop - 1].end) + PAD_S
+    # Word times can overlap, so neither edge word need bound the spot.
+    words = [
+        *said[spot.transcript.start : spot.transcript.stop],
+        *heard[spot.reference.start : spot.reference.stop],
+    ]
+    low = min(word.start for word in words)
+    high = max(word.end for word in words) + PAD_S
     # Unbounded, a clip still ends where the worker's audio does.
     return max(0.0, low - PAD_S), high if duration is None else min(duration, high)
 
