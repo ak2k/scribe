@@ -1422,12 +1422,20 @@ def _report_pick(
         )
 
 
-def _replayed(path: Path) -> tuple[list[tuple[float, float, str, str, Side]], str, str, int]:
+def _replayed(
+    path: Path, recording: str | None
+) -> tuple[list[tuple[float, float, str, str, Side]], str, str, int]:
     """Read the spots and sides PICKED records, and the model, prompt and background behind them.
 
-    Each side is the pick's own: where the ears flipped a spot, not the one delivered.
+    Each side is the pick's own: where the ears flipped a spot, not the one
+    delivered. `recording` is the inputs' audio sha256, if they record one.
     """
     picked = Transcript.load(path)
+    # A pick of another recording can hold the same spots to the word.
+    if recording and picked.source.sha256 and picked.source.sha256 != recording:
+        raise InputValidationError(
+            f"PICKED {path} was made from other audio than these inputs: their sha256 differ"
+        )
     record: list[tuple[float, float, str, str, Side]] = pick_record(picked, path)
     own = third_ear.own_sides(picked, path)
     if own is not None:
@@ -1580,7 +1588,7 @@ def pick_command(
             picking = pick_readings(transcript, reference, backend, context=context)
             model, version = backend.model, PICK_PROMPT_VERSION
         else:
-            record, model, version, chars = _replayed(sides_from)
+            record, model, version, chars = _replayed(sides_from, ours or theirs)
             try:
                 picking = replay_readings(
                     transcript, reference, record, model=model, version=version, context_chars=chars
