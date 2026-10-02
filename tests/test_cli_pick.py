@@ -653,6 +653,44 @@ def test_audio_flips_a_spot_only_where_both_recognizers_heard_the_reading_set_as
     }
 
 
+@pytest.mark.parametrize("replay", [False, True])
+def test_audio_never_flips_a_spot_away_from_a_reading_holding_a_context_word(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, replay: bool
+) -> None:
+    inputs, picked = _picked(tmp_path, monkeypatch)
+    _patch(monkeypatch, reply=answering(_hat_then_unsure))
+    # Heard alone, "hat" would go back to "cat" and the unsure "mat" to "bat".
+    _, audio = _ears(
+        tmp_path, monkeypatch, ["the cat sat on the bat"] * 2, ["the cat sat on the bat"] * 2
+    )
+    out = tmp_path / "heard.json"
+    sides = ["--sides-from", str(picked)] if replay else []
+    command = ["pick", *map(str, inputs), *sides, "--audio", str(audio), "--context", "Mr. HAT"]
+
+    result = runner.invoke(app, [*command, "--out", str(out)])
+
+    assert result.exit_code == 0, result.output
+    assert result.stderr.splitlines()[1:] == [
+        "scribe: third ear heard 2 spots with cohere-transcribe, qwen3-asr in 5 s; "
+        "1 flipped to the reference, 0 to the transcript"
+    ]
+    heard = Transcript.load(out)
+    assert heard.text == "the hat sat on the bat"
+    assert json.loads(str(heard.engine.params["ear_record"])) == [
+        ["reference", ["cat", "cat"], ["transcript", "transcript"], "context"],
+        ["unsure", ["bat", "bat"], ["reference", "reference"]],
+    ]
+    again = tmp_path / "replayed.json"
+    replayed = runner.invoke(
+        app, ["pick", *map(str, inputs), "--sides-from", str(out), "--out", str(again)]
+    )
+    assert replayed.exit_code == 0, replayed.output
+    assert Transcript.load(again).words == Transcript.load(picked).words
+    help_text = " ".join(runner.invoke(app, ["pick", "--help"], terminal_width=200).stdout.split())
+    assert "--context is read only by --audio" in help_text
+    assert "a word of --context the other lacks" in help_text
+
+
 def _heard_pick(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[list[Path], Path, Path]:
     """The inputs, their pick, and that pick heard by ears that flip both its spots."""
     inputs, picked = _picked(tmp_path, monkeypatch)
