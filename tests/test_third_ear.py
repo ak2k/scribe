@@ -49,6 +49,34 @@ def test_a_clip_pads_both_readings_by_five_seconds_within_the_recording() -> Non
     assert clip(said, heard, Spot(range(1, 2), range(1, 2)), None) == (0.0, 6.75)
 
 
+def _spanned(*spans: tuple[str, float, float]) -> list[Word]:
+    return [Word(text=text, start=start, end=end) for text, start, end in spans]
+
+
+@pytest.mark.parametrize(
+    ("said", "heard", "window"),
+    [
+        # "cat" runs on past "runs", the spot's last word.
+        (
+            _spanned(("alpha", 0, 0.5), ("cat", 1, 20), ("runs", 2, 2.5), ("omega", 30, 30.5)),
+            _spanned(("alpha", 0, 0.5), ("hat", 1, 1.5), ("walks", 2, 2.5), ("omega", 30, 30.5)),
+            (0.0, 25.0),
+        ),
+        # "walks" starts before "hat", the spot's first word.
+        (
+            _spanned(("alpha", 0, 0.5), ("cat", 10, 10.5), ("runs", 11, 11.5), ("omega", 30, 30.5)),
+            _spanned(("alpha", 0, 0.5), ("hat", 9, 9.5), ("walks", 8, 8.5), ("omega", 30, 30.5)),
+            (3.0, 16.5),
+        ),
+    ],
+    ids=["end-overlapped", "start-out-of-order"],
+)
+def test_a_clip_spans_every_word_of_the_spot_whatever_their_order(
+    said: list[Word], heard: list[Word], window: tuple[float, float]
+) -> None:
+    assert clip(said, heard, Spot(range(1, 3), range(1, 3)), None) == window
+
+
 def test_a_spot_far_into_its_clip_gets_its_slot() -> None:
     # "papa", the first word after the spot, starts 8 s into the clip.
     text = "hotel india juliet kilo lima bike remember oscars papa quebec romeo sierra tango"
