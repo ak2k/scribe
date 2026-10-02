@@ -813,6 +813,26 @@ def test_audio_not_the_transcripts_recording_exits_two_asking_no_model(
     assert made == []
 
 
+@pytest.mark.parametrize("recorded", [0, 1], ids=["transcript", "reference-only"])
+def test_audio_not_the_recording_the_inputs_record_exits_two_hearing_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, recorded: int
+) -> None:
+    inputs = _inputs(tmp_path)
+    _digested(inputs[recorded], "a" * 64)
+    made = _patch(monkeypatch)
+    fake, audio = _ears(tmp_path, monkeypatch, ["the cat sat on the bat"] * 2)
+
+    result = runner.invoke(app, ["pick", *map(str, inputs), "--audio", str(audio)])
+
+    assert result.exit_code == 2
+    assert result.stdout == ""
+    assert len(result.stderr.splitlines()) == 1
+    assert f"{audio} is not the audio" in result.stderr
+    assert made == []
+    assert fake.calls == []
+    assert not (tmp_path / "meeting.picked.json").exists()
+
+
 def test_with_no_spot_to_hear_no_recognizer_runs(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
