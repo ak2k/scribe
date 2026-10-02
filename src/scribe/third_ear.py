@@ -10,6 +10,7 @@ before the spot and the first matched after, or the clip's edge where none is.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
@@ -36,12 +37,18 @@ PAD_S = 5.0
 _EARS = 2
 # Flipping these would undo what the guard or the restore kept.
 _UNHEARD = frozenset({"guarded", "restored"})
+_EDGES = re.compile(r"^[\W_]+|[\W_]+$")
 
 Verdict = Literal["transcript", "reference", "third"]
 
 # Strict: a side or verdict misspelled, or a slot that is not text, is drift.
 _RECORD = TypeAdapter(
-    Json[list[tuple[Side, list[str | None], list[Verdict | None]]]],
+    Json[
+        list[
+            tuple[Side, list[str | None], list[Verdict | None]]
+            | tuple[Side, list[str | None], list[Verdict | None], Literal["context"]]
+        ]
+    ],
     config=ConfigDict(strict=True),
 )
 
@@ -86,7 +93,9 @@ def slot(said: Sequence[Word], spot: Spot, window: tuple[float, float], text: st
     if not norm_tokens(text):
         return None
     start, end = window
-    mine = [index for index, word in enumerate(said) if start <= (word.start + word.end) / 2 <= end]
+    # A word any part of which is in the clip may be heard; left out, it
+    # could not anchor, and what was heard of it would fall in the slot.
+    mine = [index for index, word in enumerate(said) if word.start <= end and word.end >= start]
     words = text.split()
     # Timed alike, every pair is near: the band and the tolerance never bind.
     steps = align_words(
@@ -161,18 +170,28 @@ def vote(
     spots: Sequence[Spot],
     picked: Sequence[Side],
     heard: Sequence[Heard],
+    *,
+    background: str | None = None,
 ) -> tuple[tuple[Side, ...], dict[str, float | int | bool | str]]:
     """Apply rule ear-1 at `spots`, `heard` holding each recognizer's text of every `clips` clip.
+
+    The recognizers never see `background`, the pick's: no spot is flipped
+    away from a reading holding a capitalized word of it that the other
+    reading does not hold, each word compared as written, punctuation aside.
 
     Returns:
         The side delivered at each spot, and the ear_* engine params: the
         rule, the recognizers, what they ran on, the pad, their seconds, the
         flips each way, and ear_record, each spot as [the pick's side, each
-        recognizer's slot or null, each one's verdict or null].
+        recognizer's slot or null, each one's verdict or null], then
+        "context" where the background kept the pick's side.
 
     """
     said, other = transcript.words, reference.words
     contexts = spot_contexts(said, other)
+    # Names and terms the recognizers cannot know, which both engines capitalize;
+    # a function word in the background would hold flips it has nothing to do with.
+    named = frozenset(word for word in _written(background or "") if word[0].isupper())
     # Each recognizer's texts are of the spots heard, in order.
     at = 0
     sides: list[Side] = []
@@ -190,9 +209,15 @@ def vote(
             for found in slots
         ]
         guard, restore = guarded(said, other, spot), restored(said, other, spot)
-        sides.append(deliver(side, verdicts, guard=guard, restore=restore))
+        delivered = deliver(side, verdicts, guard=guard, restore=restore)
         heard_there = [None if found is None else " ".join(found.words) for found in slots]
-        record.append([side, heard_there, verdicts])
+        row: list[object] = [side, heard_there, verdicts]
+        kept, aside = (theirs, mine) if side == "reference" else (mine, theirs)
+        if delivered != side and _holds(kept, aside, named):
+            delivered = side
+            row.append("context")
+        sides.append(delivered)
+        record.append(row)
     flips = [now for was, now in zip(picked, sides, strict=True) if now != was]
     runtimes = (
         f"transformers {ear.versions.get('transformers')} torch {ear.versions.get('torch')} "
@@ -231,4 +256,14 @@ def own_sides(transcript: Transcript, path: Path) -> list[Side] | None:
         raise InputValidationError(
             f"{path} has a malformed ear_record{row}: {first['msg']}"
         ) from exc
-    return [side for side, _, _ in rows]
+    return [row[0] for row in rows]
+
+
+def _holds(reading: Sequence[str], other: Sequence[str], words: frozenset[str]) -> bool:
+    """Whether `reading` holds one of `words` that `other` lacks, each as written."""
+    return not words.isdisjoint(_written(" ".join(reading)) - _written(" ".join(other)))
+
+
+def _written(text: str) -> set[str]:
+    """Return the words of `text` as written, punctuation at their edges aside."""
+    return {bare for word in text.split() if (bare := _EDGES.sub("", word))}

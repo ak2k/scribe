@@ -92,6 +92,23 @@ def test_with_no_word_matched_beside_the_spot_its_slot_runs_to_the_clip_edge() -
     assert found == Slot(("zulu",), ("we", "saw", "the"), ("sat", "down"))
 
 
+def test_a_word_beside_the_spot_heard_in_its_clip_is_never_its_slot() -> None:
+    # The first "hat" starts inside the clip, (5.0, 15.5), and ends well past it.
+    said = _spanned(("we", 0, 0.5), ("hat", 8, 24), ("cat", 10, 10.5), ("omega", 12, 12.5))
+    heard = _spanned(("we", 0, 0.5), ("hat", 8, 24), ("hat", 10, 10.5), ("omega", 12, 12.5))
+    spots = find_spots(said, heard)
+    text = ("hat omega",)
+
+    sides, params = vote(
+        transcript(said), transcript(heard), spots, ["transcript"], _heard(text, text)
+    )
+
+    assert spots == [Spot(range(2, 3), range(2, 3))]
+    assert sides == ("transcript",)
+    assert json.loads(str(params["ear_record"])) == [["transcript", ["", ""], ["third", "third"]]]
+    assert slot(said, spots[0], (5.0, 15.5), "hat omega") == Slot((), (), ())
+
+
 @pytest.mark.parametrize("text", ["", "  ", "..."])
 def test_an_empty_text_gives_no_slot(text: str) -> None:
     assert slot(_timed("we saw the cat"), Spot(range(3, 4), range(3, 4)), (0, 9), text) is None
@@ -250,3 +267,41 @@ def test_guarded_and_restored_spots_are_never_heard() -> None:
         ["unsure", ["bat", "bat"], ["reference", "reference"]],
     ]
     assert (params["ear_to_reference"], params["ear_to_transcript"]) == (1, 0)
+
+
+@pytest.mark.parametrize(
+    ("said", "heard", "side", "background", "delivered"),
+    [
+        # The pick took the reference's "Keigo", a name in its background; both ears heard "Kago".
+        ("Kago", "Keigo", "reference", "People at this meeting: Adam, Keigo.", "reference"),
+        ("Kago", "Keigo", "reference", None, "transcript"),
+        # Toward a word of the background is not away from one.
+        ("Kago", "Keigo", "reference", "Present: Kago", "transcript"),
+        # Unsure keeps the transcript's reading.
+        ("Keigo,", "Kago", "unsure", "With Keigo", "unsure"),
+        # Only a capitalized word counts, and only as written.
+        ("these", "this", "reference", "People at this meeting: Keigo", "transcript"),
+        ("Kago", "keigo", "reference", "People at this meeting: Keigo", "transcript"),
+    ],
+)
+def test_no_flip_goes_away_from_a_reading_holding_a_capitalized_background_word_the_other_lacks(
+    said: str, heard: str, side: Side, background: str | None, delivered: Side
+) -> None:
+    words, other = _timed(f"we met {said} today"), _timed(f"we met {heard} today")
+    aside = heard if side != "reference" else said
+    text = (f"we met {aside} today",)
+
+    sides, params = vote(
+        transcript(words),
+        transcript(other),
+        find_spots(words, other),
+        [side],
+        _heard(text, text),
+        background=background,
+    )
+
+    kept = delivered == side
+    assert sides == (delivered,)
+    assert json.loads(str(params["ear_record"]))[0][3:] == (["context"] if kept else [])
+    flips = (params["ear_to_reference"], params["ear_to_transcript"])
+    assert flips == ((0, 0) if kept else (0, 1))

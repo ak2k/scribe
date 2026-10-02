@@ -653,6 +653,49 @@ def test_audio_flips_a_spot_only_where_both_recognizers_heard_the_reading_set_as
     }
 
 
+@pytest.mark.parametrize("replay", [False, True])
+def test_audio_never_flips_a_spot_away_from_a_reading_holding_a_capitalized_context_word(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, replay: bool
+) -> None:
+    said, heard = tmp_path / "keigo.json", tmp_path / "keigo.parakeet.json"
+    sentence = "we met {} in the office and saw {} times"
+    transcript(_said(*sentence.format("Kago", "these").split())).dump(said)
+    transcript(_said(*sentence.format("Keigo", "this").split()), engine="parakeet-mlx").dump(heard)
+    inputs, picked = [said, heard], tmp_path / "keigo.picked.json"
+    _patch(monkeypatch, reply=answering(choosing({"Keigo", "this"})))
+    assert runner.invoke(app, ["pick", *map(str, inputs), "--out", str(picked)]).exit_code == 0
+    # Heard alone, both spots would go back to the transcript's readings.
+    texts = [sentence.format("Kago", "these")] * 2
+    _, audio = _ears(tmp_path, monkeypatch, texts, texts)
+    out = tmp_path / "heard.json"
+    sides = ["--sides-from", str(picked)] if replay else []
+    context = ["--context", "People at this meeting: Keigo, Adam"]
+    command = ["pick", *map(str, inputs), *sides, "--audio", str(audio), *context]
+
+    result = runner.invoke(app, [*command, "--out", str(out)])
+
+    assert result.exit_code == 0, result.output
+    assert result.stderr.splitlines()[1:] == [
+        "scribe: third ear heard 2 spots with cohere-transcribe, qwen3-asr in 5 s; "
+        "0 flipped to the reference, 1 to the transcript"
+    ]
+    delivered = Transcript.load(out)
+    assert delivered.text == sentence.format("Keigo", "these")
+    assert json.loads(str(delivered.engine.params["ear_record"])) == [
+        ["reference", ["Kago", "Kago"], ["transcript", "transcript"], "context"],
+        ["reference", ["these", "these"], ["transcript", "transcript"]],
+    ]
+    again = tmp_path / "replayed.json"
+    replayed = runner.invoke(
+        app, ["pick", *map(str, inputs), "--sides-from", str(out), "--out", str(again)]
+    )
+    assert replayed.exit_code == 0, replayed.output
+    assert Transcript.load(again).words == Transcript.load(picked).words
+    help_text = " ".join(runner.invoke(app, ["pick", "--help"], terminal_width=200).stdout.split())
+    assert "--context is read only by --audio" in help_text
+    assert "a capitalized word of --context, a name or other term matched as written" in help_text
+
+
 def _heard_pick(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[list[Path], Path, Path]:
     """The inputs, their pick, and that pick heard by ears that flip both its spots."""
     inputs, picked = _picked(tmp_path, monkeypatch)
@@ -811,6 +854,26 @@ def test_audio_not_the_transcripts_recording_exits_two_asking_no_model(
     assert len(result.stderr.splitlines()) == 1
     assert str(audio) in result.stderr
     assert made == []
+
+
+@pytest.mark.parametrize("recorded", [0, 1], ids=["transcript", "reference-only"])
+def test_audio_not_the_recording_the_inputs_record_exits_two_hearing_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, recorded: int
+) -> None:
+    inputs = _inputs(tmp_path)
+    _digested(inputs[recorded], "a" * 64)
+    made = _patch(monkeypatch)
+    fake, audio = _ears(tmp_path, monkeypatch, ["the cat sat on the bat"] * 2)
+
+    result = runner.invoke(app, ["pick", *map(str, inputs), "--audio", str(audio)])
+
+    assert result.exit_code == 2
+    assert result.stdout == ""
+    assert len(result.stderr.splitlines()) == 1
+    assert f"{audio} is not the audio" in result.stderr
+    assert made == []
+    assert fake.calls == []
+    assert not (tmp_path / "meeting.picked.json").exists()
 
 
 def test_with_no_spot_to_hear_no_recognizer_runs(
