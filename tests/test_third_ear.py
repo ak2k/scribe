@@ -120,6 +120,36 @@ def test_a_slot_that_is_a_reading_made_of_the_words_around_it_names_it(
     assert verdict(Slot(words, (), ()), ["cat"], ["the"], (_SAW_THE, _SAT_DOWN)) == "reference"
 
 
+@pytest.mark.parametrize("words", [(), ("um",), ("uh", "um"), ("you", "know")])
+def test_a_slot_of_no_word_or_of_fillers_names_no_reading_of_like_alone(
+    words: tuple[str, ...],
+) -> None:
+    # Compared as the pick compares readings, "like" drops out with the fillers.
+    assert verdict(Slot(words, (), ()), ["want"], ["like"], (["i"], ["cats"])) == "third"
+    assert verdict(Slot(words, (), ()), ["like"], ["want"], (["i"], ["cats"])) == "third"
+
+
+@pytest.mark.parametrize("words", [("like",), ("Like,",)])
+def test_a_slot_that_is_like_names_a_reading_of_like_alone(words: tuple[str, ...]) -> None:
+    assert verdict(Slot(words, (), ()), ["want"], ["like"], (["i"], ["cats"])) == "reference"
+
+
+def test_recognizers_that_heard_no_word_at_a_spot_never_flip_it_to_like() -> None:
+    said, heard = _timed("we like the cats here"), _timed("we want the cats here")
+    text = ("we the cats here",)
+
+    sides, params = vote(
+        transcript(said),
+        transcript(heard),
+        find_spots(said, heard),
+        ["reference"],
+        _heard(text, text),
+    )
+
+    assert sides == ("reference",)
+    assert json.loads(str(params["ear_record"])) == [["reference", ["", ""], ["third", "third"]]]
+
+
 @pytest.mark.parametrize(
     ("side", "verdicts", "delivered"),
     [
