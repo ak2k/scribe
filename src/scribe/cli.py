@@ -1573,12 +1573,15 @@ def pick_command(
                 f"REFERENCE {reference_path} was made from other audio than TRANSCRIPT "
                 f"{transcript_path}: their sha256 differ"
             )
+        # Either input alone may record the sha256 of the one recording both are of.
+        recording = ours or theirs
         destination = sibling(transcript_path, ".picked.json") if out is None else out
         inputs = {"TRANSCRIPT": transcript_path, "REFERENCE": reference_path}
         if sides_from is not None:
             inputs["PICKED"] = sides_from
         if audio is not None:
-            inputs["AUDIO"] = _source_audio(transcript.source, audio)
+            source = transcript.source.model_copy(update={"sha256": recording})
+            inputs["AUDIO"] = _source_audio(source, audio)
         plan = plan_outputs({"--out": destination}, inputs)
         # Before the calls, which are paid for.
         prove_writable(plan)
@@ -1588,7 +1591,7 @@ def pick_command(
             picking = pick_readings(transcript, reference, backend, context=context)
             model, version = backend.model, PICK_PROMPT_VERSION
         else:
-            record, model, version, chars = _replayed(sides_from, ours or theirs)
+            record, model, version, chars = _replayed(sides_from, recording)
             try:
                 picking = replay_readings(
                     transcript, reference, record, model=model, version=version, context_chars=chars
