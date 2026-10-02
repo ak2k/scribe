@@ -657,19 +657,19 @@ def test_audio_flips_a_spot_only_where_both_recognizers_heard_the_reading_set_as
 def test_audio_never_flips_a_spot_away_from_a_reading_holding_a_capitalized_context_word(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, replay: bool
 ) -> None:
-    said, heard = tmp_path / "keigo.json", tmp_path / "keigo.parakeet.json"
+    said, heard = tmp_path / "dmitri.json", tmp_path / "dmitri.parakeet.json"
     sentence = "we met {} in the office and saw {} times"
-    transcript(_said(*sentence.format("Kago", "these").split())).dump(said)
-    transcript(_said(*sentence.format("Keigo", "this").split()), engine="parakeet-mlx").dump(heard)
-    inputs, picked = [said, heard], tmp_path / "keigo.picked.json"
-    _patch(monkeypatch, reply=answering(choosing({"Keigo", "this"})))
+    transcript(_said(*sentence.format("Demitri", "these").split())).dump(said)
+    transcript(_said(*sentence.format("Dmitri", "this").split()), engine="parakeet-mlx").dump(heard)
+    inputs, picked = [said, heard], tmp_path / "dmitri.picked.json"
+    _patch(monkeypatch, reply=answering(choosing({"Dmitri", "this"})))
     assert runner.invoke(app, ["pick", *map(str, inputs), "--out", str(picked)]).exit_code == 0
     # Heard alone, both spots would go back to the transcript's readings.
-    texts = [sentence.format("Kago", "these")] * 2
+    texts = [sentence.format("Demitri", "these")] * 2
     _, audio = _ears(tmp_path, monkeypatch, texts, texts)
     out = tmp_path / "heard.json"
     sides = ["--sides-from", str(picked)] if replay else []
-    context = ["--context", "People at this meeting: Keigo, Adam"]
+    context = ["--context", "People at this meeting: Dmitri, Alice"]
     command = ["pick", *map(str, inputs), *sides, "--audio", str(audio), *context]
 
     result = runner.invoke(app, [*command, "--out", str(out)])
@@ -680,9 +680,9 @@ def test_audio_never_flips_a_spot_away_from_a_reading_holding_a_capitalized_cont
         "0 flipped to the reference, 1 to the transcript"
     ]
     delivered = Transcript.load(out)
-    assert delivered.text == sentence.format("Keigo", "these")
+    assert delivered.text == sentence.format("Dmitri", "these")
     assert json.loads(str(delivered.engine.params["ear_record"])) == [
-        ["reference", ["Kago", "Kago"], ["transcript", "transcript"], "context"],
+        ["reference", ["Demitri", "Demitri"], ["transcript", "transcript"], "context"],
         ["reference", ["these", "these"], ["transcript", "transcript"]],
     ]
     again = tmp_path / "replayed.json"
