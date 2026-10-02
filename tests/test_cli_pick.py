@@ -526,6 +526,54 @@ def test_sides_from_a_record_of_other_spots_exits_two_asking_no_model(
     assert not out.exists()
 
 
+@pytest.mark.parametrize("said", ["a" * 64, None], ids=["transcript", "reference-only"])
+def test_sides_from_a_pick_of_other_audio_exits_two_asking_no_model(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, said: str | None
+) -> None:
+    inputs, picked = _picked(tmp_path, monkeypatch)
+    # Its spots are these inputs' to the word: only the sha256 tells the recordings apart.
+    _digested(inputs[0], said)
+    _digested(inputs[1], "a" * 64)
+    _digested(picked, "b" * 64)
+    made = _patch(monkeypatch)
+    out = tmp_path / "replayed.json"
+
+    result = runner.invoke(
+        app, ["pick", *map(str, inputs), "--sides-from", str(picked), "--out", str(out)]
+    )
+
+    assert result.exit_code == 2
+    assert result.stdout == ""
+    assert len(result.stderr.splitlines()) == 1
+    assert f"PICKED {picked} was made from other audio than these inputs" in result.stderr
+    assert made == []
+    assert not out.exists()
+
+
+@pytest.mark.parametrize(
+    ("said", "recorded"),
+    [("a" * 64, "a" * 64), ("a" * 64, None), (None, "b" * 64)],
+    ids=["equal", "picked-none", "inputs-none"],
+)
+def test_sides_from_a_pick_not_recording_other_audio_is_replayed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, said: str | None, recorded: str | None
+) -> None:
+    inputs, picked = _picked(tmp_path, monkeypatch)
+    for path in inputs:
+        _digested(path, said)
+    _digested(picked, recorded)
+    made = _patch(monkeypatch)
+    out = tmp_path / "replayed.json"
+
+    result = runner.invoke(
+        app, ["pick", *map(str, inputs), "--sides-from", str(picked), "--out", str(out)]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert made == []
+    assert Transcript.load(out).words == Transcript.load(picked).words
+
+
 def _ears(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
