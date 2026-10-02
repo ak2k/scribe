@@ -10,13 +10,14 @@ before the spot and the first matched after, or the clip's edge where none is.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
 from pydantic import ConfigDict, Json, TypeAdapter, ValidationError
 
 from scribe.errors import InputValidationError
-from scribe.pick import Side, alike, guarded, normalized, restored, spot_contexts
+from scribe.pick import Side, alike, guarded, restored, spot_contexts
 from scribe.schema import Word
 from scribe.vote import align_words, norm_tokens
 
@@ -36,6 +37,7 @@ PAD_S = 5.0
 _EARS = 2
 # Flipping these would undo what the guard or the restore kept.
 _UNHEARD = frozenset({"guarded", "restored"})
+_EDGES = re.compile(r"^[\W_]+|[\W_]+$")
 
 Verdict = Literal["transcript", "reference", "third"]
 
@@ -174,8 +176,8 @@ def vote(
     """Apply rule ear-1 at `spots`, `heard` holding each recognizer's text of every `clips` clip.
 
     The recognizers never see `background`, the pick's: no spot is flipped
-    away from a reading holding a word of it that the other reading lacks,
-    words compared as the pick compares readings.
+    away from a reading holding a capitalized word of it that the other
+    reading does not hold, each word compared as written, punctuation aside.
 
     Returns:
         The side delivered at each spot, and the ear_* engine params: the
@@ -187,8 +189,9 @@ def vote(
     """
     said, other = transcript.words, reference.words
     contexts = spot_contexts(said, other)
-    # Word by word: read as one text, "Jo" before "Jose" would drop as a false start.
-    named = frozenset(token for word in (background or "").split() for token in normalized(word))
+    # Names and terms the recognizers cannot know, which both engines capitalize;
+    # a function word in the background would hold flips it has nothing to do with.
+    named = frozenset(word for word in _written(background or "") if word[0].isupper())
     # Each recognizer's texts are of the spots heard, in order.
     at = 0
     sides: list[Side] = []
@@ -257,7 +260,10 @@ def own_sides(transcript: Transcript, path: Path) -> list[Side] | None:
 
 
 def _holds(reading: Sequence[str], other: Sequence[str], words: frozenset[str]) -> bool:
-    """Whether `reading` holds one of `words` that `other` lacks, as the pick compares readings."""
-    return not words.isdisjoint(
-        set(normalized(" ".join(reading))) - set(normalized(" ".join(other)))
-    )
+    """Whether `reading` holds one of `words` that `other` lacks, each as written."""
+    return not words.isdisjoint(_written(" ".join(reading)) - _written(" ".join(other)))
+
+
+def _written(text: str) -> set[str]:
+    """Return the words of `text` as written, punctuation at their edges aside."""
+    return {bare for word in text.split() if (bare := _EDGES.sub("", word))}

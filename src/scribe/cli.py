@@ -1555,8 +1555,9 @@ def pick_command(
     --audio has two recognizers, run on this machine, hear each spot in its
     own clip of AUDIO. A spot takes the reading the pick set aside only where
     both heard that one; never against the guard or the restore, nor away
-    from a reading holding a word of --context the other lacks, as the
-    recognizers never see it. A spot guarded or restored is not heard.
+    from a reading holding a capitalized word of --context, a name or other
+    term matched as written, that the other lacks, as the recognizers never
+    see it. A spot guarded or restored is not heard.
     Should they fail, one line says so and the pick's readings stand.
 
     Both inputs' word starts must not decrease. Exit 2 is a bad input, inputs
