@@ -86,7 +86,9 @@ def slot(said: Sequence[Word], spot: Spot, window: tuple[float, float], text: st
     if not norm_tokens(text):
         return None
     start, end = window
-    mine = [index for index, word in enumerate(said) if start <= (word.start + word.end) / 2 <= end]
+    # A word any part of which is in the clip may be heard; left out, it
+    # could not anchor, and what was heard of it would fall in the slot.
+    mine = [index for index, word in enumerate(said) if word.start <= end and word.end >= start]
     words = text.split()
     # Timed alike, every pair is near: the band and the tolerance never bind.
     steps = align_words(
