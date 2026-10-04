@@ -7,9 +7,9 @@ valid for re-running a later one.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Annotated, Literal
+from typing import TYPE_CHECKING, Annotated, Literal, Self
 
-from pydantic import AllowInfNan, BaseModel, ConfigDict, Field, ValidationError
+from pydantic import AllowInfNan, BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from scribe.errors import ExternalServiceError, InputValidationError
 
@@ -22,6 +22,10 @@ if TYPE_CHECKING:
 FiniteFloat = Annotated[float, AllowInfNan(False)]
 
 
+def _is_none(value: object) -> bool:
+    return value is None
+
+
 class Word(BaseModel):
     """One recognized word with its span, and its raw diarization id when present."""
 
@@ -31,6 +35,8 @@ class Word(BaseModel):
     start: FiniteFloat
     end: FiniteFloat
     speaker: int | None = None
+    # Left out of the JSON when None, so a one-track transcript dumps as it always has.
+    track: int | None = Field(default=None, exclude_if=_is_none)
 
 
 class Turn(BaseModel):
@@ -58,6 +64,24 @@ class Source(BaseModel):
     sha256: str | None = None
 
 
+class Track(BaseModel):
+    """One side of a call recorded on its own, as merged into a transcript with the other."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    role: Literal["mic", "app"]
+    # The mic side is one person, shown by this name; the app side's speakers are ranked.
+    label: str | None = None
+    source: Source
+    transcript_sha256: str
+
+    @model_validator(mode="after")
+    def _named_mic(self) -> Self:
+        if self.role == "mic" and self.label is None:
+            raise ValueError("a mic track needs a label")
+        return self
+
+
 class Engine(BaseModel):
     """Which transcription engine produced the text."""
 
@@ -83,6 +107,30 @@ class Transcript(BaseModel):
     text: str
     words: list[Word] = Field(default_factory=list)
     turns: list[Turn] = Field(default_factory=list)
+    # A merged call's sides, which each word's `track` indexes.
+    tracks: list[Track] | None = Field(default=None, exclude_if=_is_none)
+
+    @model_validator(mode="after")
+    def _words_fit_tracks(self) -> Self:
+        if self.tracks is None:
+            if any(word.track is not None for word in self.words):
+                raise ValueError("a word names a track, but the transcript lists none")
+            return self
+        last = len(self.tracks) - 1
+        if any(word.track is None or not 0 <= word.track <= last for word in self.words):
+            raise ValueError(f"every word of a merged transcript needs a track, 0 to {last}")
+        # Turns label a mic track's words by their speaker id, so that id must be
+        # the track's alone.
+        for index, track in enumerate(self.tracks):
+            if track.role != "mic":
+                continue
+            held = {word.speaker for word in self.words if word.track == index}
+            elsewhere = {word.speaker for word in self.words if word.track != index}
+            if len(held) > 1 or held & elsewhere:
+                raise ValueError(
+                    f"mic track {index}'s words must share one speaker id, held by no other track"
+                )
+        return self
 
     @classmethod
     def load(cls, path: Path) -> Transcript:

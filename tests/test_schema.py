@@ -7,7 +7,7 @@ import pytest
 from pydantic import ValidationError
 
 from scribe.errors import ExternalServiceError, InputValidationError
-from scribe.schema import Engine, Source, Transcript, Word, from_xai_response
+from scribe.schema import Engine, Source, Track, Transcript, Word, from_xai_response
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -155,3 +155,113 @@ def test_stages_copy_rather_than_mutate() -> None:
     assert updated is not transcript
     with pytest.raises(ValidationError):
         transcript.text = "edited"
+
+
+def test_a_one_track_dump_is_unchanged(tmp_path: Path) -> None:
+    fixture = FIXTURES / "transcript_two_speakers.json"
+    path = tmp_path / "out.json"
+
+    Transcript.load(fixture).dump(path)
+
+    assert path.read_bytes() == fixture.read_bytes()
+    assert '"track' not in path.read_text(encoding="utf-8")
+
+
+def _merged(
+    *words: tuple[int | None, int | None], role: str = "mic", label: str | None = "Alice"
+) -> str:
+    """A merged transcript's JSON with one word per (speaker, track) pair."""
+    tracks = [
+        {
+            "role": role,
+            "label": label,
+            "source": {"kind": "audio", "ref": "mic.wav"},
+            "transcript_sha256": "a",
+        },
+        {"role": "app", "source": {"kind": "audio", "ref": "app.wav"}, "transcript_sha256": "b"},
+    ]
+    return json.dumps(
+        {
+            "source": {"kind": "other", "ref": "mic.wav + app.wav"},
+            "engine": {"name": "xai-stt"},
+            "text": " ".join("w" for _ in words),
+            "words": [
+                {
+                    "text": "w",
+                    "start": float(index),
+                    "end": index + 0.5,
+                    "speaker": speaker,
+                    "track": track,
+                }
+                for index, (speaker, track) in enumerate(words)
+            ],
+            "tracks": tracks,
+        }
+    )
+
+
+def test_a_merged_transcript_round_trips_with_its_tracks(tmp_path: Path) -> None:
+    path = tmp_path / "merged.json"
+    path.write_text(_merged((2, 0), (0, 1), (None, 1)), encoding="utf-8")
+
+    loaded = Transcript.load(path)
+    loaded.dump(tmp_path / "again.json")
+
+    assert [word.track for word in loaded.words] == [0, 1, 1]
+    assert loaded.tracks is not None
+    assert [(track.role, track.label) for track in loaded.tracks] == [
+        ("mic", "Alice"),
+        ("app", None),
+    ]
+    assert Transcript.load(tmp_path / "again.json") == loaded
+
+
+@pytest.mark.parametrize(
+    ("raw", "message"),
+    [
+        (_merged((2, 0), (0, None)), "every word of a merged transcript needs a track"),
+        (_merged((2, 0), (0, 2)), "every word of a merged transcript needs a track"),
+        (_merged((2, 0), (0, -1)), "every word of a merged transcript needs a track"),
+        (_merged((2, 0), (0, 0)), "mic track 0's words must share one speaker"),
+        (_merged((2, 0), (2, 1)), "mic track 0's words must share one speaker"),
+        (_merged((None, 0), (None, 1)), "mic track 0's words must share one speaker"),
+        (_merged((2, 0), (0, 1), label=None), "a mic track needs a label"),
+    ],
+    ids=[
+        "no-track",
+        "past-the-end",
+        "negative",
+        "two-mic-speakers",
+        "mic-speaker-on-app",
+        "unattributed-on-both",
+        "unlabeled-mic",
+    ],
+)
+def test_load_refuses_words_that_do_not_fit_the_tracks(
+    tmp_path: Path, raw: str, message: str
+) -> None:
+    path = tmp_path / "merged.json"
+    path.write_text(raw, encoding="utf-8")
+
+    with pytest.raises(InputValidationError) as caught:
+        Transcript.load(path)
+
+    assert message in str(caught.value)
+
+
+def test_load_refuses_a_track_on_a_word_without_tracks(tmp_path: Path) -> None:
+    raw = (FIXTURES / "transcript_two_speakers.json").read_text(encoding="utf-8")
+    path = tmp_path / "stray.json"
+    path.write_text(raw.replace('"speaker": 7', '"speaker": 7, "track": 0', 1), encoding="utf-8")
+
+    with pytest.raises(InputValidationError) as caught:
+        Transcript.load(path)
+
+    assert "names a track, but the transcript lists none" in str(caught.value)
+
+
+def test_the_schema_gains_only_the_optional_track_fields() -> None:
+    assert not Word.model_fields["track"].is_required()
+    assert not Transcript.model_fields["tracks"].is_required()
+    assert set(Track.model_fields) == {"role", "label", "source", "transcript_sha256"}
+    assert '"Track"' in json.dumps(Transcript.model_json_schema())
