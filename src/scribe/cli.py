@@ -74,6 +74,16 @@ from scribe.speakers import (
     needs_relabeling,
     relabel,
 )
+from scribe.tracks import (
+    BLEED_RULE,
+    DEFAULT_ME,
+    MAX_SKEW_S,
+    MIC,
+    WARN_OFFSET_S,
+    TrackFile,
+    count_runs,
+    merge_tracks,
+)
 from scribe.turns import (
     DEFAULT_MIN_TURN_SECONDS,
     DEFAULT_MIN_TURN_WORDS,
@@ -108,6 +118,7 @@ if TYPE_CHECKING:
     from scribe.pick import Picking, Side
     from scribe.schema import Word
     from scribe.speakers import Relabeling
+    from scribe.tracks import Merged
 
 # Enough of a stderr line to act on without pasting a whole transcript into it.
 _MISSING_SHOWN = 10
@@ -1436,6 +1447,93 @@ def vote(
         _fail(exc)
 
     typer.echo(str(plan["--out"]))
+
+
+def _track_file(path: Path, role: str) -> TrackFile:
+    """Load one of `merge`'s inputs, insisting on words and on one track, and hash it."""
+    transcript = Transcript.load(path)
+    if not transcript.words:
+        raise InputValidationError(f"{role} {path} has no words")
+    if transcript.tracks is not None:
+        raise InputValidationError(f"{role} {path} merges two tracks already")
+    try:
+        return TrackFile(transcript, path, hashlib.sha256(path.read_bytes()).hexdigest())
+    except OSError as exc:
+        raise InputValidationError(f"cannot read transcript {path}: {exc}") from exc
+
+
+@app.command()
+def merge(
+    mic_path: Path = typer.Argument(
+        ..., metavar="MIC", help="Transcript of the operator's microphone."
+    ),
+    app_path: Path = typer.Argument(..., metavar="APP", help="Transcript of the call app's audio."),
+    out: Path | None = typer.Option(
+        None,
+        "--out",
+        help="Where to write the result. Default: MIC's name ending .merged.json, beside it.",
+    ),
+    me: str = typer.Option(DEFAULT_ME, "--me", help="The label of the operator's turns."),
+) -> None:
+    """Merge the two sides of a call, each transcribed on its own, into one transcript.
+
+    Every APP word is kept as it is. Every MIC word is kept under the label
+    --me, unless it is the far side leaking into the microphone: a MIC word
+    goes when an APP word of the same text, not already answering for
+    another, starts within 0.25 s of it once the offset is taken off (rule
+    bleed-1). The offset is the median start difference over runs of 3 or more
+    such words within 1 s that follow one another on both sides, 0 where there
+    are none. Nothing is retimed. The result keeps both inputs' fill ranges, for
+    `cleanup --curated`, but not their pick records: each input's own disputes
+    list stays the place to read those.
+
+    stdout is the path written; stderr is one summary line, and a warning when
+    the offset passes 0.5 s. Exit 2, before anything is written: an input that
+    is unreadable, not a transcript, wordless or merged already; MIC and APP
+    holding one transcript; durations more than 2 s apart; or an --out that
+    cannot be written. Run `scribe turns` on the result next.
+    """
+    try:
+        mic_file, app_file = _track_file(mic_path, "MIC"), _track_file(app_path, "APP")
+        # A transcript merged with its own copy would lose every keyed mic word as bleed.
+        if mic_file.sha256 == app_file.sha256:
+            raise InputValidationError(f"MIC {mic_path} and APP {app_path} are one transcript")
+        mic_s, app_s = mic_file.transcript.duration, app_file.transcript.duration
+        if mic_s is not None and app_s is not None and abs(mic_s - app_s) > MAX_SKEW_S:
+            raise InputValidationError(
+                f"MIC {mic_path} lasts {mic_s:.1f} s and APP {app_path} {app_s:.1f} s, "
+                f"more than {MAX_SKEW_S} s apart: not two sides of one call"
+            )
+        destination = sibling(mic_path, ".merged.json") if out is None else out
+        plan = plan_outputs({"--out": destination}, {"MIC": mic_path, "APP": app_path})
+        merged = merge_tracks(mic_file, app_file, me=me)
+        try:
+            merged.transcript.dump(plan["--out"])
+        except (OSError, ValueError) as exc:
+            raise InputValidationError(
+                f"cannot write transcript to {plan['--out']}: {exc}"
+            ) from exc
+    except AppError as exc:
+        _fail(exc)
+
+    _report_merge(merged)
+    typer.echo(str(plan["--out"]))
+
+
+def _report_merge(merged: Merged) -> None:
+    words = merged.transcript.words
+    kept = sum(word.track == MIC for word in words)
+    runs = "/".join(str(count) for count in count_runs(merged.dropped))
+    _warn(
+        f"merged {len(words) - kept} app words and {kept} of {kept + len(merged.dropped)} mic "
+        f"words; {len(merged.dropped)} mic words dropped as {BLEED_RULE} copies, by run length "
+        f"1/2/3+: {runs}; offset {merged.offset:+.3f} s"
+    )
+    if abs(merged.offset) > WARN_OFFSET_S:
+        _warn(
+            f"the tracks are {abs(merged.offset):.3f} s out of step, more than {WARN_OFFSET_S} s: "
+            "check that MIC and APP are one call's two sides, started together"
+        )
 
 
 def _report_fill(fill: Fill) -> None:
