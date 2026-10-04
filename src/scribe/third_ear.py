@@ -38,6 +38,24 @@ _EARS = 2
 # Flipping these would undo what the guard or the restore kept.
 _UNHEARD = frozenset({"guarded", "restored"})
 _EDGES = re.compile(r"^[\W_]+|[\W_]+$")
+# Capitalized only as "I", opening a sentence or in a title, these name nothing.
+# Where one could be a name or term instead, the guard stays: a word of two or
+# more capitals (US, IT) is never one of them, and a word that is also a common
+# given name or month (Will, May, Can) is left out.
+_FUNCTION = frozenset(
+    {"a", "an", "the", "this", "that", "these", "those", "my", "our", "your", "his", "her"}
+    | {"its", "their", "some", "any", "each", "every", "all", "both", "no"}
+    | {"i", "me", "we", "us", "you", "he", "him", "she", "it", "they", "them", "there"}
+    | {"who", "whom", "whose", "what", "which"}
+    | {"and", "or", "but", "nor", "so", "yet", "if", "as", "because", "while", "when", "where"}
+    | {"how", "why", "though", "although", "since"}
+    | {"at", "by", "for", "from", "in", "of", "on", "to", "with", "about", "after", "before"}
+    | {"during", "into", "over", "under", "through", "between", "without"}
+    | {"am", "is", "are", "was", "were", "be", "been", "do", "does", "did", "has", "have", "had"}
+    | {"would", "should", "could", "must", "shall", "might"}
+)
+# "We're" and "Don't" are function words too.
+_CLITIC = re.compile(r"(?:n['\u2019]t|['\u2019](?:s|m|re|ll|ve|d))$", re.IGNORECASE)
 
 Verdict = Literal["transcript", "reference", "third"]
 
@@ -164,6 +182,20 @@ def deliver(side: Side, verdicts: Sequence[Verdict | None], *, guard: bool, rest
     return side if (guard if aside == "reference" else restore) else aside
 
 
+def guard_words(background: str | None) -> frozenset[str]:
+    """Return the names and terms of `background`, each as written, punctuation aside.
+
+    They are the words the recognizers cannot know, which both engines
+    capitalize: its capitalized words, function words aside.
+    """
+    return frozenset(
+        word
+        for word in _written(background or "")
+        if word[0].isupper()
+        and (_CLITIC.sub("", word).lower() not in _FUNCTION or (len(word) > 1 and word.isupper()))
+    )
+
+
 def vote(
     transcript: Transcript,
     reference: Transcript,
@@ -176,8 +208,9 @@ def vote(
     """Apply rule ear-1 at `spots`, `heard` holding each recognizer's text of every `clips` clip.
 
     The recognizers never see `background`, the pick's: no spot is flipped
-    away from a reading holding a capitalized word of it that the other
-    reading does not hold, each word compared as written, punctuation aside.
+    away from a reading holding a name or term of it (`guard_words`) that the
+    other reading does not hold, each word compared as written, punctuation
+    aside.
 
     Returns:
         The side delivered at each spot, and the ear_* engine params: the
@@ -189,9 +222,7 @@ def vote(
     """
     said, other = transcript.words, reference.words
     contexts = spot_contexts(said, other)
-    # Names and terms the recognizers cannot know, which both engines capitalize;
-    # a function word in the background would hold flips it has nothing to do with.
-    named = frozenset(word for word in _written(background or "") if word[0].isupper())
+    named = guard_words(background)
     # Each recognizer's texts are of the spots heard, in order.
     at = 0
     sides: list[Side] = []
