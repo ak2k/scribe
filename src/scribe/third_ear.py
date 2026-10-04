@@ -39,22 +39,27 @@ _EARS = 2
 _UNHEARD = frozenset({"guarded", "restored"})
 _EDGES = re.compile(r"^[\W_]+|[\W_]+$")
 # Capitalized only as "I", opening a sentence or in a title, these name nothing.
-# Where one could be a name or term instead, the guard stays: a word of two or
-# more capitals (US, IT) is never one of them, and a word that is also a common
-# given name or month (Will, May, Can) is left out.
+# Where one could be a name or term instead, the guard stays: a word whose stem
+# is two or more capitals (US, IT's) is never one of them, and a word that is
+# also a common given name, month or product (Will, May, Can, Per, Till, One) is
+# left out.
 _FUNCTION = frozenset(
     {"a", "an", "the", "this", "that", "these", "those", "my", "our", "your", "his", "her"}
     | {"its", "their", "some", "any", "each", "every", "all", "both", "no"}
+    | {"other", "another", "either", "neither", "such", "many", "most", "several"}
     | {"i", "me", "we", "us", "you", "he", "him", "she", "it", "they", "them", "there"}
-    | {"who", "whom", "whose", "what", "which"}
+    | {"who", "whom", "whose", "what", "which", "everyone", "someone", "nobody"}
+    | {"myself", "yourself", "himself", "herself", "itself", "ourselves", "yourselves"}
+    | {"themselves"}
     | {"and", "or", "but", "nor", "so", "yet", "if", "as", "because", "while", "when", "where"}
-    | {"how", "why", "though", "although", "since"}
+    | {"how", "why", "though", "although", "since", "until", "unless", "whether", "than", "once"}
     | {"at", "by", "for", "from", "in", "of", "on", "to", "with", "about", "after", "before"}
     | {"during", "into", "over", "under", "through", "between", "without"}
+    | {"among", "within", "upon", "across", "against", "around"}
     | {"am", "is", "are", "was", "were", "be", "been", "do", "does", "did", "has", "have", "had"}
-    | {"would", "should", "could", "must", "shall", "might"}
+    | {"would", "should", "could", "must", "shall", "might", "not"}
 )
-# "We're" and "Don't" are function words too.
+# A clitic makes neither a function word ("We're") nor an acronym ("IT's") a name.
 _CLITIC = re.compile(r"(?:n't|'(?:s|m|re|ll|ve|d))$", re.IGNORECASE)
 
 Verdict = Literal["transcript", "reference", "third"]
@@ -189,10 +194,7 @@ def guard_words(background: str | None) -> frozenset[str]:
     capitalize: its capitalized words, function words aside.
     """
     return frozenset(
-        word
-        for word in _written(background or "")
-        if word[0].isupper()
-        and (_CLITIC.sub("", word).lower() not in _FUNCTION or (len(word) > 1 and word.isupper()))
+        word for word in _written(background or "") if word[0].isupper() and not _function(word)
     )
 
 
@@ -210,7 +212,7 @@ def vote(
     The recognizers never see `background`, the pick's: no spot is flipped
     away from a reading holding a name or term of it (`guard_words`) that the
     other reading does not hold, each word compared as written, punctuation
-    aside.
+    aside and a curly apostrophe a straight one.
 
     Returns:
         The side delivered at each spot, and the ear_* engine params: the
@@ -295,6 +297,20 @@ def _holds(reading: Sequence[str], other: Sequence[str], words: frozenset[str]) 
     return not words.isdisjoint(_written(" ".join(reading)) - _written(" ".join(other)))
 
 
+def _function(word: str) -> bool:
+    """Whether `word`, capitalized, is a function word rather than a name or term."""
+    stem = _CLITIC.sub("", word)
+    if len(stem) > 1 and stem.isupper():
+        return False
+    # Every n't contraction is an auxiliary and "not", whatever its stem ("Can't").
+    return stem.lower() in _FUNCTION or word.lower().endswith("n't")
+
+
 def _written(text: str) -> set[str]:
-    """Return the words of `text` as written, punctuation at their edges aside."""
-    return {bare for word in text.split() if (bare := _EDGES.sub("", word))}
+    """Return the words of `text` as written, punctuation at their edges aside.
+
+    A curly apostrophe is taken for the straight one.
+    """
+    # A pasted background may carry the curly one where the engines write it straight.
+    folded = text.replace("\N{RIGHT SINGLE QUOTATION MARK}", "'")
+    return {bare for word in folded.split() if (bare := _EDGES.sub("", word))}
