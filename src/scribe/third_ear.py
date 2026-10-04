@@ -58,6 +58,10 @@ _FUNCTION = frozenset(
     | {"among", "within", "upon", "across", "against", "around"}
     | {"am", "is", "are", "was", "were", "be", "been", "do", "does", "did", "has", "have", "had"}
     | {"would", "should", "could", "must", "shall", "might", "not"}
+    | {"let", "lets", "here", "heres"}
+    # Negatives typed without the apostrophe; an "nt" ending alone would take Grant.
+    | {"cannot", "cant", "dont", "wont", "didnt", "doesnt", "isnt", "arent", "wasnt", "werent"}
+    | {"havent", "hasnt", "hadnt", "wouldnt", "couldnt", "shouldnt", "aint"}
 )
 # A clitic makes neither a function word ("We're") nor an acronym ("IT's") a name.
 _CLITIC = re.compile(r"(?:n't|'(?:s|m|re|ll|ve|d))$", re.IGNORECASE)
@@ -299,11 +303,15 @@ def _holds(reading: Sequence[str], other: Sequence[str], words: frozenset[str]) 
 
 def _function(word: str) -> bool:
     """Whether `word`, capitalized, is a function word rather than a name or term."""
-    stem = _CLITIC.sub("", word)
+    stem, negative = word, False
+    # Clitics stack ("Shouldn't've").
+    while clitic := _CLITIC.search(stem):
+        negative = negative or clitic[0].lower() == "n't"
+        stem = stem[: clitic.start()]
     if len(stem) > 1 and stem.isupper():
         return False
     # Every n't contraction is an auxiliary and "not", whatever its stem ("Can't").
-    return stem.lower() in _FUNCTION or word.lower().endswith("n't")
+    return negative or stem.lower() in _FUNCTION
 
 
 def _written(text: str) -> set[str]:
