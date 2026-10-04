@@ -15,7 +15,7 @@ from scribe.schema import Turn
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping, Sequence
 
-    from scribe.schema import Word
+    from scribe.schema import Track, Word
 
 
 @dataclass(frozen=True)
@@ -187,10 +187,28 @@ def word_speakers(
     """Settle one speaker id per word: flickers merged, then switches snapped.
 
     Returns the diarization ids `build_turns` groups into turns, one per word
-    in `words`; the arguments are `build_turns`'s. Where any word has a
-    speaker, only those words are settled, as if the others were absent, and
-    the others stay None.
+    in `words`; the arguments are `build_turns`'s. Each track of a merged
+    transcript is settled as if it were alone. Where any word has a speaker,
+    only those words are settled, as if the others were absent, and the others
+    stay None.
     """
+    speakers: list[int | None] = [None] * len(words)
+    for track in dict.fromkeys(word.track for word in words):
+        held = [index for index, word in enumerate(words) if word.track == track]
+        settled = _settle(
+            [words[index] for index in held],
+            min_turn_seconds=min_turn_seconds,
+            min_turn_words=min_turn_words,
+            snap_words=snap_words,
+        )
+        for index, speaker in zip(held, settled, strict=True):
+            speakers[index] = speaker
+    return speakers
+
+
+def _settle(
+    words: Sequence[Word], *, min_turn_seconds: float, min_turn_words: int, snap_words: int
+) -> list[int | None]:
     # A word no engine diarized would otherwise join a speaker as a flicker,
     # or split one speaker's run so that a real flicker escapes its merge.
     attributed = [index for index, word in enumerate(words) if word.speaker is not None]
@@ -205,17 +223,35 @@ def word_speakers(
     return speakers
 
 
+def _track_labels(
+    words: Sequence[Word], speakers: Sequence[int | None], tracks: Sequence[Track]
+) -> dict[int | None, str]:
+    mic: dict[int | None, str] = {}
+    app: list[int | None] = []
+    for word, speaker in zip(words, speakers, strict=True):
+        track = None if word.track is None else tracks[word.track]
+        if track is not None and track.role == "mic" and track.label is not None:
+            mic[speaker] = track.label
+        else:
+            app.append(speaker)
+    return rank_labels(app) | mic
+
+
 def turns_from_speakers(
     words: Sequence[Word],
     speakers: Sequence[int | None],
     names: Mapping[int, str] | None = None,
+    *,
+    tracks: Sequence[Track] | None = None,
 ) -> list[Turn]:
     """Group words into labeled turns by the speaker id given for each word.
 
     Unlike `build_turns` this merges and snaps nothing: every switch in
     `speakers` becomes a turn boundary. An id in `names` is labeled with its
     name; every other id keeps its rank among all ids, so naming one speaker
-    renumbers no other.
+    renumbers no other. With the `tracks` of a merged transcript, a mic
+    track's id is labeled with its track's label instead, and the other ids
+    are ranked among the app words alone.
 
     Raises:
         ValueError: `speakers` does not hold exactly one id per word.
@@ -225,7 +261,11 @@ def turns_from_speakers(
         _RawTurn(speaker_id, tuple(word for word, _ in run))
         for speaker_id, run in groupby(zip(words, speakers, strict=True), key=lambda pair: pair[1])
     ]
-    labels = rank_labels(turn.speaker_id for turn in raw)
+    labels = (
+        rank_labels(turn.speaker_id for turn in raw)
+        if tracks is None
+        else _track_labels(words, speakers, tracks)
+    )
     labels.update((names or {}).items())
     return [
         Turn(

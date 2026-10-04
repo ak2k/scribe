@@ -880,6 +880,10 @@ def turns(
     except AppError as exc:
         _fail(exc)
 
+    llm_speakers, audio_speakers, listed = _passes(
+        transcript, input_path, llm=llm_speakers, audio=audio_speakers, attendees=listed
+    )
+
     words = transcript.words
     speakers = word_speakers(
         words,
@@ -939,7 +943,10 @@ def turns(
         transcript
         if not words
         else transcript.model_copy(
-            update={"engine": engine, "turns": turns_from_speakers(words, speakers, names)}
+            update={
+                "engine": engine,
+                "turns": turns_from_speakers(words, speakers, names, tracks=transcript.tracks),
+            }
         )
     )
 
@@ -949,6 +956,29 @@ def turns(
         _write_turn_artifacts(plan, directory, formats, built, relabeled, naming)
     if relabeled is not None:
         _finish_speakers(*relabeled, words=len(words), printed=plan is None)
+
+
+def _passes(
+    transcript: Transcript, input_path: Path, *, llm: bool, audio: bool, attendees: tuple[str, ...]
+) -> tuple[bool, bool, tuple[str, ...]]:
+    """The speaker passes to run, and the attendees: none of them on a merged transcript.
+
+    Neither pass keeps a merged transcript's tracks apart yet; each one asked
+    for and skipped is one stderr line.
+    """
+    if transcript.tracks is None:
+        return llm, audio, attendees
+    if llm:
+        named = "; --attendees names nobody" if attendees else ""
+        _warn(
+            f"speaker pass skipped: {input_path} merges two tracks, and the pass "
+            f"does not keep them apart yet{named}"
+        )
+    if audio:
+        _warn(
+            f"audio naming skipped: {input_path} merges two tracks, and naming needs one recording"
+        )
+    return False, False, ()
 
 
 def _check_attendees(attendees: str | None, *, llm_speakers: bool) -> tuple[str, ...]:
