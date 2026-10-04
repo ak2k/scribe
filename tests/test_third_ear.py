@@ -305,3 +305,74 @@ def test_no_flip_goes_away_from_a_reading_holding_a_capitalized_background_word_
     assert json.loads(str(params["ear_record"]))[0][3:] == (["context"] if kept else [])
     flips = (params["ear_to_reference"], params["ear_to_transcript"])
     assert flips == ((0, 0) if kept else (0, 1))
+
+
+@pytest.mark.parametrize(
+    ("said", "heard", "background", "delivered"),
+    [
+        # "I", and a function word opening a sentence, are capitalized but name nothing.
+        ("so we agreed today", "so I agreed today", "I think Alice is leading.", "transcript"),
+        ("that plan works", "The plan works", "The attendees were Alice and Bob.", "transcript"),
+        ("so were done today", "so We're done today", "We're meeting Alice.", "transcript"),
+        # A name keeps its guard opening a sentence, and so do an acronym and a
+        # function word that is also a name.
+        ("we met Alise today", "we met Alice today", "Alice leads the call.", "reference"),
+        ("we called Ed today", "we called IT today", "IT owns the servers.", "reference"),
+        ("we asked Mae today", "we asked May today", "May joins the call.", "reference"),
+    ],
+)
+def test_only_a_name_or_term_of_the_background_holds_a_flip_wherever_it_sits(
+    said: str, heard: str, background: str, delivered: Side
+) -> None:
+    words, other = _timed(said), _timed(heard)
+    text = (said,)
+
+    sides, params = vote(
+        transcript(words),
+        transcript(other),
+        find_spots(words, other),
+        ["reference"],
+        _heard(text, text),
+        background=background,
+    )
+
+    assert sides == (delivered,)
+    held = ["context"] if delivered == "reference" else []
+    assert json.loads(str(params["ear_record"]))[0][3:] == held
+
+
+@pytest.mark.parametrize(
+    "background",
+    [
+        "I think the plan works. The rest is with us. This was it, and We're done.",
+        "I, We, The, This, We're, A, An, And",
+    ],
+)
+def test_a_background_holding_no_name_delivers_what_no_background_does(background: str) -> None:
+    said = _timed(
+        "so we agreed on the plan and later that plan works well "
+        "and then his one ships soon so were done today"
+    )
+    heard = _timed(
+        "so I agreed on the plan and later The plan works well "
+        "and then This one ships soon so We're done today"
+    )
+    spots = find_spots(said, heard)
+    picked: list[Side] = ["reference"] * len(spots)
+    texts = (" ".join(word.text for word in said),) * len(spots)
+
+    def run(background: str | None) -> tuple[tuple[Side, ...], object]:
+        sides, params = vote(
+            transcript(said),
+            transcript(heard),
+            spots,
+            picked,
+            _heard(texts, texts),
+            background=background,
+        )
+        return sides, params["ear_record"]
+
+    unguarded = run(None)
+
+    assert unguarded[0] == ("transcript",) * 4
+    assert run(background) == unguarded
