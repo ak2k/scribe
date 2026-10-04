@@ -123,3 +123,29 @@ def test_a_refused_merge_exits_two_and_writes_nothing(
     assert result.stderr.count("\n") == 1
     assert result.stdout == ""
     assert sorted(tmp_path.iterdir()) == before
+
+
+def test_turns_on_a_merged_transcript_skip_both_speaker_passes(tmp_path: Path) -> None:
+    merged = _merged(tmp_path)
+
+    result = runner.invoke(app, ["turns", str(merged), "--attendees", "Bruno", "--stdout"])
+
+    assert result.exit_code == 0, result.output
+    assert result.stdout.startswith("**Me**")
+    assert "**Speaker 1**" in result.stdout
+    lines = result.stderr.splitlines()
+    assert len(lines) == 2
+    assert "speaker pass skipped" in lines[0]
+    assert "--attendees names nobody" in lines[0]
+    assert "audio naming skipped" in lines[1]
+
+
+def test_turns_off_flags_on_a_merged_transcript_print_nothing_to_stderr(tmp_path: Path) -> None:
+    merged = _merged(tmp_path)
+
+    result = runner.invoke(
+        app, ["turns", str(merged), "--no-llm-speakers", "--no-audio-speakers", "--stdout"]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert result.stderr == ""
