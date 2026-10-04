@@ -315,11 +315,19 @@ def test_no_flip_goes_away_from_a_reading_holding_a_capitalized_background_word_
         ("that plan works", "The plan works", "The attendees were Alice and Bob.", "transcript"),
         ("so were done today", "so We're done today", "We're meeting Alice.", "transcript"),
         ("we dont know yet", "we Don't know yet", "Don't wait for Alice.", "transcript"),
-        # A name keeps its guard opening a sentence, and so do an acronym and a
-        # function word that is also a name.
+        ("Can come today", "Can't come today", "Can't make it today.", "transcript"),
+        ("so want to go", "so Won't go", "Won't be recorded. Alice leads.", "transcript"),
+        ("Anvil we wait", "Until we wait", "Until Alice arrives, we wait.", "transcript"),
+        ("Everybody joined", "Everyone joined", "Everyone here: Alice, Bob.", "transcript"),
+        # A curly apostrophe is a straight one, in a reading as in the background.
+        ("so were done", "so We\u2019re done", "We\u2019re meeting Alice.", "transcript"),
+        # A name keeps its guard opening a sentence or pasted with a curly apostrophe,
+        # and so do an acronym and a function word that is also a name.
         ("we met Alise today", "we met Alice today", "Alice leads the call.", "reference"),
         ("we called Ed today", "we called IT today", "IT owns the servers.", "reference"),
+        ("so Ed's queue grew", "so IT's queue grew", "IT's queue is long.", "reference"),
         ("we asked Mae today", "we asked May today", "May joins the call.", "reference"),
+        ("we met O'Brian today", "we met O'Brien today", "With Siobhan O\u2019Brien.", "reference"),
     ],
 )
 def test_only_a_name_or_term_of_the_background_holds_a_flip_wherever_it_sits(
