@@ -55,7 +55,7 @@ _FUNCTION = frozenset(
     | {"would", "should", "could", "must", "shall", "might"}
 )
 # "We're" and "Don't" are function words too.
-_CLITIC = re.compile(r"(?:n['\u2019]t|['\u2019](?:s|m|re|ll|ve|d))$", re.IGNORECASE)
+_CLITIC = re.compile(r"(?:n't|'(?:s|m|re|ll|ve|d))$", re.IGNORECASE)
 
 Verdict = Literal["transcript", "reference", "third"]
 

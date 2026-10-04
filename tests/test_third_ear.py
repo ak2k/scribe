@@ -314,6 +314,7 @@ def test_no_flip_goes_away_from_a_reading_holding_a_capitalized_background_word_
         ("so we agreed today", "so I agreed today", "I think Alice is leading.", "transcript"),
         ("that plan works", "The plan works", "The attendees were Alice and Bob.", "transcript"),
         ("so were done today", "so We're done today", "We're meeting Alice.", "transcript"),
+        ("we dont know yet", "we Don't know yet", "Don't wait for Alice.", "transcript"),
         # A name keeps its guard opening a sentence, and so do an acronym and a
         # function word that is also a name.
         ("we met Alise today", "we met Alice today", "Alice leads the call.", "reference"),
