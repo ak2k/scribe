@@ -319,6 +319,14 @@ def test_no_flip_goes_away_from_a_reading_holding_a_capitalized_background_word_
         ("so want to go", "so Won't go", "Won't be recorded. Alice leads.", "transcript"),
         ("Anvil we wait", "Until we wait", "Until Alice arrives, we wait.", "transcript"),
         ("Everybody joined", "Everyone joined", "Everyone here: Alice, Bob.", "transcript"),
+        # Negatives typed without the apostrophe, "Let's" and "Here's".
+        ("Can ship today", "Cannot ship today", "Cannot ship Friday. Alice decides.", "transcript"),
+        ("Can ship today", "Cant ship today", "Cant ship Friday. Alice decides.", "transcript"),
+        ("Wont ship today", "Dont ship today", "Dont ship Friday. Alice decides.", "transcript"),
+        ("Lets ask Alice today", "Let's ask Bob today", "Let's ask Alice about it.", "transcript"),
+        ("Let's go today", "Lets go today", "Lets go, Alice.", "transcript"),
+        ("Heres the plan", "Here's the plan", "Here's the plan, Alice.", "transcript"),
+        ("Here's the plan", "Heres the plan", "Heres the plan, Alice.", "transcript"),
         # A curly apostrophe is a straight one, in a reading as in the background.
         ("so were done", "so We\u2019re done", "We\u2019re meeting Alice.", "transcript"),
         # A name keeps its guard opening a sentence or pasted with a curly apostrophe,
@@ -348,6 +356,27 @@ def test_only_a_name_or_term_of_the_background_holds_a_flip_wherever_it_sits(
     assert sides == (delivered,)
     held = ["context"] if delivered == "reference" else []
     assert json.loads(str(params["ear_record"]))[0][3:] == held
+
+
+@pytest.mark.parametrize("apostrophe", ["'", "\u2019"])
+@pytest.mark.parametrize("stacked", ["I'd've", "We'd've", "Shouldn't've"])
+def test_no_stacked_contraction_of_the_background_holds_a_flip(
+    stacked: str, apostrophe: str
+) -> None:
+    said, heard = _timed("so we agreed today"), _timed(f"so {stacked} agreed today")
+    text = ("so we agreed today",)
+
+    sides, params = vote(
+        transcript(said),
+        transcript(heard),
+        find_spots(said, heard),
+        ["reference"],
+        _heard(text, text),
+        background=stacked.replace("'", apostrophe) + " agreed today.",
+    )
+
+    assert sides == ("transcript",)
+    assert json.loads(str(params["ear_record"]))[0][3:] == []
 
 
 @pytest.mark.parametrize(
