@@ -40,6 +40,8 @@ _SPLIT = re.compile(r"[\s\u2013\u2014]+")
 _LEAD = "\"'`([{<*\u201c\u2018"
 _TRAIL = "\"'`)]}>*\u201d\u2019.,;:!?"
 _APOSTROPHES = str.maketrans("", "", "'\u2019")
+# "xAI's" would otherwise sit beside "xAI" as a term of its own.
+_POSSESSIVE = re.compile(r"['\u2019]s$")
 # Case-uniform, as a hash or id prints; a digit is required so that words
 # spelled only in a-f, such as "defaced", are not taken for one.
 _HEX_RUN = re.compile(r"(?=[a-f]*\d)[\da-f]{7,}|(?=[A-F]*\d)[\dA-F]{7,}")
@@ -134,7 +136,7 @@ def extract_terms(text: str) -> list[str]:
     """Return the identifier-shaped terms of `text`, in order, repeats included."""
     terms: list[str] = []
     for raw in _SPLIT.split(text):
-        token = raw.lstrip(_LEAD).rstrip(_TRAIL)
+        token = _POSSESSIVE.sub("", raw.lstrip(_LEAD).rstrip(_TRAIL)).rstrip(_TRAIL)
         if "://" in token or token.lower().startswith("www."):
             continue
         candidates = [token.rstrip("/").rsplit("/", 1)[-1], token] if "/" in token else [token]

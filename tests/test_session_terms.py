@@ -253,7 +253,7 @@ def test_extraction_trims_drops_and_splits_paths() -> None:
         'Edit "modules/darwin/base.nix", then run `--keyterm` (see XaiStt). '
         "Commit 1454fb6 at https://example.com/a_b and 3.14, also akms25; "
         "id 0b8a3c2e-1f4d-4e5a-9b6c-7d8e9f0a1b2c, ok_x, ctx-guard-100! "
-        "words like Hello and don't and **bold** stay out. "
+        "words like Hello and don't and **bold** stay out, and XaiStt's loses its 's. "
         "/a/very/long/directory/path/that/runs/past/fifty/chars/leaf_file.txt"
     )
 
@@ -265,6 +265,7 @@ def test_extraction_trims_drops_and_splits_paths() -> None:
         "akms25",
         "ok_x",
         "ctx-guard-100",
+        "XaiStt",
         "leaf_file.txt",
     ]
 
@@ -353,3 +354,24 @@ def test_records_older_than_a_week_are_deleted(tmp_path: Path) -> None:
 
     assert not old.exists()
     assert kept.exists()
+
+
+def test_shape_drift_and_a_corrupt_record_are_logged_not_fatal(tmp_path: Path) -> None:
+    state = tmp_path / "state"
+    records: list[dict[str, object]] = [
+        {"type": "user", "message": {"content": 7}},
+        {"type": "user", "message": {"content": "keep shaped_term"}},
+    ]
+    transcript = _transcript(tmp_path, records)
+    with transcript.open("a") as handle:
+        handle.write('{"type": "user", "mess')
+    (state / "terms" / "sessions").mkdir(parents=True)
+    (state / "terms" / "sessions" / "broken.json").write_text("{}")
+
+    run_hook(_payload(transcript, tmp_path).encode(), state=state, now=NOW, host="box")
+
+    log = (state / "terms" / "hook.log").read_text().splitlines()
+    assert len(log) == 2
+    assert "1 transcript records" in log[0]
+    assert "broken.json" in log[1]
+    assert "shaped_term" in (state / "terms" / "current.txt").read_text().split("\n")
