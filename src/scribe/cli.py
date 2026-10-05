@@ -2067,9 +2067,7 @@ def gemini(
     # stdout carries only the output path; unconfigured, structlog prints there.
     configure()
     try:
-        anchor = _one_track(
-            Transcript.load(anchor_path), f"the --anchor transcript {anchor_path}"
-        )
+        anchor = _one_track(Transcript.load(anchor_path), f"the --anchor transcript {anchor_path}")
         api_key = gemini_stt.resolve_api_key()
         destination = audio_path.with_name(f"{audio_path.stem}.gemini.json") if out is None else out
         plan = plan_outputs(
