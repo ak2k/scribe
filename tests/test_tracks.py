@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import math
 from collections import Counter
 from pathlib import Path
 
@@ -9,7 +8,8 @@ from hypothesis import given
 from hypothesis import strategies as st
 
 from scribe.schema import Engine, Source, Transcript, Word
-from scribe.tracks import Merged, TrackFile, merge_tracks
+from scribe.tracks import BLEED_WINDOW_S, Merged, TrackFile, merge_tracks
+from scribe.vote import word_key
 
 Said = tuple[str, float]
 
@@ -28,11 +28,12 @@ def _side(
     )
 
 
-def _merge(mic: Transcript, app: Transcript) -> Merged:
+def _merge(mic: Transcript, app: Transcript, *, offset: float = 0.0) -> Merged:
     return merge_tracks(
         TrackFile(mic, Path("mic.json"), "mic-sha"),
         TrackFile(app, Path("app.json"), "app-sha"),
         me="Alice",
+        offset=offset,
     )
 
 
@@ -68,15 +69,51 @@ def test_two_mic_copies_of_one_app_word_lose_only_one() -> None:
     assert _dropped(merged) == [("Yeah.", 8.05, 1)]
 
 
-def test_a_constant_skew_is_measured_and_only_the_planted_copies_go() -> None:
+def test_the_window_includes_its_edge_and_nothing_past_it() -> None:
+    # Dyadic times, so the 0.25 s edge is exact in binary.
+    assert _dropped(_merge(_side(("yeah", 8.25)), APP)) == [("yeah", 8.25, 1)]
+    assert _dropped(_merge(_side(("yeah", 7.75)), APP)) == [("yeah", 7.75, 1)]
+    assert _dropped(_merge(_side(("yeah", 8.75)), APP, offset=0.5)) == [("yeah", 8.75, 1)]
+    assert _merge(_side(("yeah", 8.3)), APP).dropped == ()
+
+
+def test_each_mic_word_takes_the_earliest_free_app_word_in_its_window() -> None:
+    app = _side(("yeah", 8.0), ("yeah", 8.25))
+    # The closest app word for the first would leave the second none in reach.
+    mic = _side(("yeah", 8.25), ("yeah", 8.5))
+
+    assert _dropped(_merge(mic, app)) == [("yeah", 8.25, 2), ("yeah", 8.5, 2)]
+
+
+def test_a_repeat_back_of_three_words_is_kept() -> None:
+    app = _side(("Friday", 5.0), ("at", 5.25), ("three.", 5.5), speaker=3)
+    mic = _side(("Friday", 5.9), ("at", 6.15), ("three?", 6.4))
+
+    merged = _merge(mic, app)
+
+    assert (merged.dropped, merged.offset) == ((), 0.0)
+
+
+def test_a_shared_goodbye_sets_no_offset_for_the_rest_of_the_call() -> None:
+    app = _side(("so", 30.0), ("yeah", 30.3), ("Thank", 90.0), ("you,", 90.25), ("bye.", 90.5))
+    mic = _side(("yeah", 30.8), ("Thank", 90.4), ("you,", 90.65), ("bye.", 90.9))
+
+    merged = _merge(mic, app)
+
+    assert (merged.dropped, merged.offset) == ((), 0.0)
+    assert merged.transcript.engine.params["merge_offset_s"] == 0.0
+
+
+def test_a_given_offset_drops_only_the_planted_copies() -> None:
     copies = [(word.text, word.start + 0.3) for word in APP.words if word.start >= 4.0]
     mic = _side(
         ("Hello", 0.2), ("Forty.", 2.0 + 0.3 + 0.6), *copies, ("right", 7.0), ("thanks", 8.6)
     )
 
-    merged = _merge(mic, APP)
+    merged = _merge(mic, APP, offset=0.3)
 
-    assert math.isclose(merged.offset, 0.3, abs_tol=1e-9)
+    assert merged.offset == 0.3
+    assert merged.transcript.engine.params["merge_offset_s"] == 0.3
     assert sorted((text, start) for text, start, _ in _dropped(merged)) == sorted(copies)
     assert [run for *_, run in _dropped(merged)] == [5, 5, 5, 5, 5, 1, 1]
 
@@ -85,12 +122,6 @@ def test_disjoint_texts_drop_nothing() -> None:
     merged = _merge(_side(("Hello", 1.0), ("there", 4.0), ("friend", 8.0)), APP)
 
     assert (merged.dropped, merged.offset) == ((), 0.0)
-
-
-def test_fewer_than_three_consecutive_pairs_measure_no_offset() -> None:
-    merged = _merge(_side(("we", 4.4), ("can", 4.7), ("Friday.", 5.6)), APP)
-
-    assert (merged.offset, merged.dropped) == (0.0, ())
 
 
 def test_a_step_back_is_sorted_and_counted() -> None:
@@ -177,9 +208,41 @@ _WORDS = st.lists(
 )
 
 
-@given(mic_said=_WORDS, app_said=_WORDS)
+def _twinned(dropped: list[Word], app: list[Word], offset: float) -> bool:
+    """Whether each dropped word can hold its own same-key app word in its window."""
+    held: dict[int, int] = {}
+
+    def twins(word: Word) -> list[int]:
+        key = word_key(word.text)
+        return [
+            index
+            for index, other in enumerate(app)
+            if key
+            and word_key(other.text) == key
+            and abs(other.start - (word.start - offset)) <= BLEED_WINDOW_S
+        ]
+
+    def place(at: int, seen: set[int]) -> bool:
+        for index in twins(dropped[at]):
+            if index not in seen:
+                seen.add(index)
+                if index not in held or place(held[index], seen):
+                    held[index] = at
+                    return True
+        return False
+
+    return all(place(at, set()) for at in range(len(dropped)))
+
+
+@given(
+    mic_said=_WORDS,
+    app_said=_WORDS,
+    offset=st.floats(min_value=-1.0, max_value=1.0, allow_nan=False),
+)
 def test_app_words_stay_and_mic_words_are_kept_or_dropped(
-    mic_said: list[tuple[str, float, int | None]], app_said: list[tuple[str, float, int | None]]
+    mic_said: list[tuple[str, float, int | None]],
+    app_said: list[tuple[str, float, int | None]],
+    offset: float,
 ) -> None:
     def side(said: list[tuple[str, float, int | None]]) -> Transcript:
         words = [Word(text=t, start=s, end=s + 0.1, speaker=k) for t, s, k in said]
@@ -187,7 +250,7 @@ def test_app_words_stay_and_mic_words_are_kept_or_dropped(
 
     mic, app = side(mic_said), side(app_said)
 
-    merged = _merge(mic, app)
+    merged = _merge(mic, app, offset=offset)
     words = merged.transcript.words
 
     def fields(word: Word) -> tuple[str, float, float]:
@@ -201,3 +264,5 @@ def test_app_words_stay_and_mic_words_are_kept_or_dropped(
         map(fields, mic.words)
     )
     assert [w.start for w in words] == sorted(w.start for w in words)
+    assert merged.offset == offset
+    assert _twinned([d.word for d in merged.dropped], app.words, offset)

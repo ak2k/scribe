@@ -44,7 +44,7 @@ def test_merge_writes_beside_mic_and_prints_only_the_path(tmp_path: Path) -> Non
     assert result.stdout == f"{written}\n"
     assert result.stderr == (
         "scribe: merged 5 app words and 3 of 8 mic words; 5 mic words dropped as bleed-1 "
-        "copies, by run length 1/2/3+: 1/0/4; offset +0.050 s\n"
+        "copies, by run length 1/2/3+: 1/0/4; offset +0.000 s, from --offset\n"
     )
     merged = Transcript.load(written)
     assert merged.tracks is not None
@@ -66,14 +66,35 @@ def test_out_and_me_name_the_output_and_the_operator(tmp_path: Path) -> None:
     assert tracks[0].label == "Alice"
 
 
-def test_an_offset_past_half_a_second_is_warned(tmp_path: Path) -> None:
+def test_the_offset_is_the_one_given_and_never_warned(tmp_path: Path) -> None:
     mic, app_path = _pair(tmp_path, mic_shift=0.7)
+    out = tmp_path / "merged.json"
 
-    result = runner.invoke(app, ["merge", str(mic), str(app_path)])
+    result = runner.invoke(
+        app, ["merge", str(mic), str(app_path), "--offset", "0.7", "--out", str(out)]
+    )
 
     assert result.exit_code == 0, result.output
-    assert "offset +0.700 s" in result.stderr
-    assert "more than 0.5 s" in result.stderr
+    assert result.stderr == (
+        "scribe: merged 5 app words and 3 of 8 mic words; 5 mic words dropped as bleed-1 "
+        "copies, by run length 1/2/3+: 1/0/4; offset +0.700 s, from --offset\n"
+    )
+    assert Transcript.load(out).engine.params["merge_offset_s"] == 0.7
+
+
+def test_no_offset_given_is_zero_whatever_the_stems_hold(tmp_path: Path) -> None:
+    mic, app_path = _pair(tmp_path, mic_shift=0.7)
+    out = tmp_path / "merged.json"
+
+    result = runner.invoke(app, ["merge", str(mic), str(app_path), "--out", str(out)])
+
+    assert result.exit_code == 0, result.output
+    assert "8 of 8 mic words; 0 mic words dropped" in result.stderr
+    assert Transcript.load(out).engine.params["merge_offset_s"] == 0.0
+
+
+def _snapshot(directory: Path) -> dict[str, bytes]:
+    return {path.name: path.read_bytes() for path in directory.iterdir()}
 
 
 def _merged(tmp_path: Path) -> Path:
@@ -93,6 +114,9 @@ def _merged(tmp_path: Path) -> Path:
         pytest.param("same-file", "are one transcript", id="same-file"),
         pytest.param("skew", "30.0 s and APP", id="skew"),
         pytest.param("out-is-mic", "--out", id="out-is-mic"),
+        pytest.param("nan", "--offset", id="offset-nan"),
+        pytest.param("inf", "--offset", id="offset-inf"),
+        pytest.param("-inf", "--offset", id="offset-minus-inf"),
     ],
 )
 def test_a_refused_merge_exits_two_and_writes_nothing(
@@ -112,9 +136,11 @@ def test_a_refused_merge_exits_two_and_writes_nothing(
         app_path = mic
     elif case == "skew":
         _write(app_path, ("we", 1.0), duration=33.0)
-    else:
+    elif case == "out-is-mic":
         extra = ["--out", str(mic)]
-    before = sorted(tmp_path.iterdir())
+    else:
+        extra = ["--offset", case]
+    before = _snapshot(tmp_path)
 
     result = runner.invoke(app, ["merge", str(mic), str(app_path), *extra])
 
@@ -122,7 +148,45 @@ def test_a_refused_merge_exits_two_and_writes_nothing(
     assert message in result.stderr
     assert result.stderr.count("\n") == 1
     assert result.stdout == ""
-    assert sorted(tmp_path.iterdir()) == before
+    assert _snapshot(tmp_path) == before
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        pytest.param(["fill", "MERGED", "PLAIN"], id="fill-transcript"),
+        pytest.param(["fill", "PLAIN", "MERGED"], id="fill-reference"),
+        pytest.param(["vote", "MERGED", "PLAIN", "OTHER"], id="vote-backbone"),
+        pytest.param(["vote", "PLAIN", "MERGED", "OTHER"], id="vote-primary"),
+        pytest.param(["vote", "PLAIN", "OTHER", "MERGED"], id="vote-secondary"),
+        pytest.param(["pick", "MERGED", "PLAIN", "--sides-from", "ABSENT"], id="pick-transcript"),
+        pytest.param(["pick", "PLAIN", "MERGED", "--sides-from", "ABSENT"], id="pick-reference"),
+        pytest.param(["gaps", "MERGED", "ABSENT"], id="gaps"),
+        pytest.param(["gemini", "ABSENT", "--anchor", "MERGED"], id="gemini-anchor"),
+        pytest.param(["disputes", "MERGED"], id="disputes"),
+    ],
+)
+def test_a_merged_input_is_refused_where_its_tracks_would_be_lost(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, argv: list[str]
+) -> None:
+    # Nothing past the refusal may reach a model or the network.
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    said = [("we", 1.0), ("can", 1.3), ("ship", 1.6)]
+    paths = {
+        "MERGED": _merged(tmp_path),
+        "PLAIN": _write(tmp_path / "plain.json", *said),
+        "OTHER": _write(tmp_path / "other.json", *said),
+        "ABSENT": tmp_path / "absent.wav",
+    }
+    before = _snapshot(tmp_path)
+
+    result = runner.invoke(app, [str(paths.get(arg, arg)) for arg in argv])
+
+    assert result.exit_code == 2, result.output
+    assert f"{paths['MERGED']} merges two tracks" in result.stderr
+    assert result.stderr.count("\n") == 1
+    assert result.stdout == ""
+    assert _snapshot(tmp_path) == before
 
 
 def test_turns_on_a_merged_transcript_skip_both_speaker_passes(tmp_path: Path) -> None:
