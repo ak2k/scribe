@@ -1557,9 +1557,9 @@ def merge(
     stdout is the path written; stderr is one summary line, naming the offset
     applied. Exit 2, before anything is written: an --offset that is not a
     finite number; a --me that reads like a speaker label; an input that is
-    unreadable, not a transcript, wordless or merged already; MIC and APP
-    holding one transcript; durations more than 2 s apart; or an --out that
-    cannot be written. Run `scribe turns` on the result next.
+    unreadable, not a transcript, wordless, merged already or without a
+    duration; MIC and APP holding one transcript; durations more than 2 s
+    apart; or an --out that cannot be written. Run `scribe turns` on the result next.
     """
     try:
         if not math.isfinite(offset):
@@ -1573,7 +1573,13 @@ def merge(
         if mic_file.sha256 == app_file.sha256:
             raise InputValidationError(f"MIC {mic_path} and APP {app_path} are one transcript")
         mic_s, app_s = mic_file.transcript.duration, app_file.transcript.duration
-        if mic_s is not None and app_s is not None and abs(mic_s - app_s) > MAX_SKEW_S:
+        # The last word's end is no stand-in: either side can fall silent long before the call ends.
+        if mic_s is None or app_s is None:
+            role, path = ("MIC", mic_path) if mic_s is None else ("APP", app_path)
+            raise InputValidationError(
+                f"{role} {path} records no duration, so it cannot be shown to be a side of one call"
+            )
+        if abs(mic_s - app_s) > MAX_SKEW_S:
             raise InputValidationError(
                 f"MIC {mic_path} lasts {mic_s:.1f} s and APP {app_path} {app_s:.1f} s, "
                 f"more than {MAX_SKEW_S} s apart: not two sides of one call"
