@@ -61,6 +61,11 @@ _LABEL = re.compile(r"speaker\s+(\d+|\?)", re.IGNORECASE)
 _FORBIDDEN = ("|", "<", ">")
 
 
+def looks_like_label(name: str) -> bool:
+    """Whether `name`, trimmed, reads like a speaker label ("Speaker 2", "speaker ?")."""
+    return _LABEL.fullmatch(name.strip()) is not None
+
+
 def parse_attendees(text: str) -> tuple[str, ...]:
     """Read a comma-separated attendee list, each name trimmed and NFC-normalized, in order.
 
@@ -81,7 +86,7 @@ def parse_attendees(text: str) -> tuple[str, ...]:
             raise InputValidationError(
                 f"--attendees name {name!r} may not hold a line break, '|', '<' or '>'"
             )
-        if _LABEL.fullmatch(name):
+        if looks_like_label(name):
             raise InputValidationError(f"--attendees name {name!r} looks like a speaker label")
         if _folded(name) in seen:
             raise InputValidationError(f"--attendees lists {name!r} twice")

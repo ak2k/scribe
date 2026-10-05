@@ -23,7 +23,7 @@ import typer
 from pydantic import ValidationError
 
 from scribe import attribution, ensemble, gemini_stt, third_ear
-from scribe.attendees import name_speakers, parse_attendees
+from scribe.attendees import looks_like_label, name_speakers, parse_attendees
 from scribe.claude_cli import DEFAULT_MAX_BUDGET_USD, ClaudeCliBackend
 from scribe.cleanup import (
     CLEANUP_PROMPT_VERSION,
@@ -1531,14 +1531,17 @@ def merge(
 
     stdout is the path written; stderr is one summary line, naming the offset
     applied. Exit 2, before anything is written: an --offset that is not a
-    finite number; an input that is unreadable, not a transcript, wordless or
-    merged already; MIC and APP holding one transcript; durations more than 2 s
-    apart; or an --out that cannot be written. Run `scribe turns` on the result
-    next.
+    finite number; a --me that reads like a speaker label; an input that is
+    unreadable, not a transcript, wordless or merged already; MIC and APP
+    holding one transcript; durations more than 2 s apart; or an --out that
+    cannot be written. Run `scribe turns` on the result next.
     """
     try:
         if not math.isfinite(offset):
             raise InputValidationError(f"--offset {offset} is not a finite number of seconds")
+        # The app side's speakers are labeled "Speaker N", or "Speaker ?" where unattributed.
+        if looks_like_label(me):
+            raise InputValidationError(f"--me {me!r} looks like a speaker label")
         mic_file, app_file = _track_file(mic_path, "MIC"), _track_file(app_path, "APP")
         # A transcript merged with its own copy would lose every keyed mic word as bleed.
         if mic_file.sha256 == app_file.sha256:
