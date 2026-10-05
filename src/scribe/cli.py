@@ -1564,8 +1564,9 @@ def merge(
     try:
         if not math.isfinite(offset):
             raise InputValidationError(f"--offset {offset} is not a finite number of seconds")
-        # The app side's speakers are labeled "Speaker N", or "Speaker ?" where unattributed.
-        if looks_like_label(me):
+        # The app side's speakers are labeled "Speaker N", or "Speaker ?" where unattributed;
+        # cleanup's fidelity check reads a label with spaces, `*` and `:` stripped.
+        if looks_like_label(me.strip(" \t*:")):
             raise InputValidationError(f"--me {me!r} looks like a speaker label")
         mic_file, app_file = _track_file(mic_path, "MIC"), _track_file(app_path, "APP")
         # A transcript merged with its own copy would lose every keyed mic word as bleed.
