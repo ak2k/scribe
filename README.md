@@ -103,6 +103,35 @@ version and per-chunk status in `talk.transcript.speakers.json`.
 prints one warning line; exit 4 means every chunk failed (artifacts are still
 written), and exit 2 with no usable CLI names `--no-llm-speakers`.
 
+## Keep the vocabulary of Claude Code sessions
+
+`scribe terms hook` is a Claude Code hook. On each event it reads the tail of
+the session's transcript and keeps the identifiers in it (file names, paths,
+functions, commands, the repo and branch), so dictation into that session can
+pass them to xAI as keyterms. It writes under `$XDG_STATE_HOME/scribe`, else
+`~/.local/state/scribe`:
+
+- `terms/sessions/<session_id>.json`: one session's terms, with counts;
+  deleted after 7 days.
+- `terms/current.txt`: up to 60 terms, one per line, from every session active
+  in the last 30 minutes, newest first; usable as a terms file as is.
+- `prompts.jsonl`: every prompt you submit, with time, host, session and
+  directory. It holds your prompts verbatim; delete it whenever you like.
+- `terms/hook.log`: one line per failure. The hook prints nothing and always
+  exits 0.
+
+Install it in `~/.claude/settings.json`; `async` keeps it from delaying a prompt:
+
+```json
+{
+  "hooks": {
+    "UserPromptSubmit": [{"hooks": [{"type": "command", "command": "scribe terms hook", "async": true}]}],
+    "SessionStart": [{"hooks": [{"type": "command", "command": "scribe terms hook", "async": true}]}],
+    "Stop": [{"hooks": [{"type": "command", "command": "scribe terms hook", "async": true}]}]
+  }
+}
+```
+
 ## Inspect the schema
 
 ```bash

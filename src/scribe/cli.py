@@ -5,13 +5,14 @@ from __future__ import annotations
 import dataclasses
 import errno
 import hashlib
+import io
 import json
 import os
 import stat
 import sys
 import tempfile
 import time
-from contextlib import contextmanager
+from contextlib import contextmanager, redirect_stdout
 from datetime import UTC, datetime
 from enum import StrEnum
 from functools import partial
@@ -21,7 +22,7 @@ from typing import TYPE_CHECKING, NoReturn
 import typer
 from pydantic import ValidationError
 
-from scribe import attribution, ensemble, gemini_stt, third_ear
+from scribe import attribution, ensemble, gemini_stt, session_terms, third_ear
 from scribe.attendees import name_speakers, parse_attendees
 from scribe.claude_cli import DEFAULT_MAX_BUDGET_USD, ClaudeCliBackend
 from scribe.cleanup import (
@@ -130,6 +131,11 @@ app = typer.Typer(
     add_completion=False,
 )
 main = app
+terms_app = typer.Typer(
+    help="Keep the vocabulary of Claude Code sessions for dictation.",
+    no_args_is_help=True,
+)
+app.add_typer(terms_app, name="terms")
 
 
 class Format(StrEnum):
@@ -1993,3 +1999,18 @@ def gaps(
         typer.echo(f"scribe: {flags}; no words, so no speech level", err=True)
     else:
         typer.echo(f"scribe: {flags}; speech level {found.speech_db:.1f} dB", err=True)
+
+
+@terms_app.command(name="hook")
+def terms_hook() -> None:
+    """Run as a Claude Code hook: read its JSON on stdin, keep the session's terms.
+
+    Writes under $XDG_STATE_HOME/scribe (else ~/.local/state/scribe): the
+    session's terms in terms/sessions/, the merged list of the last 30 minutes'
+    sessions in terms/current.txt, and, on UserPromptSubmit, the prompt in
+    prompts.jsonl. Prints nothing and exits 0 whatever happens, since a
+    UserPromptSubmit hook's stdout becomes model context; failures go to
+    terms/hook.log.
+    """
+    with redirect_stdout(io.StringIO()):
+        session_terms.main(sys.stdin.buffer, os.environ)
