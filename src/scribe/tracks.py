@@ -9,10 +9,11 @@ offset between the sides is the one given, never fitted from the words.
 from __future__ import annotations
 
 import bisect
+import heapq
 import json
 from collections import defaultdict
 from dataclasses import dataclass
-from itertools import chain, groupby
+from itertools import groupby
 from typing import TYPE_CHECKING
 
 from scribe.curated import fill_ranges
@@ -63,10 +64,11 @@ class Merged:
     dropped: tuple[Dropped, ...]
 
 
-def _sorted(words: Sequence[Word]) -> tuple[list[Word], int]:
-    """Words stably sorted by start, and how many changed place."""
+def _sorted(words: Sequence[Word]) -> tuple[list[Word], list[int], int]:
+    """Words stably sorted by start, the index each had, and how many changed place."""
     order = sorted(range(len(words)), key=lambda index: words[index].start)
-    return [words[index] for index in order], sum(at != index for at, index in enumerate(order))
+    moved = sum(at != index for at, index in enumerate(order))
+    return [words[index] for index in order], order, moved
 
 
 def _pairs(
@@ -144,7 +146,8 @@ def merge_tracks(
 ) -> Merged:
     """Merge the two sides of a call, dropping the mic's copies of the app's words.
 
-    Each side's words are first sorted by start. A mic word is a bleed copy
+    Words are paired in start order, but each side keeps its own word order
+    in the result, which turns settles its speakers in. A mic word is a bleed copy
     when an app word of the same key, not already answering for another,
     starts within BLEED_WINDOW_S of it once `offset`, how much later the mic
     runs than the app, is taken off.
@@ -153,23 +156,23 @@ def merge_tracks(
         InputValidationError: a side's fill record is malformed.
 
     """
-    mic_words, mic_moved = _sorted(mic.transcript.words)
-    app_words, app_moved = _sorted(app.transcript.words)
+    mic_words, mic_order, mic_moved = _sorted(mic.transcript.words)
+    app_words, _, app_moved = _sorted(app.transcript.words)
     copies = sorted(_pairs(mic_words, app_words, shift=offset, window=BLEED_WINDOW_S))
     dropped = tuple(
         Dropped(mic_words[at], run) for at, run in zip(copies, _runs(copies), strict=True)
     )
     # One id for the whole mic side, held by no app word.
     me_id = max((word.speaker for word in app_words if word.speaker is not None), default=-1) + 1
-    copied = set(copies)
+    copied = {mic_order[at] for at in copies}
     kept = [
         word.model_copy(update={"speaker": me_id, "track": MIC})
-        for at, word in enumerate(mic_words)
-        if at not in copied
+        for index, word in enumerate(mic.transcript.words)
+        if index not in copied
     ]
-    placed = [word.model_copy(update={"track": APP}) for word in app_words]
-    # Stable, app words first: on an equal start the app word comes first.
-    words = sorted(chain(placed, kept), key=lambda word: word.start)
+    placed = [word.model_copy(update={"track": APP}) for word in app.transcript.words]
+    # Each side in its own order, interleaved by start; on an equal start the app word comes first.
+    words = list(heapq.merge(placed, kept, key=lambda word: word.start))
     alone, paired, longer = count_runs(dropped)
     params: dict[str, float | int | bool | str] = {
         "merge_rule": BLEED_RULE,

@@ -126,12 +126,12 @@ def test_disjoint_texts_drop_nothing() -> None:
     assert (merged.dropped, merged.offset) == ((), 0.0)
 
 
-def test_a_step_back_is_sorted_and_counted() -> None:
+def test_a_step_back_keeps_its_order_and_is_counted() -> None:
     mic = _side(("Hello", 3.0), ("there", 0.5), ("friend", 3.5))
 
     merged = _merge(mic, APP).transcript
 
-    assert [w.text for w in merged.words if w.track == 0] == ["there", "Hello", "friend"]
+    assert [w.text for w in merged.words if w.track == 0] == ["Hello", "there", "friend"]
     assert (merged.engine.params["merge_mic_moved"], merged.engine.params["merge_app_moved"]) == (
         2,
         0,
@@ -284,6 +284,11 @@ def test_app_words_stay_and_mic_words_are_kept_or_dropped(
     assert Counter(kept + [fields(d.word) for d in merged.dropped]) == Counter(
         map(fields, mic.words)
     )
-    assert [w.start for w in words] == sorted(w.start for w in words)
+    # Each side keeps its own order; where neither steps back, so does the whole.
+    assert [fields(w) for w in words if w.track == 1] == list(map(fields, app.words))
+    remaining = iter(map(fields, mic.words))
+    assert all(word in remaining for word in kept)
+    if all(s == sorted(s) for s in ([w.start for w in mic.words], [w.start for w in app.words])):
+        assert [w.start for w in words] == sorted(w.start for w in words)
     assert merged.offset == offset
     assert _twinned([d.word for d in merged.dropped], app.words, offset)
