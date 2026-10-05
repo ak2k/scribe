@@ -6,6 +6,7 @@ import dataclasses
 import errno
 import hashlib
 import json
+import math
 import os
 import stat
 import sys
@@ -79,7 +80,6 @@ from scribe.tracks import (
     DEFAULT_ME,
     MAX_SKEW_S,
     MIC,
-    WARN_OFFSET_S,
     TrackFile,
     count_runs,
     merge_tracks,
@@ -1504,26 +1504,32 @@ def merge(
         help="Where to write the result. Default: MIC's name ending .merged.json, beside it.",
     ),
     me: str = typer.Option(DEFAULT_ME, "--me", help="The label of the operator's turns."),
+    offset: float = typer.Option(
+        0.0, "--offset", metavar="SECONDS", help="How much later MIC runs than APP."
+    ),
 ) -> None:
     """Merge the two sides of a call, each transcribed on its own, into one transcript.
 
     Every APP word is kept as it is. Every MIC word is kept under the label
     --me, unless it is the far side leaking into the microphone: a MIC word
     goes when an APP word of the same text, not already answering for
-    another, starts within 0.25 s of it once the offset is taken off (rule
-    bleed-1). The offset is the median start difference over runs of 3 or more
-    such words within 1 s that follow one another on both sides, 0 where there
-    are none. Nothing is retimed. The result keeps both inputs' fill ranges, for
-    `cleanup --curated`, but not their pick records: each input's own disputes
-    list stays the place to read those.
+    another, starts within 0.25 s of it once --offset is taken off (rule
+    bleed-1). The offset is never measured from the words: stems recorded
+    together sit well inside 0.25 s, so the default 0 fits them, and stems
+    from elsewhere need their offset given. Nothing is retimed. The result
+    keeps both inputs' fill ranges, for `cleanup --curated`, but not their
+    pick records: each input's own disputes list stays the place to read those.
 
-    stdout is the path written; stderr is one summary line, and a warning when
-    the offset passes 0.5 s. Exit 2, before anything is written: an input that
-    is unreadable, not a transcript, wordless or merged already; MIC and APP
-    holding one transcript; durations more than 2 s apart; or an --out that
-    cannot be written. Run `scribe turns` on the result next.
+    stdout is the path written; stderr is one summary line, naming the offset
+    applied. Exit 2, before anything is written: an --offset that is not a
+    finite number; an input that is unreadable, not a transcript, wordless or
+    merged already; MIC and APP holding one transcript; durations more than 2 s
+    apart; or an --out that cannot be written. Run `scribe turns` on the result
+    next.
     """
     try:
+        if not math.isfinite(offset):
+            raise InputValidationError(f"--offset {offset} is not a finite number of seconds")
         mic_file, app_file = _track_file(mic_path, "MIC"), _track_file(app_path, "APP")
         # A transcript merged with its own copy would lose every keyed mic word as bleed.
         if mic_file.sha256 == app_file.sha256:
@@ -1536,7 +1542,7 @@ def merge(
             )
         destination = sibling(mic_path, ".merged.json") if out is None else out
         plan = plan_outputs({"--out": destination}, {"MIC": mic_path, "APP": app_path})
-        merged = merge_tracks(mic_file, app_file, me=me)
+        merged = merge_tracks(mic_file, app_file, me=me, offset=offset)
         try:
             merged.transcript.dump(plan["--out"])
         except (OSError, ValueError) as exc:
@@ -1557,13 +1563,8 @@ def _report_merge(merged: Merged) -> None:
     _warn(
         f"merged {len(words) - kept} app words and {kept} of {kept + len(merged.dropped)} mic "
         f"words; {len(merged.dropped)} mic words dropped as {BLEED_RULE} copies, by run length "
-        f"1/2/3+: {runs}; offset {merged.offset:+.3f} s"
+        f"1/2/3+: {runs}; offset {merged.offset:+.3f} s, from --offset"
     )
-    if abs(merged.offset) > WARN_OFFSET_S:
-        _warn(
-            f"the tracks are {abs(merged.offset):.3f} s out of step, more than {WARN_OFFSET_S} s: "
-            "check that MIC and APP are one call's two sides, started together"
-        )
 
 
 def _report_fill(fill: Fill) -> None:

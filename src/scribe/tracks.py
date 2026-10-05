@@ -2,14 +2,14 @@
 
 Each side is transcribed on its own first. The merge keeps every app word,
 gives every mic word one speaker of its own, and drops the mic words that are
-the far side leaking into the mic (rule bleed-1). Nothing is retimed.
+the far side leaking into the mic (rule bleed-1). Nothing is retimed, and the
+offset between the sides is the one given, never fitted from the words.
 """
 
 from __future__ import annotations
 
 import bisect
 import json
-import statistics
 from collections import defaultdict
 from dataclasses import dataclass
 from itertools import chain, groupby
@@ -27,12 +27,6 @@ BLEED_RULE = "bleed-1"
 # Leaked speech reaches the mic within tens of ms of the app; a repeat-back
 # starts only after the word it repeats has ended.
 BLEED_WINDOW_S = 0.25
-# Wide enough to pair the two sides' copies of a word before the offset is known.
-PAIR_WINDOW_S = 1.0
-# Fewer matches in a row than this can be two people saying common words.
-MIN_RUN_PAIRS = 3
-# Stems started together sit closer than this; further apart, a person should look.
-WARN_OFFSET_S = 0.5
 # Two stems of one call differ in length by their start and stop skew, not by seconds.
 MAX_SKEW_S = 2.0
 DEFAULT_ME = "Me"
@@ -60,7 +54,7 @@ class Dropped:
 
 @dataclass(frozen=True)
 class Merged:
-    """The merged transcript, the offset measured, and the mic words dropped."""
+    """The merged transcript, the offset applied, and the mic words dropped."""
 
     transcript: Transcript
     offset: float
@@ -104,28 +98,6 @@ def _pairs(
     return pairs
 
 
-def measure_offset(mic: Sequence[Word], app: Sequence[Word]) -> float:
-    """How much later the mic's copies start than the app's words, from runs of matches.
-
-    The median of the start differences over runs of MIN_RUN_PAIRS or more
-    matches that follow one another on both sides; 0.0 where there is none.
-    """
-    pairs = _pairs(mic, app, shift=0.0, window=PAIR_WINDOW_S)
-    runs: list[list[int]] = []
-    for at, index in pairs.items():
-        if pairs.get(at - 1) == index - 1:
-            runs[-1].append(at)
-        else:
-            runs.append([at])
-    differences = [
-        mic[at].start - app[pairs[at]].start
-        for run in runs
-        if len(run) >= MIN_RUN_PAIRS
-        for at in run
-    ]
-    return statistics.median(differences) if differences else 0.0
-
-
 def _runs(dropped: Sequence[int]) -> list[int]:
     """The length of the run of consecutive indexes each dropped index sits in."""
     lengths: list[int] = []
@@ -153,12 +125,15 @@ def _union(mic: TrackFile, app: TrackFile, key: str) -> str | None:
     return json.dumps([list(span) for span in spans])
 
 
-def merge_tracks(mic: TrackFile, app: TrackFile, *, me: str = DEFAULT_ME) -> Merged:
+def merge_tracks(
+    mic: TrackFile, app: TrackFile, *, me: str = DEFAULT_ME, offset: float = 0.0
+) -> Merged:
     """Merge the two sides of a call, dropping the mic's copies of the app's words.
 
     Each side's words are first sorted by start. A mic word is a bleed copy
     when an app word of the same key, not already answering for another,
-    starts within BLEED_WINDOW_S of it once the offset is taken off.
+    starts within BLEED_WINDOW_S of it once `offset`, how much later the mic
+    runs than the app, is taken off.
 
     Raises:
         InputValidationError: a side's fill record is malformed.
@@ -166,7 +141,6 @@ def merge_tracks(mic: TrackFile, app: TrackFile, *, me: str = DEFAULT_ME) -> Mer
     """
     mic_words, mic_moved = _sorted(mic.transcript.words)
     app_words, app_moved = _sorted(app.transcript.words)
-    offset = measure_offset(mic_words, app_words)
     copies = sorted(_pairs(mic_words, app_words, shift=offset, window=BLEED_WINDOW_S))
     dropped = tuple(
         Dropped(mic_words[at], run) for at, run in zip(copies, _runs(copies), strict=True)
