@@ -67,6 +67,8 @@ from scribe.pick import (
     replay_readings,
 )
 from scribe.schema import Engine, Source, Transcript, from_xai_response
+from scribe.serve import is_loopback
+from scribe.serve import run as run_server
 from scribe.speakers import (
     DEFAULT_SPEAKER_MODEL,
     NAMES_PROMPT_VERSION,
@@ -82,6 +84,7 @@ from scribe.turns import (
     turns_from_speakers,
     word_speakers,
 )
+from scribe.vocab import TermsFile
 from scribe.vote import first_decrease, vote_transcripts
 from scribe.writers import to_markdown, to_srt, to_vtt
 from scribe.xai_stt import (
@@ -1993,3 +1996,56 @@ def gaps(
         typer.echo(f"scribe: {flags}; no words, so no speech level", err=True)
     else:
         typer.echo(f"scribe: {flags}; speech level {found.speech_db:.1f} dB", err=True)
+
+
+def _xdg_home(variable: str, fallback: str) -> Path:
+    # The XDG spec has a relative value ignored, as if unset.
+    value = Path(os.environ.get(variable, ""))
+    return value if value.is_absolute() else Path.home() / fallback
+
+
+@app.command(name="serve")
+def serve_command(
+    host: str = typer.Option("127.0.0.1", "--host", help="Loopback address to listen on."),
+    port: int = typer.Option(8765, "--port", help="Port to listen on."),
+    terms: Path | None = typer.Option(
+        None,
+        "--terms",
+        metavar="FILE",
+        help="Terms file. Default: $XDG_CONFIG_HOME/scribe/terms.txt, if it exists.",
+    ),
+    keep: Path | None = typer.Option(
+        None,
+        "--keep",
+        metavar="DIR",
+        help="Where each dictation is kept. Default: $XDG_STATE_HOME/scribe/serve.",
+    ),
+    no_keep: bool = typer.Option(False, "--no-keep", help="Keep no dictation."),
+) -> None:
+    """Serve an OpenAI-compatible transcription endpoint for dictation apps.
+
+    POST audio to /v1/audio/transcriptions; it goes to xAI with the terms file's
+    terms as keyterms, and comes back as {"text": ...} with the file's aliases
+    and identifier spellings applied. Needs XAI_API_KEY. Only loopback clients
+    that are not web pages are served. Each dictation (audio, xAI's reply and a
+    record of the result) is kept under --keep, newest 1000.
+    """
+    configure()
+    try:
+        if not is_loopback(host):
+            raise InputValidationError(f"--host {host} is not a loopback address")
+        if keep is not None and no_keep:
+            raise InputValidationError("--keep and --no-keep cannot both be given")
+        api_key = resolve_api_key()
+        default_terms = _xdg_home("XDG_CONFIG_HOME", ".config") / "scribe" / "terms.txt"
+        vocab = TermsFile(terms or default_terms, required=terms is not None)
+    except AppError as exc:
+        _fail(exc)
+    default_keep = _xdg_home("XDG_STATE_HOME", ".local/state") / "scribe" / "serve"
+    run_server(
+        api_key=api_key,
+        terms=vocab,
+        keep=None if no_keep else keep or default_keep,
+        host=host,
+        port=port,
+    )

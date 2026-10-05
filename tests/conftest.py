@@ -68,3 +68,13 @@ def no_real_diarizer(monkeypatch: pytest.MonkeyPatch) -> None:
         raise AssertionError("reached the real pyannote backend; swap it in")
 
     monkeypatch.setattr("scribe.cli.PyannoteDiarizer", refuse)
+
+
+@pytest.fixture(autouse=True)
+def no_real_server(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Fail a test that reaches the real server, rather than let it bind a port."""
+
+    def refuse(*_args: object, **_settings: object) -> NoReturn:
+        raise AssertionError("reached the real server; swap uvicorn.run out")
+
+    monkeypatch.setattr("uvicorn.run", refuse)
