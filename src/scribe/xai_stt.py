@@ -5,7 +5,9 @@ from __future__ import annotations
 import os
 import re
 import stat
+import time
 import unicodedata
+from contextlib import contextmanager
 from typing import IO, TYPE_CHECKING, cast
 
 import httpx
@@ -14,7 +16,7 @@ import stamina
 from scribe.errors import ExternalServiceError, InputValidationError
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Callable, Collection, Generator, Mapping, Sequence
     from pathlib import Path
 
 DEFAULT_MODEL = "grok-voice-transcribe-2.0"
@@ -28,7 +30,7 @@ MAX_KEYTERM_CHARS = 50
 # speech, 82 s of it in one meeting, which a threshold of 0 transcribed in full.
 DEFAULT_VAD_THRESHOLD = 0.0
 
-_RETRYABLE_STATUSES = frozenset({408, 429, 500, 502, 503, 504})
+RETRYABLE_STATUSES = frozenset({408, 429, 500, 502, 503, 504})
 _BODY_EXCERPT_CHARS = 300
 _SAFE_FILENAME_CHARS = re.compile(r"[^A-Za-z0-9._-]+")
 _MAX_UPLOAD_NAME_CHARS = 96
@@ -67,12 +69,16 @@ def resolve_api_key(env: Mapping[str, str] = os.environ) -> str:
     return key
 
 
-def _is_retryable(exc: Exception) -> bool:
-    """True for a transient failure: rate limit, request timeout, 5xx, transport error."""
-    if isinstance(exc, httpx.HTTPStatusError):
-        return exc.response.status_code in _RETRYABLE_STATUSES
-    # A 4xx other than 408/429 needs the call fixed, so retrying it only burns quota.
-    return isinstance(exc, httpx.TransportError)
+def _retryable(statuses: Collection[int]) -> Callable[[Exception], bool]:
+    """Return a predicate true for a transport error or one of `statuses`."""
+
+    def is_retryable(exc: Exception) -> bool:
+        if isinstance(exc, httpx.HTTPStatusError):
+            return exc.response.status_code in statuses
+        # A 4xx other than 408/429 needs the call fixed, so retrying it only burns quota.
+        return isinstance(exc, httpx.TransportError)
+
+    return is_retryable
 
 
 def _upload_name(path: Path) -> str:
@@ -183,8 +189,9 @@ def check_input(path: Path, max_bytes: int) -> None:
         )
 
 
-@stamina.retry(on=_is_retryable, attempts=RETRY_ATTEMPTS, timeout=None)
-def _post(client: httpx.Client, path: Path, scalars: list[_Part]) -> httpx.Response:
+def _post(
+    client: httpx.Client, path: Path, scalars: list[_Part], timeout_seconds: float
+) -> httpx.Response:
     """POST one attempt at `/stt`, with `file` as the last multipart field."""
     # A handle per attempt: httpx encodes multipart lazily at send time and
     # rewinds only handles it can seek, so sharing one across retries would make
@@ -195,7 +202,7 @@ def _post(client: httpx.Client, path: Path, scalars: list[_Part]) -> httpx.Respo
                 *scalars,
                 ("file", (_upload_name(path), handle, None)),
             ]
-            response = client.post("/stt", files=parts)
+            response = client.post("/stt", files=parts, timeout=httpx.Timeout(timeout_seconds))
     except OSError as exc:
         raise InputValidationError(f"cannot read audio file {path}: {exc}") from exc
     response.raise_for_status()
@@ -238,6 +245,10 @@ class XaiStt:
         transport: httpx.BaseTransport | None = None,
         timeout_seconds: float = 600,
         max_bytes: int = MAX_UPLOAD_BYTES,
+        attempts: int = RETRY_ATTEMPTS,
+        retry_statuses: Collection[int] = RETRYABLE_STATUSES,
+        deadline_seconds: float | None = None,
+        keep_alive: bool = False,
     ) -> None:
         """Hold request settings; no connection is opened until `transcribe`.
 
@@ -248,6 +259,12 @@ class XaiStt:
             timeout_seconds: Per-request timeout, generous because a large
                 upload is slow.
             max_bytes: Upload ceiling enforced before any request.
+            attempts: Most attempts one `transcribe` makes.
+            retry_statuses: HTTP statuses retried; transport errors always are.
+            deadline_seconds: Most time one `transcribe` spends across all its
+                attempts and the waits between them, or None for no bound.
+            keep_alive: Hold one client, and its connections, across calls
+                until `close`, rather than one client per call.
 
         """
         self._api_key = api_key
@@ -255,14 +272,39 @@ class XaiStt:
         self._transport = transport
         self._timeout_seconds = timeout_seconds
         self._max_bytes = max_bytes
+        self._attempts = attempts
+        self._is_retryable = _retryable(retry_statuses)
+        self._deadline_seconds = deadline_seconds
+        self._shared = self._new_client() if keep_alive else None
 
-    def _client(self) -> httpx.Client:
+    def _new_client(self) -> httpx.Client:
         return httpx.Client(
             base_url=self._base_url,
             headers={"Authorization": f"Bearer {self._api_key}"},
             timeout=httpx.Timeout(self._timeout_seconds),
             transport=self._transport,
         )
+
+    @contextmanager
+    def _client(self) -> Generator[httpx.Client]:
+        if self._shared is not None:
+            yield self._shared
+            return
+        with self._new_client() as client:
+            yield client
+
+    def close(self) -> None:
+        """Close the kept-alive client, if there is one."""
+        if self._shared is not None:
+            self._shared.close()
+
+    def _attempt_timeout(self, started: float) -> float:
+        """Per-attempt timeout: the client's, cut to what is left of the deadline."""
+        if self._deadline_seconds is None:
+            return self._timeout_seconds
+        left = self._deadline_seconds - (time.monotonic() - started)
+        # Never zero, which httpx reads as an immediate timeout on connect.
+        return max(min(self._timeout_seconds, left), 0.1)
 
     def transcribe(
         self,
@@ -314,9 +356,10 @@ class XaiStt:
             keyterms=keyterms,
             vad_threshold=vad_threshold,
         )
+        started = time.monotonic()
         try:
             with self._client() as client:
-                response = _post(client, path, scalars)
+                response = self._post_with_retries(client, path, scalars, started)
         except httpx.HTTPStatusError as exc:
             raise _status_error(exc.response) from exc
         # RequestError, not TransportError: a mis-framed or mis-encoded body
@@ -325,3 +368,13 @@ class XaiStt:
         except httpx.RequestError as exc:
             raise ExternalServiceError(f"xAI transcription request failed: {exc}") from exc
         return _decode(response)
+
+    def _post_with_retries(
+        self, client: httpx.Client, path: Path, scalars: list[_Part], started: float
+    ) -> httpx.Response:
+        for attempt in stamina.retry_context(
+            on=self._is_retryable, attempts=self._attempts, timeout=self._deadline_seconds
+        ):
+            with attempt:
+                return _post(client, path, scalars, self._attempt_timeout(started))
+        raise AssertionError("unreachable: stamina re-raises the last failure")  # pragma: no cover

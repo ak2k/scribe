@@ -3,7 +3,7 @@ from __future__ import annotations
 import mimetypes
 import os
 import re
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast, override
 
 import httpx
 import pytest
@@ -368,3 +368,104 @@ def test_a_missing_key_names_only_the_variable(env: dict[str, str]) -> None:
         resolve_api_key(env)
 
     assert _SHOUTED.findall(str(caught.value)) == ["XAI_API_KEY"]
+
+
+class _ClosingTransport(httpx.MockTransport):
+    """A mock transport that counts how often a client closes it."""
+
+    def __init__(self, handler: Callable[[httpx.Request], httpx.Response]) -> None:
+        super().__init__(handler)
+        self.closed = 0
+
+    @override
+    def close(self) -> None:
+        self.closed += 1
+
+
+def _read_timeout(request: httpx.Request) -> float:
+    timeouts: object = request.extensions["timeout"]  # pyright: ignore[reportAny]  # httpx types extensions as Any
+    assert isinstance(timeouts, dict)
+    return cast("dict[str, float]", timeouts)["read"]
+
+
+def test_by_default_each_call_opens_and_closes_its_own_client(
+    tmp_path: Path,
+) -> None:
+    transport = _ClosingTransport(_ok)
+    client = XaiStt(KEY, transport=transport)
+    clip = _clip(tmp_path)
+
+    client.transcribe(clip)
+    client.transcribe(clip)
+
+    assert transport.closed == 2
+
+
+def test_the_default_attempt_timeout_is_600_s(tmp_path: Path) -> None:
+    client, seen = _client(_ok)
+
+    client.transcribe(_clip(tmp_path))
+
+    assert _read_timeout(seen[0]) == 600
+
+
+def test_a_kept_alive_client_is_reused_until_closed(tmp_path: Path) -> None:
+    transport = _ClosingTransport(_ok)
+    client = XaiStt(KEY, transport=transport, keep_alive=True)
+    clip = _clip(tmp_path)
+
+    client.transcribe(clip)
+    client.transcribe(clip)
+    assert transport.closed == 0
+
+    client.close()
+    assert transport.closed == 1
+
+
+def test_fewer_attempts_stop_retrying_sooner(tmp_path: Path) -> None:
+    seen: list[httpx.Request] = []
+
+    def unavailable(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(503, text="upstream unavailable")
+
+    client = XaiStt(KEY, transport=httpx.MockTransport(unavailable), attempts=2)
+
+    with pytest.raises(ExternalServiceError, match="503"):
+        client.transcribe(_clip(tmp_path))
+
+    assert len(seen) == 2
+
+
+def test_a_status_left_out_of_the_retry_set_is_not_retried(tmp_path: Path) -> None:
+    seen: list[httpx.Request] = []
+
+    def timed_out(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(408, text="request timeout")
+
+    client = XaiStt(
+        KEY, transport=httpx.MockTransport(timed_out), retry_statuses=frozenset({429, 503})
+    )
+
+    with pytest.raises(ExternalServiceError, match="408"):
+        client.transcribe(_clip(tmp_path))
+
+    assert len(seen) == 1
+
+
+def test_a_deadline_bounds_each_attempt_by_the_time_left(tmp_path: Path) -> None:
+    timeouts: list[float] = []
+
+    def stall(request: httpx.Request) -> httpx.Response:
+        timeouts.append(_read_timeout(request))
+        raise httpx.ReadTimeout("stalled", request=request)
+
+    client = XaiStt(KEY, transport=httpx.MockTransport(stall), attempts=2, deadline_seconds=8)
+
+    with pytest.raises(ExternalServiceError, match="stalled"):
+        client.transcribe(_clip(tmp_path))
+
+    assert len(timeouts) == 2
+    assert 7 < timeouts[0] <= 8
+    assert 0 < timeouts[1] <= timeouts[0]
