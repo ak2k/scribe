@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import shutil
 from pathlib import Path
 
@@ -8,15 +9,22 @@ from typer.testing import CliRunner
 
 from scribe.cli import app
 from scribe.schema import Engine, Source, Transcript, Word
+from tests.cleanup_fakes import patch_backend
 
 FIXTURES = Path(__file__).parent / "fixtures"
 runner = CliRunner()
 
 
-def _write(path: Path, *said: tuple[str, float], speaker: int = 0, duration: float = 30.0) -> Path:
+def _write(
+    path: Path,
+    *said: tuple[str, float],
+    speaker: int = 0,
+    duration: float = 30.0,
+    params: dict[str, float | int | bool | str] | None = None,
+) -> Path:
     Transcript(
         source=Source(kind="audio", ref=f"{path.stem}.wav"),
-        engine=Engine(name="xai-stt"),
+        engine=Engine(name="xai-stt", params=params or {}),
         duration=duration,
         text=" ".join(text for text, _ in said),
         words=[
@@ -117,6 +125,8 @@ def _merged(tmp_path: Path) -> Path:
         pytest.param("nan", "--offset", id="offset-nan"),
         pytest.param("inf", "--offset", id="offset-inf"),
         pytest.param("-inf", "--offset", id="offset-minus-inf"),
+        pytest.param("Speaker 1", "--me", id="me-numbered"),
+        pytest.param(" speaker ? ", "--me", id="me-unattributed"),
     ],
 )
 def test_a_refused_merge_exits_two_and_writes_nothing(
@@ -138,6 +148,8 @@ def test_a_refused_merge_exits_two_and_writes_nothing(
         _write(app_path, ("we", 1.0), duration=33.0)
     elif case == "out-is-mic":
         extra = ["--out", str(mic)]
+    elif "peaker" in case:
+        extra = ["--me", case]
     else:
         extra = ["--offset", case]
     before = _snapshot(tmp_path)
@@ -213,3 +225,74 @@ def test_turns_off_flags_on_a_merged_transcript_print_nothing_to_stderr(tmp_path
 
     assert result.exit_code == 0, result.output
     assert result.stderr == ""
+
+
+def test_the_recorded_sha256_is_of_the_bytes_merged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    mic, app_path = _pair(tmp_path)
+    original = mic.read_bytes()
+    replaced = _write(tmp_path / "replaced.json", ("Replaced", 0.2), speaker=1).read_bytes()
+    read_bytes = Path.read_bytes
+    reads = 0
+
+    def replaced_after_one_read(self: Path) -> bytes:
+        nonlocal reads
+        if self != mic:
+            return read_bytes(self)
+        reads += 1
+        return original if reads == 1 else replaced
+
+    monkeypatch.setattr(Path, "read_bytes", replaced_after_one_read)
+    out = tmp_path / "merged.json"
+
+    result = runner.invoke(app, ["merge", str(mic), str(app_path), "--out", str(out)])
+
+    assert result.exit_code == 0, result.output
+    merged = Transcript.load(out)
+    assert "Replaced" not in merged.text
+    assert merged.engine.params["merge_mic_sha256"] == hashlib.sha256(original).hexdigest()
+
+
+def _reading_copy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *app_said: tuple[str, float]
+) -> str:
+    """The reading copy of a call whose mic recovered "remote." at 2.05 s in a second pass."""
+    patch_backend(monkeypatch)
+    mic = _write(
+        tmp_path / "call.mic.json",
+        ("Hi", 0.2),
+        ("remote.", 2.05),
+        ("thanks", 6.0),
+        speaker=1,
+        params={"fill_ranges": "[[2.0, 2.3]]"},
+    )
+    app_path = _write(tmp_path / "call.app.json", *app_said, speaker=4)
+    merged, copy = tmp_path / "merged.json", tmp_path / "merged.curated.md"
+    for argv in (
+        ["merge", str(mic), str(app_path), "--out", str(merged)],
+        ["turns", str(merged), "--no-llm-speakers", "--no-audio-speakers"],
+        ["cleanup", str(tmp_path / "merged.turns.json"), "--curated", str(copy)],
+    ):
+        result = runner.invoke(app, argv)
+        assert result.exit_code == 0, result.output
+    return copy.read_text(encoding="utf-8")
+
+
+def test_a_fill_dropped_as_bleed_notes_no_turn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    copy = _reading_copy(tmp_path, monkeypatch, ("We", 1.0), ("remote.", 2.0), ("ok", 3.0))
+
+    assert "remote." in copy
+    assert "recovered" not in copy
+
+
+def test_a_kept_fill_notes_only_its_own_tracks_turn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    copy = _reading_copy(tmp_path, monkeypatch, ("We", 1.0), ("talk", 2.1), ("ok", 3.0))
+
+    assert copy.count("recovered") == 1
+    assert "**Me | 00:00:02**\n[Includes speech recovered" in copy
+    assert "**Speaker 1 | 00:00:02**\ntalk" in copy
