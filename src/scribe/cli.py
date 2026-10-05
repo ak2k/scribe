@@ -1490,15 +1490,17 @@ def vote(
 
 def _track_file(path: Path, role: str) -> TrackFile:
     """Load one of `merge`'s inputs, insisting on words and on one track, and hash it."""
-    transcript = Transcript.load(path)
+    # One read, so the hash is of the bytes parsed even if the file is replaced.
+    try:
+        raw = path.read_bytes()
+    except OSError as exc:
+        raise InputValidationError(f"cannot read transcript {path}: {exc}") from exc
+    transcript = Transcript.parse(raw, path)
     if not transcript.words:
         raise InputValidationError(f"{role} {path} has no words")
     if transcript.tracks is not None:
         raise InputValidationError(f"{role} {path} merges two tracks already")
-    try:
-        return TrackFile(transcript, path, hashlib.sha256(path.read_bytes()).hexdigest())
-    except OSError as exc:
-        raise InputValidationError(f"cannot read transcript {path}: {exc}") from exc
+    return TrackFile(transcript, path, hashlib.sha256(raw).hexdigest())
 
 
 @app.command()

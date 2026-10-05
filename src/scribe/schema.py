@@ -153,6 +153,16 @@ class Transcript(BaseModel):
             raw = path.read_bytes()
         except OSError as exc:
             raise InputValidationError(f"cannot read transcript {path}: {exc}") from exc
+        return cls.parse(raw, path)
+
+    @classmethod
+    def parse(cls, raw: bytes, path: Path) -> Transcript:
+        """Parse a transcript file's bytes, naming `path` in the error.
+
+        Raises:
+            InputValidationError: the bytes do not validate against this schema.
+
+        """
         try:
             return cls.model_validate_json(raw)
         except ValidationError as exc:
