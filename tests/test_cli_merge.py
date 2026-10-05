@@ -19,7 +19,7 @@ def _write(
     path: Path,
     *said: tuple[str, float],
     speaker: int = 0,
-    duration: float = 30.0,
+    duration: float | None = 30.0,
     params: dict[str, float | int | bool | str] | None = None,
 ) -> Path:
     Transcript(
@@ -127,6 +127,9 @@ def _merged(tmp_path: Path) -> Path:
         pytest.param("-inf", "--offset", id="offset-minus-inf"),
         pytest.param("Speaker 1", "--me", id="me-numbered"),
         pytest.param(" speaker ? ", "--me", id="me-unattributed"),
+        pytest.param("Speaker 1:", "--me", id="me-colon"),
+        pytest.param("**Speaker 2**", "--me", id="me-bold"),
+        pytest.param("no-duration", "APP", id="no-duration"),
     ],
 )
 def test_a_refused_merge_exits_two_and_writes_nothing(
@@ -146,6 +149,8 @@ def test_a_refused_merge_exits_two_and_writes_nothing(
         app_path = mic
     elif case == "skew":
         _write(app_path, ("we", 1.0), duration=33.0)
+    elif case == "no-duration":
+        _write(app_path, ("we", 1.0), duration=None)
     elif case == "out-is-mic":
         extra = ["--out", str(mic)]
     elif "peaker" in case:

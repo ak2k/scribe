@@ -8,7 +8,9 @@ from hypothesis import given
 from hypothesis import strategies as st
 
 from scribe.schema import Engine, Source, Transcript, Word
+from scribe.tracks import APP as APP_TRACK
 from scribe.tracks import BLEED_WINDOW_S, Merged, TrackFile, merge_tracks
+from scribe.turns import word_speakers
 from scribe.vote import word_key
 
 Said = tuple[str, float]
@@ -134,6 +136,23 @@ def test_a_step_back_is_sorted_and_counted() -> None:
         2,
         0,
     )
+
+
+def test_a_step_back_settles_each_app_word_as_the_app_alone_does() -> None:
+    # "the" steps back before "plan": alone, "plan" is a flicker between two runs of speaker 3.
+    said = [("so", 1.0, 3), ("plan", 1.2, 4), ("the", 1.1, 3), ("is", 1.3, 4), ("set.", 1.4, 4)]
+    app = APP.model_copy(
+        update={
+            "words": [Word(text=t, start=s, end=s + 0.1, speaker=k) for t, s, k in said],
+            "text": " ".join(t for t, _, _ in said),
+        }
+    )
+
+    merged = _merge(_side(("Hello", 9.0)), app).transcript
+
+    alone = list(zip([w.text for w in app.words], word_speakers(app.words), strict=True))
+    settled = zip(merged.words, word_speakers(merged.words), strict=True)
+    assert [(w.text, speaker) for w, speaker in settled if w.track == APP_TRACK] == alone
 
 
 def test_an_app_word_comes_first_on_an_equal_start() -> None:
