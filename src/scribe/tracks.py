@@ -32,7 +32,9 @@ MAX_SKEW_S = 2.0
 DEFAULT_ME = "Me"
 # A merged transcript's track indexes, in the order `tracks` lists them.
 MIC, APP = 0, 1
-_CARRIED = ("fill_ranges", "fill_unresolved_ranges")
+# Each track's fill ranges, apart, so a recovered-speech note marks only that track's turns.
+MIC_FILL, APP_FILL = "merge_mic_fill_ranges", "merge_app_fill_ranges"
+_UNRESOLVED = "fill_unresolved_ranges"
 
 
 @dataclass(frozen=True)
@@ -125,6 +127,18 @@ def _union(mic: TrackFile, app: TrackFile, key: str) -> str | None:
     return json.dumps([list(span) for span in spans])
 
 
+def _recovered(side: TrackFile, kept: Sequence[Word]) -> str | None:
+    """The side's fill ranges still holding one of its words once merged; None where it has none."""
+    if "fill_ranges" not in side.transcript.engine.params:
+        return None
+    held = [
+        span
+        for span in fill_ranges(side.transcript.engine, side.path)
+        if any(span[0] <= word.start and word.end <= span[1] for word in kept)
+    ]
+    return json.dumps([list(span) for span in held])
+
+
 def merge_tracks(
     mic: TrackFile, app: TrackFile, *, me: str = DEFAULT_ME, offset: float = 0.0
 ) -> Merged:
@@ -175,9 +189,11 @@ def merge_tracks(
         "merge_mic_sha256": mic.sha256,
         "merge_app_sha256": app.sha256,
     }
-    for key in _CARRIED:
-        if (union := _union(mic, app, key)) is not None:
-            params[key] = union
+    for key, side, held in ((MIC_FILL, mic, kept), (APP_FILL, app, placed)):
+        if (recovered := _recovered(side, held)) is not None:
+            params[key] = recovered
+    if (unresolved := _union(mic, app, _UNRESOLVED)) is not None:
+        params[_UNRESOLVED] = unresolved
     durations = [
         side.transcript.duration for side in (mic, app) if side.transcript.duration is not None
     ]

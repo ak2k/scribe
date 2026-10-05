@@ -76,10 +76,12 @@ from scribe.speakers import (
     relabel,
 )
 from scribe.tracks import (
+    APP_FILL,
     BLEED_RULE,
     DEFAULT_ME,
     MAX_SKEW_S,
     MIC,
+    MIC_FILL,
     TrackFile,
     count_runs,
     merge_tracks,
@@ -1159,6 +1161,23 @@ def _one_track(transcript: Transcript, described: str) -> Transcript:
     return transcript
 
 
+def _noted(
+    transcript: Transcript, path: Path
+) -> tuple[list[tuple[float, float]], dict[str, list[tuple[float, float]]]]:
+    """The spans the reading copy notes recovered speech in, and any speaker's own.
+
+    A merged transcript keeps each track's apart: the mic track's label takes
+    the mic's spans, and every other turn the app's.
+    """
+    if transcript.tracks is None:
+        return fill_ranges(transcript.engine, path), {}
+    mic = fill_ranges(transcript.engine, path, key=MIC_FILL)
+    labels = [track.label for track in transcript.tracks if track.role == "mic"]
+    return fill_ranges(transcript.engine, path, key=APP_FILL), {
+        label: mic for label in labels if label is not None
+    }
+
+
 def _turns_input(path: Path) -> Transcript:
     """Load a transcript and insist its turns are filled."""
     transcript = Transcript.load(path)
@@ -1310,7 +1329,7 @@ def cleanup(
         front_text = None if front is None else read_front(front)
         # Only the reading copy reads the fill record, so a malformed one fails
         # only a run that writes it.
-        ranges = [] if curated is None else fill_ranges(transcript.engine, input_path)
+        ranges, by_speaker = ([], {}) if curated is None else _noted(transcript, input_path)
         destination = _clean_destination(input_path, out)
         # Planned before a backend call is paid for. The input transcript is a
         # paid transcription's output and nothing else holds a copy.
@@ -1348,7 +1367,10 @@ def cleanup(
         # Rendered from the kept turns, not from the markdown: a turn's text
         # can hold blank lines, so the markdown does not split back into turns.
         if curated is not None:
-            _write_text(plan["--curated"], render_curated(request, result.kept, ranges, front_text))
+            _write_text(
+                plan["--curated"],
+                render_curated(request, result.kept, ranges, front_text, by_speaker=by_speaker),
+            )
     except AppError as exc:
         _fail(exc)
 
@@ -1528,8 +1550,9 @@ def merge(
     bleed-1). The offset is never measured from the words: stems recorded
     together sit well inside 0.25 s, so the default 0 fits them, and stems
     from elsewhere need their offset given. Nothing is retimed. The result
-    keeps both inputs' fill ranges, for `cleanup --curated`, but not their
-    pick records: each input's own disputes list stays the place to read those.
+    keeps each input's fill ranges that still hold its words, apart, for
+    `cleanup --curated`, but not their pick records: each input's own
+    disputes list stays the place to read those.
 
     stdout is the path written; stderr is one summary line, naming the offset
     applied. Exit 2, before anything is written: an --offset that is not a

@@ -172,7 +172,9 @@ def test_the_merged_record_carries_only_its_own_params_and_the_fill_ranges() -> 
         "merge_dropped": json.dumps([[copy.start, copy.end, copy.text, 1]]),
         "merge_mic_sha256": "mic-sha",
         "merge_app_sha256": "app-sha",
-        "fill_ranges": "[[1.0, 2.0], [6.0, 7.0]]",
+        # No mic word lies in the mic's one range.
+        "merge_mic_fill_ranges": "[]",
+        "merge_app_fill_ranges": "[[1.0, 2.0]]",
     }
     assert merged.tracks is not None
     assert [(t.role, t.label, t.transcript_sha256) for t in merged.tracks] == [
