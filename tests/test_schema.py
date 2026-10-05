@@ -143,6 +143,37 @@ def test_from_xai_response_rejects_an_infinite_word_boundary() -> None:
         from_xai_response(payload, source=SOURCE, engine=ENGINE)
 
 
+@pytest.mark.parametrize("confidence", [0.93, 1.0000001, -1e-9, None])
+def test_from_xai_response_accepts_and_drops_word_confidence(confidence: float | None) -> None:
+    word: dict[str, object] = {"text": "hi", "start": 0.0, "end": 0.4, "speaker": 0}
+    bare: dict[str, object] = {"text": "hi", "words": [word]}
+    scored: dict[str, object] = {"text": "hi", "words": [{**word, "confidence": confidence}]}
+
+    expected = from_xai_response(bare, source=SOURCE, engine=ENGINE)
+    actual = from_xai_response(scored, source=SOURCE, engine=ENGINE)
+
+    assert actual.model_dump() == expected.model_dump()
+
+
+@pytest.mark.parametrize("confidence", [float("nan"), float("inf"), float("-inf")])
+def test_from_xai_response_rejects_a_non_finite_word_confidence(confidence: float) -> None:
+    payload: dict[str, object] = {
+        "text": "hi",
+        "words": [{"text": "hi", "start": 0.0, "end": 0.4, "confidence": confidence}],
+    }
+    with pytest.raises(ExternalServiceError):
+        from_xai_response(payload, source=SOURCE, engine=ENGINE)
+
+
+def test_from_xai_response_wraps_word_shape_drift() -> None:
+    payload: dict[str, object] = {
+        "text": "hi",
+        "words": [{"text": "hi", "start": 0.0, "end": 0.4, "surprise": 1}],
+    }
+    with pytest.raises(ExternalServiceError):
+        from_xai_response(payload, source=SOURCE, engine=ENGINE)
+
+
 def test_from_xai_response_rejects_a_not_a_number_duration() -> None:
     payload: dict[str, object] = {"text": "hi", "duration": float("nan")}
     with pytest.raises(ExternalServiceError):
