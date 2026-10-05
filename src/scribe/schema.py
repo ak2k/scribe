@@ -128,6 +128,9 @@ class XaiWord(BaseModel):
     start: FiniteFloat
     end: FiniteFloat
     speaker: int | None = None
+    # DIVERGE: documented as 0.0-1.0 but entropy-based and read by nothing, so an
+    # out-of-range rounding overshoot must not fail the whole transcription.
+    confidence: FiniteFloat | None = None
 
 
 class XaiResponse(BaseModel):
