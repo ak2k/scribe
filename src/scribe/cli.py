@@ -1150,6 +1150,15 @@ def _finish_speakers(
         raise typer.Exit(_EXIT_NO_CHUNK)
 
 
+def _one_track(transcript: Transcript, described: str) -> Transcript:
+    """Refuse a merged transcript, whose tracks only `scribe turns` keeps apart."""
+    if transcript.tracks is not None:
+        raise InputValidationError(
+            f"{described} merges two tracks, which only `scribe turns` keeps apart"
+        )
+    return transcript
+
+
 def _turns_input(path: Path) -> Transcript:
     """Load a transcript and insist its turns are filled."""
     transcript = Transcript.load(path)
@@ -1410,7 +1419,7 @@ def schema() -> None:
 
 def _voter(path: Path, role: str, *, ordered: bool) -> Transcript:
     """Load one of `vote`'s inputs, insisting on words, in start order if `ordered`."""
-    transcript = Transcript.load(path)
+    transcript = _one_track(Transcript.load(path), f"{role} {path}")
     words = transcript.words
     if not words:
         raise InputValidationError(f"{role} {path} has no words")
@@ -1616,11 +1625,11 @@ def fill_command(
     filled words "Speaker ?" when the others have speakers.
     """
     try:
-        transcript = Transcript.load(transcript_path)
+        transcript = _one_track(Transcript.load(transcript_path), f"TRANSCRIPT {transcript_path}")
         # Its turns would go stale with no words left to rebuild them from.
         if transcript.turns and not transcript.words:
             raise InputValidationError(f"{transcript_path} has turns but no words to fill between")
-        reference = Transcript.load(reference_path)
+        reference = _one_track(Transcript.load(reference_path), f"REFERENCE {reference_path}")
         destination = sibling(transcript_path, ".filled.json") if out is None else out
         plan = plan_outputs(
             {"--out": destination}, {"TRANSCRIPT": transcript_path, "REFERENCE": reference_path}
@@ -1948,7 +1957,7 @@ def disputes_command(
     try:
         if audio is not None and not clips:
             raise InputValidationError("--audio is read only by --clips")
-        transcript = Transcript.load(transcript_path)
+        transcript = _one_track(Transcript.load(transcript_path), f"TRANSCRIPT {transcript_path}")
         found = find_disputes(transcript, transcript_path)
         destination = sibling(transcript_path, ".disputes.md") if out is None else out
         inputs = {"TRANSCRIPT": transcript_path}
@@ -2058,7 +2067,9 @@ def gemini(
     # stdout carries only the output path; unconfigured, structlog prints there.
     configure()
     try:
-        anchor = Transcript.load(anchor_path)
+        anchor = _one_track(
+            Transcript.load(anchor_path), f"the --anchor transcript {anchor_path}"
+        )
         api_key = gemini_stt.resolve_api_key()
         destination = audio_path.with_name(f"{audio_path.stem}.gemini.json") if out is None else out
         plan = plan_outputs(
@@ -2108,7 +2119,7 @@ def gaps(
     Needs ffmpeg on PATH. Writes no file and sends nothing over the network.
     """
     try:
-        transcript = Transcript.load(transcript_path)
+        transcript = _one_track(Transcript.load(transcript_path), f"TRANSCRIPT {transcript_path}")
         # Before ffmpeg opens it: reading a FIFO or a character device blocks.
         check_input(audio_path, sys.maxsize)
         found = check_gaps(transcript, audio_path)
