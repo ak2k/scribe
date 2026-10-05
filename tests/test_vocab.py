@@ -184,3 +184,26 @@ def test_a_bad_file_at_startup_is_an_error_naming_the_line(tmp_path: Path) -> No
 
     with pytest.raises(InputValidationError, match=r"terms\.txt:2"):
         TermsFile(path, required=False)
+
+
+@pytest.mark.parametrize(
+    ("heard", "expected"),
+    [
+        ("open bashrc,", "open .bashrc,"),
+        ("open .bash rc", "open .bashrc"),
+        ("see c++", "see c++"),
+    ],
+)
+def test_a_terms_own_punctuation_is_written_once(heard: str, expected: str) -> None:
+    assert _deliver(heard, Vocab(terms=(".bashrc", "c++"), aliases=())) == expected
+
+
+def test_an_alias_heard_as_punctuation_alone_never_matches() -> None:
+    vocab = Vocab(terms=(), aliases=(Alias(heard="??", written="huh"),))
+
+    assert _deliver("what ?? now", vocab) == "what ?? now"
+
+
+def test_an_unreadable_terms_file_is_an_error(tmp_path: Path) -> None:
+    with pytest.raises(InputValidationError, match="cannot read terms file"):
+        TermsFile(tmp_path, required=False)

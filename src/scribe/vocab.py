@@ -187,10 +187,10 @@ def _rewrite(
     while start < len(words):
         for size in range(min(MAX_RUN_WORDS, len(words) - start), 0, -1):
             run = words[start : start + size]
-            # A run edged by a bare punctuation word would swallow that word into the match.
-            if not (_key(run[0]) and _key(run[-1])):
-                continue
             before = " ".join(run)
+            # A punctuation-only run has no letters to match, so any match would invent them.
+            if not _key(before):
+                continue
             after = replace(before)
             if after is not None:
                 out.extend(after.split())

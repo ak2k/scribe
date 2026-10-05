@@ -397,6 +397,7 @@ def test_by_default_each_call_opens_and_closes_its_own_client(
 
     client.transcribe(clip)
     client.transcribe(clip)
+    client.close()
 
     assert transport.closed == 2
 
