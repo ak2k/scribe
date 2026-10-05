@@ -24,6 +24,12 @@ dependencies = [
     "anyio>=4",
     "typer>=0.12",
     "stamina>=24.2",
+    # DIVERGE: AGENTS.md's stack table names no HTTP server; `scribe serve` needs a
+    # small ASGI app (starlette), a server to run it (plain uvicorn, no compiled
+    # extras) and the multipart parser starlette uses for uploads.
+    "starlette>=0.47",
+    "uvicorn>=0.30",
+    "python-multipart>=0.0.20",
 ]
 
 [project.scripts]
