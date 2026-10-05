@@ -432,3 +432,17 @@ async def test_a_408_from_xai_is_not_retried_by_a_dictation(tmp_path: Path) -> N
 
     assert response.status_code == 502
     assert len(xai.seen) == 1
+
+
+async def test_a_garbled_multipart_body_is_400_with_an_openai_error_body(tmp_path: Path) -> None:
+    xai = Xai()
+    async with _client(xai, tmp_path) as client:
+        response = await client.post(
+            "/v1/audio/transcriptions",
+            content=b'--b\r\nContent-Disposition: form-data; name="file"; filename="a.wav"\r\n',
+            headers={"content-type": "multipart/form-data; boundary=b"},
+        )
+
+    assert response.status_code == 400
+    assert set(cast("dict[str, dict[str, str]]", response.json())["error"]) == {"message", "type"}
+    assert xai.seen == []
