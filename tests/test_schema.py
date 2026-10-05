@@ -145,13 +145,14 @@ def test_from_xai_response_rejects_an_infinite_word_boundary() -> None:
 
 @pytest.mark.parametrize("confidence", [0.93, 1.0000001, -1e-9, None])
 def test_from_xai_response_accepts_and_drops_word_confidence(confidence: float | None) -> None:
-    word: dict[str, object] = {"text": "hi", "start": 0.0, "end": 0.4, "speaker": 0}
+    word: dict[str, object] = {"text": "hi", "start": 0.0, "end": 0.4, "speaker": 3}
     bare: dict[str, object] = {"text": "hi", "words": [word]}
     scored: dict[str, object] = {"text": "hi", "words": [{**word, "confidence": confidence}]}
 
     expected = from_xai_response(bare, source=SOURCE, engine=ENGINE)
     actual = from_xai_response(scored, source=SOURCE, engine=ENGINE)
 
+    assert expected.words == [Word(text="hi", start=0.0, end=0.4, speaker=3)]
     assert actual.model_dump() == expected.model_dump()
 
 
