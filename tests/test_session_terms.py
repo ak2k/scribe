@@ -485,6 +485,70 @@ def test_a_delayed_older_event_changes_nothing_in_the_record(tmp_path: Path) -> 
     assert logged == ["see newer_term", "see older_term"]
 
 
+def test_terms_carry_over_when_a_big_tool_result_fills_the_tail(tmp_path: Path) -> None:
+    records: list[dict[str, object]] = [
+        {
+            "type": "user",
+            "timestamp": "2026-10-05T11:50:00Z",
+            "message": {"content": "fix kept_term"},
+        },
+    ]
+    transcript = _transcript(tmp_path, records)
+    _event(tmp_path, "s1", "SessionStart", transcript=transcript)
+    flood = {
+        "type": "user",
+        "message": {"content": [{"type": "tool_result", "content": "x" * TAIL_BYTES}]},
+    }
+    done = {"type": "assistant", "message": {"content": [{"type": "text", "text": "Done."}]}}
+    with transcript.open("a") as handle:
+        handle.write(json.dumps(flood) + "\n" + json.dumps(done) + "\n")
+
+    later = NOW + timedelta(minutes=1)
+    payload = {"session_id": "s1", "hook_event_name": "Stop", "cwd": "/x"}
+    run_hook(
+        json.dumps(payload | {"transcript_path": str(transcript)}).encode(),
+        state=tmp_path,
+        now=later,
+        host="box",
+    )
+
+    assert _terms(tmp_path / "terms" / "sessions" / "s1.json") == ["kept_term"]
+
+
+def test_carried_terms_keep_the_higher_count_and_later_sighting(tmp_path: Path) -> None:
+    sessions = tmp_path / "terms" / "sessions"
+    earlier = NOW - timedelta(minutes=5)
+    stored = SessionRecord(
+        session_id="s1",
+        cwd="/x",
+        updated=earlier,
+        ranked=earlier,
+        terms=[
+            TermCount(term="many_seen", count=5, last_seen=earlier),
+            TermCount(term="seen_again", count=1, last_seen=earlier),
+            TermCount(term="FULLY", count=9, last_seen=earlier),
+            TermCount(term="--force", count=9, last_seen=earlier),
+            *(
+                TermCount(term=f"old_{n}", count=1, last_seen=earlier - timedelta(seconds=n))
+                for n in range(100)
+            ),
+        ],
+    )
+    _store(sessions, stored)
+
+    _event(tmp_path, "s1", "UserPromptSubmit", prompt="many_seen and seen_again")
+
+    record = SessionRecord.model_validate_json((sessions / "s1.json").read_text())
+    terms = {t.term: (t.count, t.last_seen) for t in record.terms}
+    assert terms["many_seen"] == (5, NOW)
+    assert terms["seen_again"] == (1, NOW)
+    assert "FULLY" not in terms
+    assert "--force" not in terms
+    assert len(record.terms) == 100
+    assert "old_97" in terms
+    assert "old_98" not in terms
+
+
 def test_a_session_seen_only_at_stop_is_not_merged(tmp_path: Path) -> None:
     _event(tmp_path, "s1", "Stop", transcript=_transcript(tmp_path))
 

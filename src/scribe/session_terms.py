@@ -325,6 +325,13 @@ def _session_record(
         tallies[term] += 1
         seen[term] = max(when, seen.get(term, when))
         order[term] = position
+    # A large tool result can push every identifier out of the tail, so earlier
+    # terms carry over; the filter drops shapes an older version still admitted.
+    carried = [t for t in previous.terms if _mergeable(t.term)] if previous is not None else []
+    for position, kept in enumerate(carried):
+        tallies[kept.term] = max(tallies[kept.term], kept.count)
+        seen[kept.term] = max(kept.last_seen, seen.get(kept.term, kept.last_seen))
+        order.setdefault(kept.term, -1 - position)
     ranked = previous.ranked if previous is not None else None
     if hook.hook_event_name in _ACTIVE_EVENTS:
         ranked = now if ranked is None else max(ranked, now)
