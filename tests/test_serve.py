@@ -20,6 +20,7 @@ from structlog.testing import capture_logs
 from uvicorn.lifespan.on import LifespanOn
 from uvicorn.protocols.http.h11_impl import H11Protocol
 
+from scribe.focus import Focus
 from scribe.serve import ENDPOINT, create_app, dictation_client, run
 from scribe.session_sources import SessionTerms, local_source, remote_source
 from scribe.vocab import TermsFile
@@ -262,6 +263,7 @@ async def test_health_counts_each_source_without_terms_or_session_ids(tmp_path: 
             {"source": "box-b", "blocks": 1, "terms": 1, "age_seconds": 0},
             {"source": "box-c", "blocks": 0, "terms": 0, "age_seconds": None},
         ],
+        "focus": None,
     }
     for secret in ("local_a", "kbx25", "b_term", "a-s", "b-s", "local-s", "A tab", "/w"):
         assert secret not in response.text
@@ -274,8 +276,62 @@ async def test_the_request_log_line_counts_session_terms_and_names_none(tmp_path
 
     (line,) = [entry for entry in logs if entry["event"] == "serve.request"]
     assert line["session_terms"] == 5
+    assert (line["focus"], line["focus_terms"]) == ("off", 0)
     assert "local_a" not in repr(logs)
     assert "A tab" not in repr(logs)
+
+
+FOCUS_SECRETS = ("Secret tab title", "secret tab title", "secret-session", "secret_term", "/secret")
+
+
+def _focused_sessions(tmp_path: Path) -> SessionTerms:
+    tab_cwd = tmp_path / "tab-cwd"
+    tab_cwd.mkdir()
+    local = tmp_path / "current.txt"
+    ranked = NOW - timedelta(hours=2)
+    local.write_text(
+        f"# session secret-session ranked {ranked.isoformat()}"
+        f" expires {(ranked + timedelta(minutes=30)).isoformat()}"
+        ' {"cwd": "/secret/cwd", "titles": ["Secret tab title"]}\nsecret_term\nfocus_two\n'
+        + _session_file(("other-s", NOW - timedelta(minutes=1), ["other_t"])),
+        encoding="utf-8",
+    )
+    source = local_source(local)
+    source.refresh(lambda: NOW)
+    answer = f"front\n\u2733 Secret tab title\n{tab_cwd}\n"
+    focus = Focus(lambda _argv, _timeout: answer)
+    focus.refresh(lambda: NOW, source.recent)
+    return SessionTerms([source], clock=lambda: NOW, focus=focus)
+
+
+async def test_a_focus_hit_leads_the_keyterms_and_is_recorded_by_verdict_and_count(
+    tmp_path: Path,
+) -> None:
+    xai = Xai()
+    sessions = _focused_sessions(tmp_path)
+    with capture_logs() as logs:
+        async with _client(xai, tmp_path, terms="herdr\n", sessions=sessions) as client:
+            await _post(client)
+            health = await client.get("/health")
+
+    keyterms = [body for name, body in _fields(xai.seen[0]) if name == "keyterm"]
+    assert keyterms == [b"herdr", b"secret_term", b"focus_two", b"other_t"]
+    (line,) = [entry for entry in logs if entry["event"] == "serve.request"]
+    assert (line["focus"], line["focus_terms"]) == ("hit", 2)
+    assert line["session_terms"] == 3
+    (kept,) = _kept(tmp_path)
+    result = _json(kept / "result.json")
+    assert result["focus"] == {"verdict": "hit", "terms": 2}
+    assert result["session_terms"] == {"local file": 3}
+    assert cast("dict[str, object]", health.json())["focus"] == {
+        "state": "front",
+        "age_seconds": 0,
+    }
+    written = (kept / "result.json").read_text(encoding="utf-8")
+    for secret in (*FOCUS_SECRETS, str(tmp_path / "tab-cwd")):
+        assert secret not in written
+        assert secret not in health.text
+        assert secret not in repr(logs)
 
 
 async def test_the_poller_runs_from_startup_until_shutdown(tmp_path: Path) -> None:

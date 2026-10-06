@@ -36,6 +36,9 @@ MIN_TERM_CHARS = 3
 # A terminal tab can lag a re-title, so a few earlier titles still identify the session.
 MAX_TITLES = 5
 WINDOW = timedelta(minutes=30)
+# How far back `current.txt` reaches: a block past its expiry still lets the focused
+# tab's title find its session, which may be prompted again hours later.
+REACH = timedelta(hours=24)
 RETENTION = timedelta(days=7)
 LOG_LIMIT = 1024 * 1024
 

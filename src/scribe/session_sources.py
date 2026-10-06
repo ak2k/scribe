@@ -11,6 +11,7 @@ import subprocess
 import unicodedata
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from functools import partial
 from typing import TYPE_CHECKING
 
 import anyio
@@ -18,7 +19,7 @@ import anyio.to_thread
 import structlog
 
 from scribe.errors import AppError, ExternalServiceError, InputValidationError
-from scribe.session_terms import parse_blocks
+from scribe.session_terms import REACH, parse_blocks
 from scribe.vocab import Vocab
 from scribe.xai_stt import MAX_KEYTERMS, check_keyterms
 
@@ -28,6 +29,7 @@ if TYPE_CHECKING:
 
     from structlog.stdlib import BoundLogger
 
+    from scribe.focus import Focus, Verdict
     from scribe.session_terms import SessionBlock
 
     Runner = Callable[[Sequence[str], float], str]
@@ -146,6 +148,11 @@ class Source:
         """The blocks of the last good read that have not expired by `now`."""
         return _live(self._good, now)
 
+    def recent(self, now: datetime) -> tuple[SessionBlock, ...]:
+        """The blocks of the last good read ranked within `REACH` of `now`, expired or not."""
+        good = self._good
+        return () if good is None else tuple(b for b in good.blocks if b.ranked >= now - REACH)
+
     def health(self, now: datetime) -> dict[str, object]:
         """Counts and the last good read's age; no term or session id."""
         # One read: the poller may swap in a newer read meanwhile.
@@ -207,6 +214,15 @@ class Merged:
 
     terms: tuple[str, ...]
     counts: dict[str, int]
+    focused: int = 0
+
+
+@dataclass(frozen=True)
+class FocusUse:
+    """What the focused tab did for one dictation: its verdict, and the terms it put first."""
+
+    verdict: Verdict
+    terms: int
 
 
 def _keyterm(term: str) -> bool:
@@ -217,17 +233,34 @@ def _keyterm(term: str) -> bool:
     return True
 
 
-def merge(static: Sequence[str], sources: Sequence[tuple[str, Sequence[SessionBlock]]]) -> Merged:
-    """Static terms whole, then terms the blocks take by turns, listed newest rank first.
+def merge(
+    static: Sequence[str],
+    sources: Sequence[tuple[str, Sequence[SessionBlock]]],
+    focused: tuple[str, SessionBlock] | None = None,
+) -> Merged:
+    """Static terms whole, then the focused block's, then terms the blocks take by turns.
 
     `static` is a parsed terms file, so at most `MAX_KEYTERMS`, and each source's
-    blocks are its live ones. Repeats and terms xAI would refuse are skipped; the
-    list ends at `MAX_KEYTERMS`.
+    blocks are its live ones; `focused`, a source's name and the block of the
+    session being dictated into, may have expired. The turns' terms are listed
+    newest rank first. Repeats and terms xAI would refuse are skipped; the list
+    ends at `MAX_KEYTERMS`.
     """
     taken = dict.fromkeys(static)
     counts = dict.fromkeys((name for name, _ in sources), 0)
+    lead = 0
+    if focused is not None:
+        owner, mine = focused
+        for term in mine.terms:
+            if len(taken) >= MAX_KEYTERMS:
+                break
+            if term not in taken and _keyterm(term):
+                taken[term] = None
+                lead += 1
+        counts[owner] = counts.get(owner, 0) + lead
+    first = list(taken)
     live = sorted(
-        ((name, block) for name, blocks in sources for block in blocks),
+        ((name, block) for name, blocks in sources for block in blocks if (name, block) != focused),
         key=lambda pair: pair[1].ranked,
         reverse=True,
     )
@@ -243,48 +276,77 @@ def merge(static: Sequence[str], sources: Sequence[tuple[str, Sequence[SessionBl
                 taken[term] = None
                 counts[name] += 1
     # Turns choose the terms; they are listed newest block first because snapping
-    # takes the first of two spellings sharing letters, and the newer one is meant.
+    # takes the first of two spellings sharing letters, and the newer one is meant,
+    # unless the focused session's is: it was listed first, and update keeps places.
     chosen = taken.keys() - static
-    listed = dict.fromkeys(static)
+    listed = dict.fromkeys(first)
     for _, block in live:
         listed.update((term, None) for term in block.terms if term in chosen)
-    return Merged(tuple(listed), counts)
+    return Merged(tuple(listed), counts, lead)
 
 
 class SessionTerms:
     """Every source of session terms, polled in the background and merged per dictation."""
 
-    def __init__(self, sources: Sequence[Source], *, clock: Clock = _utcnow) -> None:
-        """Hold `sources`; `clock` decides what has expired."""
+    def __init__(
+        self, sources: Sequence[Source], *, clock: Clock = _utcnow, focus: Focus | None = None
+    ) -> None:
+        """Hold `sources`; `clock` decides what has expired; `focus` picks a local block to lead."""
         self.sources = tuple(sources)
+        self.focus = focus
         self._clock = clock
+        self._local = next((source for source in self.sources if source.name == LOCAL_NAME), None)
 
-    def vocab(self, static: Vocab) -> tuple[Vocab, dict[str, int]]:
-        """The static vocabulary with the live session terms merged in, and per-source counts."""
+    def _recent_local(self, now: datetime) -> tuple[SessionBlock, ...]:
+        # A remote tab shows the herdr title and this Mac's cwd, so only local blocks qualify.
+        return () if self._local is None else self._local.recent(now)
+
+    def vocab(self, static: Vocab) -> tuple[Vocab, dict[str, int], FocusUse]:
+        """The static vocabulary with the session terms merged in, per-source counts, and focus."""
         now = self._clock()
-        merged = merge(static.terms, [(source.name, source.live(now)) for source in self.sources])
-        return Vocab(terms=merged.terms, aliases=static.aliases), merged.counts
+        verdict: Verdict = "off"
+        focused = None
+        if self.focus is not None:
+            verdict, block = self.focus.pick(self._recent_local(now), now)
+            focused = None if block is None else (LOCAL_NAME, block)
+        live = [(source.name, source.live(now)) for source in self.sources]
+        merged = merge(static.terms, live, focused)
+        return (
+            Vocab(terms=merged.terms, aliases=static.aliases),
+            merged.counts,
+            FocusUse(verdict, merged.focused),
+        )
 
     async def poll(self) -> None:
-        """Refresh each source on its interval until cancelled."""
-        if not self.sources:
+        """Refresh each source, and the focused tab, on its interval until cancelled."""
+        pollers = [
+            (partial(source.refresh, self._clock), source.interval) for source in self.sources
+        ]
+        if self.focus is not None:
+            refresh = partial(self.focus.refresh, self._clock, self._recent_local)
+            pollers.append((refresh, self.focus.interval))
+        if not pollers:
             return
         # Off AnyIO's default limiter, which dictations share, so hung fetches can
-        # never stall one; a thread per source so a hung host delays no other source.
-        limiter = anyio.CapacityLimiter(len(self.sources))
+        # never stall one; a thread per poller so a hung host delays no other.
+        limiter = anyio.CapacityLimiter(len(pollers))
         async with anyio.create_task_group() as group:
-            for source in self.sources:
-                group.start_soon(self._poll, source, limiter)
+            for refresh, interval in pollers:
+                group.start_soon(self._poll, refresh, interval, limiter)
 
-    async def _poll(self, source: Source, limiter: anyio.CapacityLimiter) -> None:
+    async def _poll(
+        self, refresh: Callable[[], None], interval: float, limiter: anyio.CapacityLimiter
+    ) -> None:
         while True:
             # Abandoned on shutdown: the fetch's own timeout ends it soon after.
-            await anyio.to_thread.run_sync(
-                source.refresh, self._clock, abandon_on_cancel=True, limiter=limiter
-            )
-            await anyio.sleep(source.interval)
+            await anyio.to_thread.run_sync(refresh, abandon_on_cancel=True, limiter=limiter)
+            await anyio.sleep(interval)
 
     def health(self) -> list[dict[str, object]]:
         """Per source: live blocks and terms, and the age of its last good read."""
         now = self._clock()
         return [source.health(now) for source in self.sources]
+
+    def focus_health(self) -> dict[str, object] | None:
+        """The focused tab poller's state and sample age, or None when focus is off."""
+        return None if self.focus is None else self.focus.health(self._clock())
