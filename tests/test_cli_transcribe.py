@@ -16,6 +16,7 @@ from scribe.xai_stt import (
     DEFAULT_MODEL,
     DEFAULT_VAD_THRESHOLD,
     MAX_UPLOAD_BYTES,
+    RETRY_ATTEMPTS,
     XaiStt,
 )
 from tests.xai_fixtures import xai_payload
@@ -23,6 +24,7 @@ from tests.xai_fixtures import xai_payload
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
+    import httpcore
     import httpx
 
 runner = CliRunner()
@@ -53,8 +55,29 @@ def _stub_client(
             transport: httpx.BaseTransport | None = None,
             timeout_seconds: float = 600,
             max_bytes: int = MAX_UPLOAD_BYTES,
+            attempts: int = RETRY_ATTEMPTS,
+            deadline_seconds: float | None = None,
+            keep_alive: bool = False,
+            network_backend: httpcore.NetworkBackend | None = None,
         ) -> None:
-            calls.append({"api_key": api_key})
+            # Only settings off their defaults are recorded, so a test expecting the
+            # key alone also pins the CLI to the client's 5 attempts and 600 s.
+            settings: dict[str, object] = {
+                "timeout_seconds": timeout_seconds,
+                "attempts": attempts,
+                "deadline_seconds": deadline_seconds,
+                "keep_alive": keep_alive,
+                "network_backend": network_backend,
+            }
+            defaults: dict[str, object] = {
+                "timeout_seconds": 600,
+                "attempts": RETRY_ATTEMPTS,
+                "deadline_seconds": None,
+                "keep_alive": False,
+                "network_backend": None,
+            }
+            changed = {name: value for name, value in settings.items() if value != defaults[name]}
+            calls.append({"api_key": api_key, **changed})
 
         def transcribe(
             self,

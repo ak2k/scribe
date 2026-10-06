@@ -173,6 +173,42 @@ when. `--front FILE` puts
 that file's text, exactly as written, at the top of the reading copy, above a
 `---` rule.
 
+## Dictate with scribe serve
+
+```bash
+export XAI_API_KEY=...   # required; never logged or written into an artifact
+scribe serve             # listens on http://127.0.0.1:8765
+```
+
+A local endpoint for dictation apps that speak OpenAI's transcription API. In
+VoiceInk, Settings -> AI models -> add a custom cloud model with endpoint
+`http://127.0.0.1:8765/v1/audio/transcriptions`, any API key and any model
+name. The audio goes to xAI only, and the text comes back in about a second
+for a 10 s utterance. It listens on loopback only, and refuses any request a
+web page could send.
+
+The terms file (`--terms`, default `~/.config/scribe/terms.txt`) holds one
+term per line, sent to xAI to bias recognition; a `#` at the start of a line or
+after a space starts a comment. A line `heard => written` is an alias that
+rewrites what xAI heard:
+
+```text
+# terms
+VoiceInk
+modules/darwin/base.nix
+herder => herdr
+```
+
+A run of up to 4 words whose letters and digits spell an identifier-shaped
+term comes back as the term ("voice ink" becomes "VoiceInk"). Identifier-shaped
+means a digit, a capital after a lowercase letter, or punctuation inside it, and
+at least 3 letters and digits; so `TODO`, `c++` and `.bashrc` are sent to xAI but
+never snapped to. Use an alias for those. The file is re-read when it changes.
+
+Each dictation (the audio, xAI's reply and `result.json`) is kept under
+`--keep`, default `~/.local/state/scribe/serve`, newest 1000; `--no-keep`
+keeps nothing.
+
 ## Quick start
 
 ```bash

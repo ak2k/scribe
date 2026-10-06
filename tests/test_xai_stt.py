@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import gzip
+import json
 import mimetypes
 import os
 import re
-from typing import TYPE_CHECKING
+import time
+from typing import TYPE_CHECKING, cast, override
 
+import httpcore
 import httpx
 import pytest
 import stamina
@@ -14,7 +18,8 @@ from scribe.xai_stt import MAX_UPLOAD_BYTES, XaiStt, resolve_api_key
 from tests.xai_fixtures import xai_payload
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator
+    import ssl
+    from collections.abc import Callable, Iterable, Iterator
     from pathlib import Path
 
 KEY = "xai-test-key-never-logged"
@@ -368,3 +373,250 @@ def test_a_missing_key_names_only_the_variable(env: dict[str, str]) -> None:
         resolve_api_key(env)
 
     assert _SHOUTED.findall(str(caught.value)) == ["XAI_API_KEY"]
+
+
+class _ClosingTransport(httpx.MockTransport):
+    """A mock transport that counts how often a client closes it."""
+
+    def __init__(self, handler: Callable[[httpx.Request], httpx.Response]) -> None:
+        super().__init__(handler)
+        self.closed = 0
+
+    @override
+    def close(self) -> None:
+        self.closed += 1
+
+
+def _read_timeout(request: httpx.Request) -> float:
+    timeouts: object = request.extensions["timeout"]  # pyright: ignore[reportAny]  # httpx types extensions as Any
+    assert isinstance(timeouts, dict)
+    return cast("dict[str, float]", timeouts)["read"]
+
+
+def test_by_default_each_call_opens_and_closes_its_own_client(
+    tmp_path: Path,
+) -> None:
+    transport = _ClosingTransport(_ok)
+    client = XaiStt(KEY, transport=transport)
+    clip = _clip(tmp_path)
+
+    client.transcribe(clip)
+    client.transcribe(clip)
+    client.close()
+
+    assert transport.closed == 2
+
+
+def test_the_default_attempt_timeout_is_600_s(tmp_path: Path) -> None:
+    client, seen = _client(_ok)
+
+    client.transcribe(_clip(tmp_path))
+
+    assert _read_timeout(seen[0]) == 600
+
+
+def test_a_kept_alive_client_is_reused_until_closed(tmp_path: Path) -> None:
+    transport = _ClosingTransport(_ok)
+    client = XaiStt(KEY, transport=transport, keep_alive=True)
+    clip = _clip(tmp_path)
+
+    client.transcribe(clip)
+    client.transcribe(clip)
+    assert transport.closed == 0
+
+    client.close()
+    assert transport.closed == 1
+
+
+def test_fewer_attempts_stop_retrying_sooner(tmp_path: Path) -> None:
+    seen: list[httpx.Request] = []
+
+    def unavailable(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(503, text="upstream unavailable")
+
+    client = XaiStt(KEY, transport=httpx.MockTransport(unavailable), attempts=2)
+
+    with pytest.raises(ExternalServiceError, match="503"):
+        client.transcribe(_clip(tmp_path))
+
+    assert len(seen) == 2
+
+
+def test_a_kept_alive_client_holds_idle_connections_for_minutes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    made: list[dict[str, object]] = []
+    real = httpx.Client
+
+    def recording(**settings: object) -> httpx.Client:
+        made.append(settings)
+        return real(**settings)  # pyright: ignore[reportArgumentType]  # forwards what the code passed
+
+    monkeypatch.setattr(httpx, "Client", recording)
+
+    XaiStt(KEY, keep_alive=True).close()
+
+    limits = made[0].get("limits")
+    assert isinstance(limits, httpx.Limits)
+    assert limits.keepalive_expiry is not None
+    assert limits.keepalive_expiry >= 60
+
+
+def test_a_deadline_bounds_each_attempt_by_the_time_left(tmp_path: Path) -> None:
+    timeouts: list[float] = []
+
+    def stall(request: httpx.Request) -> httpx.Response:
+        timeouts.append(_read_timeout(request))
+        raise httpx.ReadTimeout("stalled", request=request)
+
+    client = XaiStt(KEY, transport=httpx.MockTransport(stall), attempts=2, deadline_seconds=8)
+
+    with pytest.raises(ExternalServiceError, match="stalled"):
+        client.transcribe(_clip(tmp_path))
+
+    assert len(timeouts) == 2
+    assert 7 < timeouts[0] <= 8
+    assert 0 < timeouts[1] <= timeouts[0]
+
+
+def test_a_deadline_closes_a_reply_trickled_past_it(tmp_path: Path) -> None:
+    closed: list[bool] = []
+
+    class Trickle(httpx.SyncByteStream):
+        @override
+        def __iter__(self) -> Iterator[bytes]:
+            for _ in range(100):
+                time.sleep(0.02)
+                yield b" "
+
+        @override
+        def close(self) -> None:
+            closed.append(True)
+
+    def trickling(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, stream=Trickle())
+
+    client = XaiStt(KEY, transport=httpx.MockTransport(trickling), attempts=2, deadline_seconds=0.2)
+    started = time.monotonic()
+
+    with pytest.raises(ExternalServiceError, match="before the deadline"):
+        client.transcribe(_clip(tmp_path))
+
+    assert time.monotonic() - started < 0.6
+    assert closed == [True]
+
+
+def test_a_reply_read_under_a_deadline_is_decoded_as_sent(tmp_path: Path) -> None:
+    def gzipped(_request: httpx.Request) -> httpx.Response:
+        body = gzip.compress(json.dumps(xai_payload()).encode())
+        stream = httpx.ByteStream(body)
+        return httpx.Response(200, headers={"content-encoding": "gzip"}, stream=stream)
+
+    client = XaiStt(KEY, transport=httpx.MockTransport(gzipped), deadline_seconds=8)
+
+    assert client.transcribe(_clip(tmp_path)) == xai_payload()
+
+
+def test_no_retry_starts_after_the_deadline(tmp_path: Path) -> None:
+    starts: list[float] = []
+
+    def unavailable_at_the_end(_request: httpx.Request) -> httpx.Response:
+        starts.append(time.monotonic())
+        time.sleep(0.25)
+        return httpx.Response(503, text="upstream unavailable")
+
+    client = XaiStt(
+        KEY, transport=httpx.MockTransport(unavailable_at_the_end), attempts=2, deadline_seconds=0.3
+    )
+    started = time.monotonic()
+
+    # Real backoff, at least 0.1 s, so the retry falls due after the deadline.
+    with stamina.set_testing(False), pytest.raises(ExternalServiceError):
+        client.transcribe(_clip(tmp_path))
+
+    assert [at for at in starts if at >= started + 0.3] == []
+
+
+class _Wire:
+    """Connections opened and closed over an in-memory network."""
+
+    def __init__(self, *, honors_timeouts: bool) -> None:
+        self.honors_timeouts = honors_timeouts
+        self.opened = 0
+        self.closed = 0
+
+
+class _TrickledHeaders(httpcore.NetworkStream):
+    """A server that sends its response headers one byte every 20 ms."""
+
+    def __init__(self, wire: _Wire) -> None:
+        self._wire = wire
+        self._chunks = iter(
+            [b"HTTP/1.1 200 OK\r\nX-Pad: ", *[b"a"] * 100, b"\r\nContent-Length: 2\r\n\r\n{}"]
+        )
+        wire.opened += 1
+
+    @override
+    def read(self, max_bytes: int, timeout: float | None = None) -> bytes:
+        if self._wire.honors_timeouts and timeout is not None and timeout < 0.02:
+            time.sleep(timeout)
+            raise httpcore.ReadTimeout
+        time.sleep(0.02)
+        return next(self._chunks, b"")
+
+    @override
+    def write(self, buffer: bytes, timeout: float | None = None) -> None:
+        pass
+
+    @override
+    def close(self) -> None:
+        self._wire.closed += 1
+
+    @override
+    def start_tls(
+        self,
+        ssl_context: ssl.SSLContext,
+        server_hostname: str | None = None,
+        timeout: float | None = None,
+    ) -> httpcore.NetworkStream:
+        return self
+
+
+class _TrickleBackend(httpcore.NetworkBackend):
+    def __init__(self, wire: _Wire) -> None:
+        self._wire = wire
+
+    @override
+    def connect_tcp(
+        self,
+        host: str,
+        port: int,
+        timeout: float | None = None,
+        local_address: str | None = None,
+        socket_options: Iterable[httpcore.SOCKET_OPTION] | None = None,
+    ) -> httpcore.NetworkStream:
+        return _TrickledHeaders(self._wire)
+
+
+# A socket that ignores its timeout still blocks no read begun past the deadline.
+@pytest.mark.parametrize("honors_timeouts", [True, False])
+def test_a_deadline_closes_a_connection_whose_headers_trickle_past_it(
+    tmp_path: Path, *, honors_timeouts: bool
+) -> None:
+    wire = _Wire(honors_timeouts=honors_timeouts)
+    client = XaiStt(
+        KEY,
+        network_backend=_TrickleBackend(wire),
+        attempts=2,
+        deadline_seconds=0.2,
+        keep_alive=True,
+    )
+    started = time.monotonic()
+
+    with pytest.raises(ExternalServiceError, match="deadline"):
+        client.transcribe(_clip(tmp_path))
+
+    assert time.monotonic() - started < 0.6
+    assert (wire.opened, wire.closed) == (1, 1)
+    client.close()
