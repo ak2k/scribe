@@ -290,7 +290,7 @@ def test_repo_name_walks_up_to_a_worktree_git_file(tmp_path: Path) -> None:
 def test_extraction_trims_drops_and_splits_paths() -> None:
     text = (
         'Edit "modules/darwin/base.nix", then run `--keyterm` (see XaiStt). '
-        "Commit 1454fb6 at https://example.com/a_b and 3.14, also akms25; "
+        "Commit 1454fb6 at https://example.com/a_b and 3.14, also kbx25; "
         "id 0b8a3c2e-1f4d-4e5a-9b6c-7d8e9f0a1b2c, ok_x, ctx-guard-100! "
         "words like Hello and don't and **bold** stay out, and XaiStt's loses its 's. "
         "/a/very/long/directory/path/that/runs/past/fifty/chars/leaf_file.txt"
@@ -300,7 +300,7 @@ def test_extraction_trims_drops_and_splits_paths() -> None:
         "base.nix",
         "modules/darwin/base.nix",
         "XaiStt",
-        "akms25",
+        "kbx25",
         "ok_x",
         "ctx-guard-100",
         "XaiStt",

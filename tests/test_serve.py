@@ -160,7 +160,7 @@ async def test_the_requests_language_reaches_xai(tmp_path: Path) -> None:
 
 
 async def test_aliases_and_snapping_shape_the_delivered_text(tmp_path: Path) -> None:
-    heard = ["ask", "herder", "about", "voice", "ink,", "akms", "25."]
+    heard = ["ask", "herder", "about", "voice", "ink,", "kbx", "25."]
     payload = {
         "text": " ".join(heard),
         "duration": 2.5,
@@ -169,17 +169,17 @@ async def test_aliases_and_snapping_shape_the_delivered_text(tmp_path: Path) -> 
         ],
     }
     xai = Xai(httpx.Response(200, json=payload))
-    terms = "herdr\nVoiceInk\nakms25\nherder => herdr\n"
+    terms = "herdr\nVoiceInk\nkbx25\nherder => herdr\n"
     async with _client(xai, tmp_path, terms=terms) as client:
         response = await _post(client)
 
-    assert response.json() == {"text": "ask herdr about VoiceInk, akms25."}
+    assert response.json() == {"text": "ask herdr about VoiceInk, kbx25."}
     (kept,) = _kept(tmp_path)
     result = _json(kept / "result.json")
     assert result["edits"] == [
         {"rule": "alias", "from": "herder", "to": "herdr"},
         {"rule": "snap", "from": "voice ink,", "to": "VoiceInk,"},
-        {"rule": "snap", "from": "akms 25.", "to": "akms25."},
+        {"rule": "snap", "from": "kbx 25.", "to": "kbx25."},
     ]
     assert result["aliases"] == [{"heard": "herder", "written": "herdr"}]
 

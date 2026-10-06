@@ -28,7 +28,7 @@ from scribe.vocab import (
 if TYPE_CHECKING:
     from pathlib import Path
 
-TERMS = ["herdr", "akms25", "VoiceInk", "MacWhisper", "modules/darwin/base.nix"]
+TERMS = ["herdr", "kbx25", "VoiceInk", "MacWhisper", "modules/darwin/base.nix"]
 
 
 def _deliver(text: str, vocab: Vocab) -> str:
@@ -110,7 +110,7 @@ def test_a_multi_word_alias_takes_the_longest_leftmost_run() -> None:
         ("open voice ink now", "open VoiceInk now"),
         ("open Voiceink.", "open VoiceInk."),
         ("edit modules darwinbase.nix, then", "edit modules/darwin/base.nix, then"),
-        ("host akms 25.", "host akms25."),
+        ("host kbx 25.", "host kbx25."),
         ("mac whisper", "MacWhisper"),
     ],
 )
@@ -257,8 +257,8 @@ def test_a_term_that_spells_ordinary_speech_never_rewrites_it(term: str, heard: 
     [
         ("my voice. Ink is new", "VoiceInk"),
         ("is it voice? Ink later", "VoiceInk"),
-        ("akms, 25 of them", "akms25"),
-        ("akms 2.5 now", "akms25"),
+        ("kbx, 25 of them", "kbx25"),
+        ("kbx 2.5 now", "kbx25"),
     ],
 )
 def test_punctuation_inside_a_run_that_the_term_lacks_keeps_it_apart(heard: str, term: str) -> None:
