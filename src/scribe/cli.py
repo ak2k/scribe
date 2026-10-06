@@ -2220,6 +2220,9 @@ def serve_command(
     no_session_terms: bool = typer.Option(
         False, "--no-session-terms", help="Send no session terms, local or remote."
     ),
+    no_focus: bool = typer.Option(
+        False, "--no-focus", help="Never ask Ghostty which tab is focused (macOS)."
+    ),
 ) -> None:
     """Serve an OpenAI-compatible transcription endpoint for dictation apps.
 
@@ -2231,10 +2234,11 @@ def serve_command(
 
     The terms of your live Claude Code sessions follow the file's, as written by
     `scribe terms hook` here and on each --session-terms-host, which is polled
-    over ssh in the background; GET /health shows each source's counts.
+    over ssh in the background; GET /health shows each source's counts. On
+    macOS, the session in the focused Ghostty tab goes first, unless --no-focus.
     """
     # Imported here so no other command pays for loading the server stack.
-    from scribe import session_sources  # noqa: PLC0415  # see above
+    from scribe import focus, session_sources  # noqa: PLC0415  # see above
     from scribe.serve import is_loopback  # noqa: PLC0415  # see above
     from scribe.serve import run as run_server  # noqa: PLC0415  # see above
 
@@ -2264,10 +2268,16 @@ def serve_command(
             for name in hosts
         ),
     ]
+    # Off elsewhere without an error: Ghostty's AppleScript exists only on macOS.
+    watch = (
+        None if no_focus or no_session_terms or sys.platform != "darwin" else focus.ghostty_focus()
+    )
     run_server(
         api_key=api_key,
         terms=vocab,
-        session_terms=session_sources.SessionTerms([] if no_session_terms else sources),
+        session_terms=session_sources.SessionTerms(
+            [] if no_session_terms else sources, focus=watch
+        ),
         keep=None if no_keep else keep or state / "serve",
         host=host,
         port=port,

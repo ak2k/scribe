@@ -221,6 +221,18 @@ to xAI's 100 keyterms; the file's terms always go first. `--no-session-terms`
 sends none. `GET /health` shows each source's live sessions, terms and the age
 of its last read.
 
+On macOS, serve also asks Ghostty every 3 s, in the background, which tab is
+focused. When it shows a Claude Code session on this machine, found by the
+tab's title (an untitled session by its directory, if prompted in the last 30
+minutes), that session's terms come right after the file's, up to 24 hours
+after its last prompt. No query runs while no session here was prompted in the
+last 24 hours. The first query brings up macOS's one-time Automation prompt
+asking to let the program running serve control Ghostty; until it is allowed,
+the log shows `serve.focus_failed error=-1743`. `--no-focus` turns this off.
+Each request's log line and `result.json` say whether focus found a session
+and how many terms it gave, never which; `GET /health` shows the poller's
+state.
+
 Each dictation (the audio, xAI's reply and `result.json`) is kept under
 `--keep`, default `~/.local/state/scribe/serve`, newest 1000; `--no-keep`
 keeps nothing.
