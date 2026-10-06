@@ -28,7 +28,7 @@ from scribe.session_sources import (
     run_program,
 )
 from scribe.session_terms import SessionBlock
-from scribe.vocab import Alias, Vocab
+from scribe.vocab import Alias, Vocab, deliver
 from scribe.xai_stt import MAX_KEYTERMS
 
 if TYPE_CHECKING:
@@ -133,6 +133,43 @@ def test_the_cut_holds_when_it_falls_mid_turn() -> None:
 
     assert merged.terms == (*static, "a_one")
     assert merged.counts == {"local": 1, "box-a": 0}
+
+
+def test_the_newer_sessions_spelling_wins_a_snap_and_neither_spelling_is_respelled() -> None:
+    sources = [
+        ("box-a", [_block("new", NOW - timedelta(minutes=1), ["Unrelated_thing", "fooBar"])]),
+        ("box-b", [_block("old", NOW - timedelta(minutes=5), ["foo_bar"])]),
+    ]
+    merged = merge([], sources)
+
+    words, _ = deliver(
+        ["see", "foo", "bar", "and", "fooBar", "and", "foo_bar"], Vocab(merged.terms, ())
+    )
+
+    assert words == ["see", "fooBar", "and", "fooBar", "and", "foo_bar"]
+
+
+def test_a_static_spelling_beats_every_session_spelling_in_a_snap() -> None:
+    sources = [("box-a", [_block("new", NOW, ["fooBar"])])]
+    merged = merge(["foo_bar"], sources)
+
+    words, _ = deliver(["foo", "bar", "and", "fooBar"], Vocab(merged.terms, ()))
+
+    assert words == ["foo_bar", "and", "fooBar"]
+
+
+def test_the_terms_taken_by_turns_are_listed_newest_block_first() -> None:
+    static = [f"static_{n}" for n in range(MAX_KEYTERMS - 4)]
+    sources = [
+        ("box-b", [_block("old", NOW - timedelta(minutes=5), ["o_one", "o_two", "o_three"])]),
+        ("box-a", [_block("new", NOW - timedelta(minutes=1), ["n_one", "n_two", "n_three"])]),
+    ]
+
+    merged = merge(static, sources)
+
+    # Turns still decide which four make the cut: two from each block, not three newest.
+    assert merged.terms == (*static, "n_one", "n_two", "o_one", "o_two")
+    assert merged.counts == {"box-b": 2, "box-a": 2}
 
 
 def test_an_expired_block_contributes_nothing_while_its_sibling_does() -> None:
@@ -311,6 +348,27 @@ def test_a_local_file_failing_unchanged_keeps_aging(tmp_path: Path) -> None:
     source.refresh(lambda: NOW + timedelta(seconds=10))
 
     assert source.health(NOW + timedelta(seconds=10))["age_seconds"] == 10
+
+
+def test_a_local_file_back_unchanged_after_a_failed_read_is_read_again(tmp_path: Path) -> None:
+    path = tmp_path / "current.txt"
+    path.write_text(_file(("s1", NOW, ["first_term"])))
+    source = local_source(path)
+    source.refresh(lambda: NOW)
+    aside = tmp_path / "aside.txt"
+    path.rename(aside)
+    later = NOW + timedelta(seconds=10)
+
+    with capture_logs() as logs:
+        source.refresh(lambda: NOW + timedelta(seconds=5))
+        aside.rename(path)
+        source.refresh(lambda: later)
+
+    assert [entry["event"] for entry in logs] == [
+        "serve.session_terms_failed",
+        "serve.session_terms_restored",
+    ]
+    assert source.health(later)["age_seconds"] == 0
 
 
 def test_a_missing_local_file_contributes_nothing(tmp_path: Path) -> None:
