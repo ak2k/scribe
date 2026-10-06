@@ -8,15 +8,18 @@ import stat
 import time
 import unicodedata
 from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import IO, TYPE_CHECKING, cast, override
 
+import httpcore
 import httpx
 import stamina
 
 from scribe.errors import ExternalServiceError, InputValidationError
 
 if TYPE_CHECKING:
-    from collections.abc import Generator, Iterator, Mapping, Sequence
+    import ssl
+    from collections.abc import Generator, Iterable, Iterator, Mapping, Sequence
     from pathlib import Path
 
 DEFAULT_MODEL = "grok-voice-transcribe-2.0"
@@ -249,6 +252,89 @@ def _post_until(
     return response
 
 
+# Per thread, not per client: concurrent dictations share one kept-alive pool.
+_ENDS_AT: ContextVar[float | None] = ContextVar("xai_ends_at", default=None)
+
+
+def _time_left(timeout: float | None, expired: type[httpcore.TimeoutException]) -> float | None:
+    """Cut one socket wait to what is left of the current call's deadline."""
+    ends_at = _ENDS_AT.get()
+    if ends_at is None:  # pragma: no cover  # every attempt sets it; a guard, not a path
+        return timeout
+    left = ends_at - time.monotonic()
+    if left <= 0:
+        raise expired("the dictation deadline passed")
+    return left if timeout is None else min(timeout, left)
+
+
+class _DeadlineStream(httpcore.NetworkStream):
+    """A connection whose every wait ends by the deadline of the call using it."""
+
+    def __init__(self, inner: httpcore.NetworkStream) -> None:
+        self._inner = inner
+
+    @override
+    def read(self, max_bytes: int, timeout: float | None = None) -> bytes:
+        return self._inner.read(max_bytes, _time_left(timeout, httpcore.ReadTimeout))
+
+    @override
+    def write(self, buffer: bytes, timeout: float | None = None) -> None:
+        self._inner.write(buffer, _time_left(timeout, httpcore.WriteTimeout))
+
+    @override
+    def close(self) -> None:
+        self._inner.close()
+
+    @override
+    def start_tls(
+        self,
+        ssl_context: ssl.SSLContext,
+        server_hostname: str | None = None,
+        timeout: float | None = None,
+    ) -> httpcore.NetworkStream:
+        timeout = _time_left(timeout, httpcore.ConnectTimeout)
+        return _DeadlineStream(self._inner.start_tls(ssl_context, server_hostname, timeout))
+
+    @override
+    def get_extra_info(self, info: str) -> object:
+        return self._inner.get_extra_info(info)  # pyright: ignore[reportAny]  # httpcore returns Any
+
+
+class _DeadlineBackend(httpcore.NetworkBackend):
+    def __init__(self, inner: httpcore.NetworkBackend) -> None:
+        self._inner = inner
+
+    @override
+    def connect_tcp(
+        self,
+        host: str,
+        port: int,
+        timeout: float | None = None,
+        local_address: str | None = None,
+        socket_options: Iterable[httpcore.SOCKET_OPTION] | None = None,
+    ) -> httpcore.NetworkStream:
+        timeout = _time_left(timeout, httpcore.ConnectTimeout)
+        return _DeadlineStream(
+            self._inner.connect_tcp(host, port, timeout, local_address, socket_options)
+        )
+
+
+class _DeadlineTransport(httpx.HTTPTransport):
+    """httpx's transport over connections that honor the calling dictation's deadline."""
+
+    # httpx's timeouts bound each socket wait, and response headers trickled in
+    # one byte at a time reset that wait before the reply exists to be closed.
+    def __init__(self, limits: httpx.Limits, network_backend: httpcore.NetworkBackend) -> None:
+        super().__init__(limits=limits)
+        self._pool = httpcore.ConnectionPool(
+            ssl_context=httpx.create_ssl_context(),
+            max_connections=limits.max_connections,
+            max_keepalive_connections=limits.max_keepalive_connections,
+            keepalive_expiry=limits.keepalive_expiry,
+            network_backend=_DeadlineBackend(network_backend),
+        )
+
+
 def _status_error(response: httpx.Response) -> ExternalServiceError:
     """Wrap a non-retryable HTTP status as a domain error carrying a body excerpt."""
     excerpt = " ".join(response.text[:_BODY_EXCERPT_CHARS].split())
@@ -288,6 +374,7 @@ class XaiStt:
         attempts: int = RETRY_ATTEMPTS,
         deadline_seconds: float | None = None,
         keep_alive: bool = False,
+        network_backend: httpcore.NetworkBackend | None = None,
     ) -> None:
         """Hold request settings; no connection is opened until `transcribe`.
 
@@ -300,12 +387,13 @@ class XaiStt:
             max_bytes: Upload ceiling enforced before any request.
             attempts: Most attempts one `transcribe` makes.
             deadline_seconds: Seconds after which one `transcribe` starts no
-                new attempt, even one a retry backoff scheduled, with each
-                attempt's timeout cut to what is left, and
-                closes a reply still arriving once it passes; or None for no
-                bound. An attempt ends by the deadline plus one read timeout.
+                new attempt, even one a retry backoff scheduled. Every
+                connect, write and read waits at most until it, so no request
+                is in flight once it passes. None for no bound.
             keep_alive: Hold one client, and its connections, across calls
                 until `close`, rather than one client per call.
+            network_backend: Socket layer under a deadline, when `transport`
+                is not given; tests inject an in-memory one.
 
         """
         self._api_key = api_key
@@ -315,6 +403,7 @@ class XaiStt:
         self._max_bytes = max_bytes
         self._attempts = attempts
         self._deadline_seconds = deadline_seconds
+        self._network_backend = network_backend or httpcore.SyncBackend()
         self._shared = (
             self._new_client(httpx.Limits(keepalive_expiry=KEPT_ALIVE_SECONDS))
             if keep_alive
@@ -322,11 +411,14 @@ class XaiStt:
         )
 
     def _new_client(self, limits: httpx.Limits = _PER_CALL_LIMITS) -> httpx.Client:
+        transport = self._transport
+        if transport is None and self._deadline_seconds is not None:
+            transport = _DeadlineTransport(limits, self._network_backend)
         return httpx.Client(
             base_url=self._base_url,
             headers={"Authorization": f"Bearer {self._api_key}"},
             timeout=httpx.Timeout(self._timeout_seconds),
-            transport=self._transport,
+            transport=transport,
             limits=limits,
         )
 
@@ -426,5 +518,9 @@ class XaiStt:
                 # so a retry can otherwise fall due past the deadline.
                 if ends_at is not None and time.monotonic() >= ends_at:
                     raise ExternalServiceError("xAI did not answer before the deadline")
-                return _post(client, path, scalars, self._attempt_timeout(started), ends_at)
+                token = _ENDS_AT.set(ends_at)
+                try:
+                    return _post(client, path, scalars, self._attempt_timeout(started), ends_at)
+                finally:
+                    _ENDS_AT.reset(token)
         raise AssertionError("unreachable: stamina re-raises the last failure")  # pragma: no cover

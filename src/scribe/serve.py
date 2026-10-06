@@ -350,8 +350,8 @@ class _Server:
         await anyio.Path(path).write_bytes(audio)
         started = time.monotonic()
         with anyio.move_on_after(XAI_DEADLINE_SECONDS):
-            # Abandoned at the deadline: the thread's own deadline closes its reply within
-            # one more read timeout, and what it returns is dropped.
+            # Abandoned at the deadline: the thread's own deadline, which starts just
+            # after this one, ends its request, and what it returns is dropped.
             return await anyio.to_thread.run_sync(
                 _dictate, self.stt, path, fields.language or "en", vocab, abandon_on_cancel=True
             )

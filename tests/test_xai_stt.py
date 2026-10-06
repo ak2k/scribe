@@ -8,6 +8,7 @@ import re
 import time
 from typing import TYPE_CHECKING, cast, override
 
+import httpcore
 import httpx
 import pytest
 import stamina
@@ -17,7 +18,8 @@ from scribe.xai_stt import MAX_UPLOAD_BYTES, XaiStt, resolve_api_key
 from tests.xai_fixtures import xai_payload
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator
+    import ssl
+    from collections.abc import Callable, Iterable, Iterator
     from pathlib import Path
 
 KEY = "xai-test-key-never-logged"
@@ -534,3 +536,87 @@ def test_no_retry_starts_after_the_deadline(tmp_path: Path) -> None:
         client.transcribe(_clip(tmp_path))
 
     assert [at for at in starts if at >= started + 0.3] == []
+
+
+class _Wire:
+    """Connections opened and closed over an in-memory network."""
+
+    def __init__(self, *, honors_timeouts: bool) -> None:
+        self.honors_timeouts = honors_timeouts
+        self.opened = 0
+        self.closed = 0
+
+
+class _TrickledHeaders(httpcore.NetworkStream):
+    """A server that sends its response headers one byte every 20 ms."""
+
+    def __init__(self, wire: _Wire) -> None:
+        self._wire = wire
+        self._chunks = iter(
+            [b"HTTP/1.1 200 OK\r\nX-Pad: ", *[b"a"] * 100, b"\r\nContent-Length: 2\r\n\r\n{}"]
+        )
+        wire.opened += 1
+
+    @override
+    def read(self, max_bytes: int, timeout: float | None = None) -> bytes:
+        if self._wire.honors_timeouts and timeout is not None and timeout < 0.02:
+            time.sleep(timeout)
+            raise httpcore.ReadTimeout
+        time.sleep(0.02)
+        return next(self._chunks, b"")
+
+    @override
+    def write(self, buffer: bytes, timeout: float | None = None) -> None:
+        pass
+
+    @override
+    def close(self) -> None:
+        self._wire.closed += 1
+
+    @override
+    def start_tls(
+        self,
+        ssl_context: ssl.SSLContext,
+        server_hostname: str | None = None,
+        timeout: float | None = None,
+    ) -> httpcore.NetworkStream:
+        return self
+
+
+class _TrickleBackend(httpcore.NetworkBackend):
+    def __init__(self, wire: _Wire) -> None:
+        self._wire = wire
+
+    @override
+    def connect_tcp(
+        self,
+        host: str,
+        port: int,
+        timeout: float | None = None,
+        local_address: str | None = None,
+        socket_options: Iterable[httpcore.SOCKET_OPTION] | None = None,
+    ) -> httpcore.NetworkStream:
+        return _TrickledHeaders(self._wire)
+
+
+# A socket that ignores its timeout still blocks no read begun past the deadline.
+@pytest.mark.parametrize("honors_timeouts", [True, False])
+def test_a_deadline_closes_a_connection_whose_headers_trickle_past_it(
+    tmp_path: Path, *, honors_timeouts: bool
+) -> None:
+    wire = _Wire(honors_timeouts=honors_timeouts)
+    client = XaiStt(
+        KEY,
+        network_backend=_TrickleBackend(wire),
+        attempts=2,
+        deadline_seconds=0.2,
+        keep_alive=True,
+    )
+    started = time.monotonic()
+
+    with pytest.raises(ExternalServiceError, match="deadline"):
+        client.transcribe(_clip(tmp_path))
+
+    assert time.monotonic() - started < 0.6
+    assert (wire.opened, wire.closed) == (1, 1)
+    client.close()
