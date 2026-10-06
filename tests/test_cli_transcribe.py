@@ -17,13 +17,12 @@ from scribe.xai_stt import (
     DEFAULT_VAD_THRESHOLD,
     MAX_UPLOAD_BYTES,
     RETRY_ATTEMPTS,
-    RETRYABLE_STATUSES,
     XaiStt,
 )
 from tests.xai_fixtures import xai_payload
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Collection, Sequence
+    from collections.abc import Callable, Sequence
 
     import httpx
 
@@ -56,7 +55,6 @@ def _stub_client(
             timeout_seconds: float = 600,
             max_bytes: int = MAX_UPLOAD_BYTES,
             attempts: int = RETRY_ATTEMPTS,
-            retry_statuses: Collection[int] = RETRYABLE_STATUSES,
             deadline_seconds: float | None = None,
             keep_alive: bool = False,
         ) -> None:
@@ -65,14 +63,12 @@ def _stub_client(
             settings: dict[str, object] = {
                 "timeout_seconds": timeout_seconds,
                 "attempts": attempts,
-                "retry_statuses": retry_statuses,
                 "deadline_seconds": deadline_seconds,
                 "keep_alive": keep_alive,
             }
             defaults: dict[str, object] = {
                 "timeout_seconds": 600,
                 "attempts": RETRY_ATTEMPTS,
-                "retry_statuses": RETRYABLE_STATUSES,
                 "deadline_seconds": None,
                 "keep_alive": False,
             }

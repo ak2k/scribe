@@ -8,7 +8,8 @@ import secrets
 import shutil
 import tempfile
 import time
-from dataclasses import dataclass
+from contextlib import asynccontextmanager, suppress
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Literal
@@ -23,17 +24,19 @@ from starlette.background import BackgroundTask
 from starlette.datastructures import Headers, UploadFile
 from starlette.exceptions import HTTPException
 from starlette.middleware import Middleware
-from starlette.requests import Request
+from starlette.requests import ClientDisconnect, Request
 from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
 from scribe import __version__
-from scribe.errors import AppError
+from scribe.errors import AppError, InputValidationError
 from scribe.schema import XaiResponse
 from scribe.vocab import deliver
 from scribe.xai_stt import XaiStt
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncGenerator
+
     import httpx
     from starlette.datastructures import FormData
     from starlette.types import ASGIApp, Message, Receive, Scope, Send
@@ -47,8 +50,9 @@ KEEP_NEWEST = 1000
 # A dictation is waited on by someone at a keyboard: two quick tries, never minutes.
 XAI_ATTEMPTS = 2
 XAI_DEADLINE_SECONDS = 8.0
-XAI_RETRY_STATUSES = frozenset({429, *range(500, 600)})
 LOOPBACK_NAMES = frozenset({"127.0.0.1", "localhost", "::1"})
+# A Host header: a name, or a bracketed IPv6 address, then an optional port.
+_HOST = re.compile(r"(?:\[(?P<bracketed>[^\]]*)\]|(?P<name>[^:]*))(?::\d*)?")
 _KEPT_NAME = re.compile(r"\d{8}T\d{6}Z-[0-9a-f]{6}")
 _SUFFIX = re.compile(r"\.[A-Za-z0-9]{1,10}")
 
@@ -71,7 +75,6 @@ def dictation_client(api_key: str, *, transport: httpx.BaseTransport | None = No
         transport=transport,
         timeout_seconds=XAI_DEADLINE_SECONDS,
         attempts=XAI_ATTEMPTS,
-        retry_statuses=XAI_RETRY_STATUSES,
         deadline_seconds=XAI_DEADLINE_SECONDS,
         keep_alive=True,
     )
@@ -104,7 +107,7 @@ class KeepRecord(_Record):
     aliases: list[dict[str, str]]
     edits: list[dict[str, str]]
     latency_ms: dict[str, int]
-    outcome: Literal["ok", "xai_failed"]
+    outcome: Literal["ok", "xai_failed", "error"]
     cause: str | None
     scribe_version: str
     flags: Flags
@@ -112,13 +115,17 @@ class KeepRecord(_Record):
 
 @dataclass(frozen=True)
 class _Dictation:
-    payload: dict[str, object] | None
-    text: str | None
-    xai_text: str | None
-    duration: float | None
-    edits: list[dict[str, str]]
-    cause: str | None
+    """What one dictation came to; `cause` is recorded, `message` is what the client sees."""
+
+    outcome: Literal["ok", "xai_failed", "error"]
     xai_ms: int
+    payload: dict[str, object] | None = None
+    text: str | None = None
+    xai_text: str | None = None
+    duration: float | None = None
+    edits: list[dict[str, str]] = field(default_factory=list[dict[str, str]])
+    cause: str | None = None
+    message: str | None = None
 
 
 def _error(status: int, message: str, kind: str) -> JSONResponse:
@@ -126,9 +133,11 @@ def _error(status: int, message: str, kind: str) -> JSONResponse:
 
 
 def _host_name(host: str) -> str:
-    if host.startswith("["):
-        return host[1:].partition("]")[0]
-    return host.partition(":")[0]
+    """The name in a Host header, or "" if the header is more than a name and a port."""
+    match = _HOST.fullmatch(host)
+    if match is None:
+        return ""
+    return match["bracketed"] or match["name"] or ""
 
 
 class _LocalOnly:
@@ -155,9 +164,6 @@ class _TooLargeError(AppError):
 
 
 async def _read_capped(request: Request, max_bytes: int) -> bytes:
-    declared = request.headers.get("content-length", "")
-    if declared.isdigit() and int(declared) > max_bytes:
-        raise _TooLargeError
     body = bytearray()
     async for chunk in request.stream():
         body += chunk
@@ -178,6 +184,10 @@ def _field(form: FormData, name: str) -> str | None:
     return value if isinstance(value, str) else None
 
 
+def _ms_since(started: float) -> int:
+    return round((time.monotonic() - started) * 1000)
+
+
 def _dictate(stt: XaiStt, audio: Path, language: str, vocab: Vocab) -> _Dictation:
     started = time.monotonic()
     payload: dict[str, object] | None = None
@@ -193,27 +203,61 @@ def _dictate(stt: XaiStt, audio: Path, language: str, vocab: Vocab) -> _Dictatio
         parsed = XaiResponse.model_validate(payload)
     except (AppError, ValidationError) as exc:
         cause = str(exc) if isinstance(exc, AppError) else "malformed xAI transcription response"
-        xai_ms = round((time.monotonic() - started) * 1000)
-        return _Dictation(payload, None, None, None, [], " ".join(cause.split()), xai_ms)
-    xai_ms = round((time.monotonic() - started) * 1000)
+        # Its text names the temporary copy of the audio, which is no use to the client.
+        message = (
+            "the audio could not be sent to xAI" if isinstance(exc, InputValidationError) else cause
+        )
+        return _Dictation(
+            "xai_failed",
+            _ms_since(started),
+            payload,
+            cause=" ".join(cause.split()),
+            message=message,
+        )
     words, edits = deliver([word.text for word in parsed.words], vocab)
-    text = " ".join(words) if parsed.words else parsed.text
-    edited = [{"rule": edit.rule, "from": edit.before, "to": edit.after} for edit in edits]
-    return _Dictation(payload, text, parsed.text, parsed.duration, edited, None, xai_ms)
+    return _Dictation(
+        "ok",
+        _ms_since(started),
+        payload,
+        text=" ".join(words) if parsed.words else parsed.text,
+        xai_text=parsed.text,
+        duration=parsed.duration,
+        edits=[{"rule": edit.rule, "from": edit.before, "to": edit.after} for edit in edits],
+    )
 
 
-def _keep(root: Path, record: KeepRecord, audio: Path, payload: dict[str, object] | None) -> None:
+def _audio_name(fields: RequestFields) -> str:
+    suffix = PurePosixPath(fields.filename or "").suffix
+    return f"audio{suffix if _SUFFIX.fullmatch(suffix) else ''}"
+
+
+def _keep(
+    root: Path, record: KeepRecord, name: str, audio: bytes, payload: dict[str, object] | None
+) -> None:
     root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    # mkdir leaves the mode of a root that already exists as it was.
+    root.chmod(0o700)
     stamp = datetime.fromisoformat(record.received_at).strftime("%Y%m%dT%H%M%SZ")
     target = root / f"{stamp}-{secrets.token_hex(3)}"
     target.mkdir(mode=0o700)
-    shutil.move(audio, target / audio.name)
+    (target / name).write_bytes(audio)
     if payload is not None:
         (target / "xai.json").write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
     (target / "result.json").write_text(record.model_dump_json(indent=2) + "\n", encoding="utf-8")
-    kept = sorted(path for path in root.iterdir() if _KEPT_NAME.fullmatch(path.name))
+    _prune(root)
+
+
+def _prune(root: Path) -> None:
+    """Remove all but the newest kept dictations; only real directories count as kept."""
+    kept = sorted(
+        path
+        for path in root.iterdir()
+        if _KEPT_NAME.fullmatch(path.name) and path.is_dir() and not path.is_symlink()
+    )
     for old in kept[:-KEEP_NEWEST]:
-        shutil.rmtree(old)
+        # Another request's prune may have removed it first.
+        with suppress(FileNotFoundError):
+            shutil.rmtree(old)
 
 
 class _Server:
@@ -236,6 +280,9 @@ class _Server:
             form = await _form(request.scope, await _read_capped(request, self.max_bytes))
         except _TooLargeError:
             return self._refuse(413, f"the upload is over {self.max_bytes} bytes")
+        except ClientDisconnect:
+            _logger().info("serve.request", status=499, outcome="disconnected")
+            return Response(status_code=499)
         try:
             parsed = await self._parse(form)
         finally:
@@ -245,21 +292,29 @@ class _Server:
         fields, audio = parsed
         vocab = self.terms.current()
         workdir = Path(await anyio.to_thread.run_sync(tempfile.mkdtemp))
-        suffix = PurePosixPath(fields.filename or "").suffix
-        path = workdir / f"audio{suffix if _SUFFIX.fullmatch(suffix) else ''}"
-        await anyio.Path(path).write_bytes(audio)
-        result = await anyio.to_thread.run_sync(
-            _dictate, self.stt, path, fields.language or "en", vocab
-        )
-        total_ms = round((time.monotonic() - started) * 1000)
-        if result.text is None:
-            response = _error(502, result.cause or "xAI failed", "upstream_error")
-        else:
-            response = JSONResponse({"text": result.text})
+        dictated: _Dictation | None = None
+        try:
+            dictated = await self._xai(workdir / _audio_name(fields), fields, audio, vocab)
+            if dictated.text is None:
+                response = _error(502, dictated.message or "xAI failed", "upstream_error")
+            else:
+                response = JSONResponse({"text": dictated.text})
+            result = dictated
+        # Whatever fails, the client gets an OpenAI-shaped answer and the dictation is kept.
+        except Exception as exc:  # noqa: BLE001  # logged by type; the record says what was lost
+            _logger().error("serve.internal_error", error=type(exc).__name__)
+            response = _error(500, "internal error", "server_error")
+            result = _Dictation(
+                "error",
+                0 if dictated is None else dictated.xai_ms,
+                None if dictated is None else dictated.payload,
+                cause=f"internal error: {type(exc).__name__}",
+            )
+        total_ms = _ms_since(started)
         _logger().info(
             "serve.request",
             status=response.status_code,
-            outcome="ok" if result.cause is None else "xai_failed",
+            outcome=result.outcome,
             audio_seconds=result.duration,
             total_ms=total_ms,
             xai_ms=result.xai_ms,
@@ -275,13 +330,29 @@ class _Server:
             aliases=[{"heard": alias.heard, "written": alias.written} for alias in vocab.aliases],
             edits=result.edits,
             latency_ms={"total": total_ms, "xai": result.xai_ms},
-            outcome="ok" if result.cause is None else "xai_failed",
+            outcome=result.outcome,
             cause=result.cause,
             scribe_version=__version__,
             flags=self.flags,
         )
-        response.background = BackgroundTask(self._after, record, workdir, path, result.payload)
+        response.background = BackgroundTask(
+            self._after, record, workdir, _audio_name(fields), audio, result.payload
+        )
         return response
+
+    async def _xai(
+        self, path: Path, fields: RequestFields, audio: bytes, vocab: Vocab
+    ) -> _Dictation:
+        """Send the audio to xAI, giving up once `XAI_DEADLINE_SECONDS` of wall time pass."""
+        await anyio.Path(path).write_bytes(audio)
+        started = time.monotonic()
+        with anyio.move_on_after(XAI_DEADLINE_SECONDS):
+            # Abandoned at the deadline: the thread's own per-attempt timeouts end it later.
+            return await anyio.to_thread.run_sync(
+                _dictate, self.stt, path, fields.language or "en", vocab, abandon_on_cancel=True
+            )
+        cause = f"xAI did not answer within {XAI_DEADLINE_SECONDS:g} s"
+        return _Dictation("xai_failed", _ms_since(started), cause=cause, message=cause)
 
     async def _parse(self, form: FormData) -> Response | tuple[RequestFields, bytes]:
         # DIVERGE: unknown fields are ignored, not refused: client apps add their own.
@@ -307,13 +378,18 @@ class _Server:
         return _error(status, message, "invalid_request_error")
 
     def _after(
-        self, record: KeepRecord, workdir: Path, audio: Path, payload: dict[str, object] | None
+        self,
+        record: KeepRecord,
+        workdir: Path,
+        name: str,
+        audio: bytes,
+        payload: dict[str, object] | None,
     ) -> None:
         """Keep the dictation once its response is sent; a failure here is only logged."""
         try:
             if self.keep is not None:
-                _keep(self.keep, record, audio, payload)
-        except OSError as exc:
+                _keep(self.keep, record, name, audio, payload)
+        except Exception as exc:  # noqa: BLE001  # a keep never fails the request it records
             _logger().error("serve.keep_failed", error=str(exc))
         finally:
             shutil.rmtree(workdir, ignore_errors=True)
@@ -336,7 +412,7 @@ def create_app(
     """Build the ASGI app.
 
     Args:
-        stt: The xAI client, held for the app's lifetime.
+        stt: The xAI client, held for the app's lifetime and closed at its shutdown.
         terms: The terms file, re-read when it changes.
         keep: Where dictations are kept, or None to keep nothing.
         flags: The server's settings, recorded with each kept dictation.
@@ -344,6 +420,16 @@ def create_app(
 
     """
     server = _Server(stt, terms, keep, flags, max_bytes)
+
+    # Closed on shutdown, where SIGTERM lands too: uvicorn re-raises the signal
+    # after shutting down, so code after its `run` never sees a launchd stop.
+    @asynccontextmanager
+    async def lifespan(_app: Starlette) -> AsyncGenerator[None]:
+        try:
+            yield
+        finally:
+            stt.close()
+
     return Starlette(
         routes=[
             Route(ENDPOINT, server.transcriptions, methods=["POST"]),
@@ -351,6 +437,7 @@ def create_app(
         ],
         middleware=[Middleware(_LocalOnly)],
         exception_handlers={HTTPException: _http_error, Exception: _http_error},
+        lifespan=lifespan,
     )
 
 
@@ -365,13 +452,10 @@ def run(*, api_key: str, terms: TermsFile, keep: Path | None, host: str, port: i
     }
     shown = f"[{host}]" if ":" in host else host
     _logger().info("serve.listening", voiceink_endpoint=f"http://{shown}:{port}{ENDPOINT}")
-    try:
-        uvicorn.run(
-            create_app(stt, terms, keep=keep, flags=flags),
-            host=host,
-            port=port,
-            log_level="warning",
-            access_log=False,
-        )
-    finally:
-        stt.close()
+    uvicorn.run(
+        create_app(stt, terms, keep=keep, flags=flags),
+        host=host,
+        port=port,
+        log_level="warning",
+        access_log=False,
+    )

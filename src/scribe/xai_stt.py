@@ -16,7 +16,7 @@ import stamina
 from scribe.errors import ExternalServiceError, InputValidationError
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Collection, Generator, Mapping, Sequence
+    from collections.abc import Generator, Mapping, Sequence
     from pathlib import Path
 
 DEFAULT_MODEL = "grok-voice-transcribe-2.0"
@@ -30,7 +30,11 @@ MAX_KEYTERM_CHARS = 50
 # speech, 82 s of it in one meeting, which a threshold of 0 transcribed in full.
 DEFAULT_VAD_THRESHOLD = 0.0
 
-RETRYABLE_STATUSES = frozenset({408, 429, 500, 502, 503, 504})
+_RETRYABLE_STATUSES = frozenset({408, 429, 500, 502, 503, 504})
+# httpx's own default, for a client that lives for one call.
+_PER_CALL_LIMITS = httpx.Limits(max_connections=100, max_keepalive_connections=20)
+# A kept client's idle connection outlives the pause between two dictations.
+KEPT_ALIVE_SECONDS = 300.0
 _BODY_EXCERPT_CHARS = 300
 _SAFE_FILENAME_CHARS = re.compile(r"[^A-Za-z0-9._-]+")
 _MAX_UPLOAD_NAME_CHARS = 96
@@ -69,16 +73,12 @@ def resolve_api_key(env: Mapping[str, str] = os.environ) -> str:
     return key
 
 
-def _retryable(statuses: Collection[int]) -> Callable[[Exception], bool]:
-    """Return a predicate true for a transport error or one of `statuses`."""
-
-    def is_retryable(exc: Exception) -> bool:
-        if isinstance(exc, httpx.HTTPStatusError):
-            return exc.response.status_code in statuses
-        # A 4xx other than 408/429 needs the call fixed, so retrying it only burns quota.
-        return isinstance(exc, httpx.TransportError)
-
-    return is_retryable
+def _is_retryable(exc: Exception) -> bool:
+    """True for a transient failure: rate limit, request timeout, 5xx, transport error."""
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.response.status_code in _RETRYABLE_STATUSES
+    # A 4xx other than 408/429 needs the call fixed, so retrying it only burns quota.
+    return isinstance(exc, httpx.TransportError)
 
 
 def _upload_name(path: Path) -> str:
@@ -246,7 +246,6 @@ class XaiStt:
         timeout_seconds: float = 600,
         max_bytes: int = MAX_UPLOAD_BYTES,
         attempts: int = RETRY_ATTEMPTS,
-        retry_statuses: Collection[int] = RETRYABLE_STATUSES,
         deadline_seconds: float | None = None,
         keep_alive: bool = False,
     ) -> None:
@@ -260,9 +259,10 @@ class XaiStt:
                 upload is slow.
             max_bytes: Upload ceiling enforced before any request.
             attempts: Most attempts one `transcribe` makes.
-            retry_statuses: HTTP statuses retried; transport errors always are.
-            deadline_seconds: Most time one `transcribe` spends across all its
-                attempts and the waits between them, or None for no bound.
+            deadline_seconds: Seconds after which one `transcribe` starts no
+                new attempt, each attempt's timeout cut to what is left; or None
+                for no bound. It bounds each wait on the socket, not wall time:
+                a reply trickled in slowly can run past it.
             keep_alive: Hold one client, and its connections, across calls
                 until `close`, rather than one client per call.
 
@@ -273,16 +273,20 @@ class XaiStt:
         self._timeout_seconds = timeout_seconds
         self._max_bytes = max_bytes
         self._attempts = attempts
-        self._is_retryable = _retryable(retry_statuses)
         self._deadline_seconds = deadline_seconds
-        self._shared = self._new_client() if keep_alive else None
+        self._shared = (
+            self._new_client(httpx.Limits(keepalive_expiry=KEPT_ALIVE_SECONDS))
+            if keep_alive
+            else None
+        )
 
-    def _new_client(self) -> httpx.Client:
+    def _new_client(self, limits: httpx.Limits = _PER_CALL_LIMITS) -> httpx.Client:
         return httpx.Client(
             base_url=self._base_url,
             headers={"Authorization": f"Bearer {self._api_key}"},
             timeout=httpx.Timeout(self._timeout_seconds),
             transport=self._transport,
+            limits=limits,
         )
 
     @contextmanager
@@ -373,7 +377,7 @@ class XaiStt:
         self, client: httpx.Client, path: Path, scalars: list[_Part], started: float
     ) -> httpx.Response:
         for attempt in stamina.retry_context(
-            on=self._is_retryable, attempts=self._attempts, timeout=self._deadline_seconds
+            on=_is_retryable, attempts=self._attempts, timeout=self._deadline_seconds
         ):
             with attempt:
                 return _post(client, path, scalars, self._attempt_timeout(started))

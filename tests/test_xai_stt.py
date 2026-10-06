@@ -438,21 +438,24 @@ def test_fewer_attempts_stop_retrying_sooner(tmp_path: Path) -> None:
     assert len(seen) == 2
 
 
-def test_a_status_left_out_of_the_retry_set_is_not_retried(tmp_path: Path) -> None:
-    seen: list[httpx.Request] = []
+def test_a_kept_alive_client_holds_idle_connections_for_minutes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    made: list[dict[str, object]] = []
+    real = httpx.Client
 
-    def timed_out(request: httpx.Request) -> httpx.Response:
-        seen.append(request)
-        return httpx.Response(408, text="request timeout")
+    def recording(**settings: object) -> httpx.Client:
+        made.append(settings)
+        return real(**settings)  # pyright: ignore[reportArgumentType]  # forwards what the code passed
 
-    client = XaiStt(
-        KEY, transport=httpx.MockTransport(timed_out), retry_statuses=frozenset({429, 503})
-    )
+    monkeypatch.setattr(httpx, "Client", recording)
 
-    with pytest.raises(ExternalServiceError, match="408"):
-        client.transcribe(_clip(tmp_path))
+    XaiStt(KEY, keep_alive=True).close()
 
-    assert len(seen) == 1
+    limits = made[0].get("limits")
+    assert isinstance(limits, httpx.Limits)
+    assert limits.keepalive_expiry is not None
+    assert limits.keepalive_expiry >= 60
 
 
 def test_a_deadline_bounds_each_attempt_by_the_time_left(tmp_path: Path) -> None:

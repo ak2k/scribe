@@ -3,20 +3,26 @@ from __future__ import annotations
 import json
 import re
 import stat
+import tempfile
+import threading
+import time
 from typing import TYPE_CHECKING, cast, override
 
+import anyio
 import httpx
 import pytest
 import stamina
 from structlog.testing import capture_logs
 
-from scribe.serve import create_app, dictation_client
+from scribe.serve import ENDPOINT, create_app, dictation_client
 from scribe.vocab import TermsFile
 from tests.xai_fixtures import xai_payload
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterator
     from pathlib import Path
+
+    from starlette.types import Message
 
 KEY = "xai-test-key-never-logged"
 AUDIO = b"RIFF-pretend-wav-bytes"
@@ -187,6 +193,9 @@ async def test_text_without_words_is_delivered_as_is(tmp_path: Path) -> None:
         {"Origin": "null"},
         {"Host": "evil.example:8765"},
         {"Host": "127.0.0.1.example"},
+        {"Host": "127.0.0.1:8765@evil.example"},
+        {"Host": "localhost:80:80"},
+        {"Host": "[::1]x"},
     ],
 )
 async def test_a_cross_origin_or_foreign_host_request_is_refused_before_anything_runs(
@@ -425,15 +434,6 @@ async def test_one_client_serves_every_dictation_with_an_8_s_budget(tmp_path: Pa
     assert 0 < cast("dict[str, float]", timeouts)["read"] <= 8
 
 
-async def test_a_408_from_xai_is_not_retried_by_a_dictation(tmp_path: Path) -> None:
-    xai = Xai(httpx.Response(408, text="request timeout"))
-    async with _client(xai, tmp_path) as client:
-        response = await _post(client)
-
-    assert response.status_code == 502
-    assert len(xai.seen) == 1
-
-
 async def test_a_garbled_multipart_body_is_400_with_an_openai_error_body(tmp_path: Path) -> None:
     xai = Xai()
     async with _client(xai, tmp_path) as client:
@@ -446,3 +446,184 @@ async def test_a_garbled_multipart_body_is_400_with_an_openai_error_body(tmp_pat
     assert response.status_code == 400
     assert set(cast("dict[str, dict[str, str]]", response.json())["error"]) == {"message", "type"}
     assert xai.seen == []
+
+
+@pytest.fixture
+def workdirs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Point the server's temporary directories at one the test can inspect."""
+    work = tmp_path / "work"
+    work.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(work))
+    return work
+
+
+async def test_an_internal_error_is_a_500_that_is_kept_and_leaves_no_temporary_audio(
+    tmp_path: Path, workdirs: Path
+) -> None:
+    lone_surrogate = (
+        b'{"text": "x", "duration": 1.0, "words": [{"text": "\\ud800", "start": 0, "end": 1}]}'
+    )
+    reply = httpx.Response(
+        200, content=lone_surrogate, headers={"content-type": "application/json"}
+    )
+    async with _client(Xai(reply), tmp_path) as client:
+        response = await _post(client)
+
+    assert response.status_code == 500
+    assert set(cast("dict[str, dict[str, str]]", response.json())["error"]) == {"message", "type"}
+    assert [entry async for entry in anyio.Path(workdirs).iterdir()] == []
+    (kept,) = _kept(tmp_path)
+    assert (kept / "audio.wav").read_bytes() == AUDIO
+    assert _json(kept / "result.json")["outcome"] == "error"
+
+
+async def test_audio_that_cannot_be_sent_is_a_502_naming_no_path_and_is_still_kept(
+    tmp_path: Path, workdirs: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def lost(_path: anyio.Path, _data: bytes) -> int:
+        return 0
+
+    monkeypatch.setattr(anyio.Path, "write_bytes", lost)
+    async with _client(Xai(), tmp_path) as client:
+        response = await _post(client)
+
+    assert response.status_code == 502
+    assert str(workdirs) not in response.text
+    (kept,) = _kept(tmp_path)
+    assert (kept / "audio.wav").read_bytes() == AUDIO
+    assert "cannot read audio file" in str(_json(kept / "result.json")["cause"])
+
+
+async def test_pruning_skips_a_link_or_file_named_like_a_kept_dictation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("scribe.serve.KEEP_NEWEST", 3)
+    root = tmp_path / "keep"
+    root.mkdir(mode=0o700)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    link = root / "20000101T000001Z-aaaaaa"
+    link.symlink_to(outside)
+    plain = root / "20000101T000002Z-bbbbbb"
+    plain.write_text("not a directory", encoding="utf-8")
+
+    with capture_logs() as logs:
+        async with _client(Xai(), tmp_path) as client:
+            for _ in range(5):
+                await _post(client)
+
+    assert len([path for path in root.iterdir() if path.is_dir() and not path.is_symlink()]) == 3
+    assert link.is_symlink()
+    assert outside.is_dir()
+    assert plain.is_file()
+    assert [entry for entry in logs if entry["log_level"] == "error"] == []
+
+
+async def test_a_keep_root_that_already_exists_is_made_private(tmp_path: Path) -> None:
+    (tmp_path / "keep").mkdir(mode=0o755)
+
+    async with _client(Xai(), tmp_path) as client:
+        await _post(client)
+
+    assert stat.S_IMODE((tmp_path / "keep").stat().st_mode) == 0o700
+
+
+async def test_the_xai_client_is_closed_when_the_server_shuts_down(tmp_path: Path) -> None:
+    closed: list[bool] = []
+
+    class Transport(httpx.MockTransport):
+        @override
+        def close(self) -> None:
+            closed.append(True)
+
+    app = create_app(
+        dictation_client(KEY, transport=Transport(Xai())), _terms(tmp_path), keep=None, flags={}
+    )
+    events: list[Message] = [{"type": "lifespan.startup"}, {"type": "lifespan.shutdown"}]
+    sent: list[Message] = []
+
+    async def receive() -> Message:
+        return events.pop(0)
+
+    async def send(message: Message) -> None:
+        sent.append(message)
+
+    await app({"type": "lifespan", "asgi": {"version": "3.0"}, "state": {}}, receive, send)
+
+    assert [message["type"] for message in sent] == [
+        "lifespan.startup.complete",
+        "lifespan.shutdown.complete",
+    ]
+    assert closed == [True]
+
+
+async def test_a_client_that_hangs_up_mid_upload_is_one_log_line(tmp_path: Path) -> None:
+    xai = Xai()
+    app = create_app(
+        dictation_client(KEY, transport=httpx.MockTransport(xai)),
+        _terms(tmp_path),
+        keep=tmp_path / "keep",
+        flags={},
+    )
+    events: list[Message] = [
+        {"type": "http.request", "body": b"--b\r\n", "more_body": True},
+        {"type": "http.disconnect"},
+    ]
+
+    async def receive() -> Message:
+        return events.pop(0) if events else {"type": "http.disconnect"}
+
+    async def send(_message: Message) -> None:
+        return None
+
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": ENDPOINT,
+        "raw_path": ENDPOINT.encode(),
+        "query_string": b"",
+        "root_path": "",
+        "headers": [
+            (b"host", b"127.0.0.1:8765"),
+            (b"content-type", b"multipart/form-data; boundary=b"),
+        ],
+        "client": ("127.0.0.1", 50000),
+        "server": ("127.0.0.1", 8765),
+    }
+    with capture_logs() as logs:
+        await app(scope, receive, send)
+
+    assert [entry["outcome"] for entry in logs] == ["disconnected"]
+    assert xai.seen == []
+    assert _kept(tmp_path) == []
+
+
+async def test_a_slowly_trickled_xai_reply_ends_in_a_502_within_the_cap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("scribe.serve.XAI_DEADLINE_SECONDS", 0.3)
+    release = threading.Event()
+
+    class Trickle(httpx.SyncByteStream):
+        @override
+        def __iter__(self) -> Iterator[bytes]:
+            yield b'{"text": "late", '
+            release.wait(3)
+            yield b'"words": []}'
+
+    reply = httpx.Response(200, headers={"content-type": "application/json"}, stream=Trickle())
+    started = time.monotonic()
+    try:
+        async with _client(Xai(reply), tmp_path) as client:
+            response = await _post(client)
+        elapsed = time.monotonic() - started
+    finally:
+        release.set()
+
+    assert response.status_code == 502
+    assert elapsed < 2
+    (kept,) = _kept(tmp_path)
+    assert _json(kept / "result.json")["outcome"] == "xai_failed"
