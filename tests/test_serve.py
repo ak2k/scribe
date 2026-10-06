@@ -627,3 +627,50 @@ async def test_a_slowly_trickled_xai_reply_ends_in_a_502_within_the_cap(
     assert elapsed < 2
     (kept,) = _kept(tmp_path)
     assert _json(kept / "result.json")["outcome"] == "xai_failed"
+
+
+async def test_missed_deadlines_leave_no_worker_reading_from_xai(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("scribe.serve.XAI_DEADLINE_SECONDS", 0.3)
+    release = threading.Event()
+    opened: list[bool] = []
+    closed: list[bool] = []
+
+    class Trickle(httpx.SyncByteStream):
+        """A reply that sends a byte often enough to beat every read timeout."""
+
+        @override
+        def __iter__(self) -> Iterator[bytes]:
+            while not release.wait(0.02):
+                yield b" "
+
+        @override
+        def close(self) -> None:
+            closed.append(True)
+
+    def trickling(request: httpx.Request) -> httpx.Response:
+        request.read()
+        opened.append(True)
+        return httpx.Response(200, headers={"content-type": "application/json"}, stream=Trickle())
+
+    app = create_app(
+        dictation_client(KEY, transport=httpx.MockTransport(trickling)),
+        _terms(tmp_path),
+        keep=None,
+        flags={},
+    )
+    try:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:8765"
+        ) as client:
+            statuses = [(await _post(client)).status_code for _ in range(4)]
+        # A worker may outlive its deadline by one read timeout, which is at most the deadline.
+        await anyio.sleep(0.3 + 0.3 + 0.2)
+        live = len(opened) - len(closed)
+    finally:
+        release.set()
+
+    assert statuses == [502] * 4
+    assert len(opened) == 4
+    assert live == 0

@@ -8,7 +8,7 @@ import stat
 import time
 import unicodedata
 from contextlib import contextmanager
-from typing import IO, TYPE_CHECKING, cast
+from typing import IO, TYPE_CHECKING, cast, override
 
 import httpx
 import stamina
@@ -16,7 +16,7 @@ import stamina
 from scribe.errors import ExternalServiceError, InputValidationError
 
 if TYPE_CHECKING:
-    from collections.abc import Generator, Mapping, Sequence
+    from collections.abc import Generator, Iterator, Mapping, Sequence
     from pathlib import Path
 
 DEFAULT_MODEL = "grok-voice-transcribe-2.0"
@@ -190,7 +190,11 @@ def check_input(path: Path, max_bytes: int) -> None:
 
 
 def _post(
-    client: httpx.Client, path: Path, scalars: list[_Part], timeout_seconds: float
+    client: httpx.Client,
+    path: Path,
+    scalars: list[_Part],
+    timeout_seconds: float,
+    ends_at: float | None,
 ) -> httpx.Response:
     """POST one attempt at `/stt`, with `file` as the last multipart field."""
     # A handle per attempt: httpx encodes multipart lazily at send time and
@@ -202,10 +206,46 @@ def _post(
                 *scalars,
                 ("file", (_upload_name(path), handle, None)),
             ]
-            response = client.post("/stt", files=parts, timeout=httpx.Timeout(timeout_seconds))
+            timeout = httpx.Timeout(timeout_seconds)
+            if ends_at is None:
+                response = client.post("/stt", files=parts, timeout=timeout)
+            else:
+                response = _post_until(client, parts, timeout, ends_at)
     except OSError as exc:
         raise InputValidationError(f"cannot read audio file {path}: {exc}") from exc
     response.raise_for_status()
+    return response
+
+
+class _Until(httpx.SyncByteStream):
+    """A reply body that stops at the first chunk arriving past `ends_at`."""
+
+    def __init__(self, inner: httpx.SyncByteStream, ends_at: float) -> None:
+        self._inner = inner
+        self._ends_at = ends_at
+
+    @override
+    def __iter__(self) -> Iterator[bytes]:
+        for chunk in self._inner:
+            if time.monotonic() > self._ends_at:
+                raise ExternalServiceError("xAI did not finish its reply before the deadline")
+            yield chunk
+
+    @override
+    def close(self) -> None:
+        self._inner.close()
+
+
+def _post_until(
+    client: httpx.Client, parts: list[_Part], timeout: httpx.Timeout, ends_at: float
+) -> httpx.Response:
+    """POST, reading the reply chunk by chunk and closing it once `ends_at` passes."""
+    # A read timeout bounds only each wait on the socket, so a reply trickled in
+    # slowly would otherwise hold its thread and connection long past the deadline.
+    with client.stream("POST", "/stt", files=parts, timeout=timeout) as response:
+        # A sync client's reply body is always a sync stream.
+        response.stream = _Until(cast("httpx.SyncByteStream", response.stream), ends_at)
+        _ = response.read()
     return response
 
 
@@ -260,9 +300,9 @@ class XaiStt:
             max_bytes: Upload ceiling enforced before any request.
             attempts: Most attempts one `transcribe` makes.
             deadline_seconds: Seconds after which one `transcribe` starts no
-                new attempt, each attempt's timeout cut to what is left; or None
-                for no bound. It bounds each wait on the socket, not wall time:
-                a reply trickled in slowly can run past it.
+                new attempt, each attempt's timeout cut to what is left, and
+                closes a reply still arriving once it passes; or None for no
+                bound. An attempt ends by the deadline plus one read timeout.
             keep_alive: Hold one client, and its connections, across calls
                 until `close`, rather than one client per call.
 
@@ -376,9 +416,10 @@ class XaiStt:
     def _post_with_retries(
         self, client: httpx.Client, path: Path, scalars: list[_Part], started: float
     ) -> httpx.Response:
+        ends_at = None if self._deadline_seconds is None else started + self._deadline_seconds
         for attempt in stamina.retry_context(
             on=_is_retryable, attempts=self._attempts, timeout=self._deadline_seconds
         ):
             with attempt:
-                return _post(client, path, scalars, self._attempt_timeout(started))
+                return _post(client, path, scalars, self._attempt_timeout(started), ends_at)
         raise AssertionError("unreachable: stamina re-raises the last failure")  # pragma: no cover

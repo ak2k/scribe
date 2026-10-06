@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import gzip
+import json
 import mimetypes
 import os
 import re
+import time
 from typing import TYPE_CHECKING, cast, override
 
 import httpx
@@ -473,3 +476,41 @@ def test_a_deadline_bounds_each_attempt_by_the_time_left(tmp_path: Path) -> None
     assert len(timeouts) == 2
     assert 7 < timeouts[0] <= 8
     assert 0 < timeouts[1] <= timeouts[0]
+
+
+def test_a_deadline_closes_a_reply_trickled_past_it(tmp_path: Path) -> None:
+    closed: list[bool] = []
+
+    class Trickle(httpx.SyncByteStream):
+        @override
+        def __iter__(self) -> Iterator[bytes]:
+            for _ in range(100):
+                time.sleep(0.02)
+                yield b" "
+
+        @override
+        def close(self) -> None:
+            closed.append(True)
+
+    def trickling(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, stream=Trickle())
+
+    client = XaiStt(KEY, transport=httpx.MockTransport(trickling), attempts=2, deadline_seconds=0.2)
+    started = time.monotonic()
+
+    with pytest.raises(ExternalServiceError, match="before the deadline"):
+        client.transcribe(_clip(tmp_path))
+
+    assert time.monotonic() - started < 0.6
+    assert closed == [True]
+
+
+def test_a_reply_read_under_a_deadline_is_decoded_as_sent(tmp_path: Path) -> None:
+    def gzipped(_request: httpx.Request) -> httpx.Response:
+        body = gzip.compress(json.dumps(xai_payload()).encode())
+        stream = httpx.ByteStream(body)
+        return httpx.Response(200, headers={"content-encoding": "gzip"}, stream=stream)
+
+    client = XaiStt(KEY, transport=httpx.MockTransport(gzipped), deadline_seconds=8)
+
+    assert client.transcribe(_clip(tmp_path)) == xai_payload()
