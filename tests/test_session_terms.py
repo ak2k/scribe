@@ -43,6 +43,7 @@ _RECORDS: list[dict[str, object]] = [
     {
         "type": "user",
         "timestamp": "2026-10-05T11:00:00Z",
+        "entrypoint": "cli",
         "gitBranch": "feature/old-branch",
         "message": {"role": "user", "content": "rename widget_factory in GadgetPanel"},
     },
@@ -100,6 +101,10 @@ def _transcript(tmp_path: Path, records: list[dict[str, object]] = _RECORDS) -> 
     path = tmp_path / "session.jsonl"
     path.write_text("".join(json.dumps(record) + "\n" for record in records))
     return path
+
+
+def _cli_transcript(tmp_path: Path) -> Path:
+    return _transcript(tmp_path, [{"type": "system", "entrypoint": "cli"}])
 
 
 def _fields(transcript: Path, cwd: Path, **fields: object) -> dict[str, object]:
@@ -232,7 +237,8 @@ def test_missing_transcript_is_logged_and_the_prompt_still_counts(tmp_path: Path
 
     run_hook(payload.encode(), state=state, now=NOW, host="box")
 
-    assert "DictationBox" in (state / "terms" / "current.txt").read_text().split("\n")
+    record_path = state / "terms" / "sessions" / "11111111-aaaa-4bbb-8ccc-222222222222.json"
+    assert "DictationBox" in _terms(record_path)
     assert len((state / "terms" / "hook.log").read_text().splitlines()) == 1
 
 
@@ -306,6 +312,7 @@ def _record(session: str, updated: datetime, terms: list[str]) -> SessionRecord:
         cwd="/w",
         updated=updated,
         ranked=updated,
+        entrypoint="cli",
         terms=[TermCount(term=term, count=1, last_seen=updated) for term in terms],
     )
 
@@ -343,6 +350,7 @@ def test_merged_file_ranks_within_a_session_by_last_seen_then_count(tmp_path: Pa
         cwd="/w",
         updated=NOW,
         ranked=NOW,
+        entrypoint="cli",
         terms=[
             TermCount(term="early_many", count=9, last_seen=earlier),
             TermCount(term="late_few", count=1, last_seen=NOW),
@@ -379,7 +387,7 @@ def test_shape_drift_and_a_corrupt_record_are_logged_not_fatal(tmp_path: Path) -
     state = tmp_path / "state"
     records: list[dict[str, object]] = [
         {"type": "user", "message": {"content": 7}},
-        {"type": "user", "message": {"content": "keep shaped_term"}},
+        {"type": "user", "entrypoint": "cli", "message": {"content": "keep shaped_term"}},
     ]
     transcript = _transcript(tmp_path, records)
     with transcript.open("a") as handle:
@@ -424,7 +432,7 @@ def test_window_alone_drops_a_31_minute_old_session(tmp_path: Path) -> None:
 
 def test_no_merged_line_reads_as_an_alias_or_a_comment(tmp_path: Path) -> None:
     prompt = "then rows.map(id=>id.name) and #fix_it, curry f=>g=>h"
-    _event(tmp_path, "s1", "UserPromptSubmit", prompt=prompt)
+    _event(tmp_path, "s1", "UserPromptSubmit", transcript=_cli_transcript(tmp_path), prompt=prompt)
     sessions = tmp_path / "terms" / "sessions"
     _store(sessions, _record("stored", NOW, ["heard=>written", "#comment_x", "kept_term"]))
 
@@ -567,12 +575,25 @@ def test_a_headless_session_is_never_merged(tmp_path: Path) -> None:
 
     lines = _current(tmp_path / "terms")
     assert "GadgetPanel" in lines
-    assert "unknown_entry_term" in lines
+    assert "unknown_entry_term" not in lines
     assert "worker_only_term" not in lines
     worker_record = SessionRecord.model_validate_json(
         (tmp_path / "terms" / "sessions" / "w1.json").read_text()
     )
     assert worker_record.entrypoint == "sdk-cli"
+
+
+def test_a_session_is_merged_only_once_its_transcript_shows_cli(tmp_path: Path) -> None:
+    missing = tmp_path / "not-yet.jsonl"
+    _event(tmp_path, "w1", "SessionStart", transcript=missing, cwd="/worker-repo")
+
+    assert _current(tmp_path / "terms") == []
+
+    missing.write_text(json.dumps({"type": "system", "entrypoint": "cli"}) + "\n")
+    _event(tmp_path, "w1", "UserPromptSubmit", transcript=missing, prompt="see cli_term")
+    _event(tmp_path, "w1", "UserPromptSubmit", prompt="see blind_term")
+
+    assert "blind_term" in _current(tmp_path / "terms")
 
 
 def test_code_fragments_flags_caps_and_digit_led_tokens_are_dropped() -> None:
@@ -646,15 +667,16 @@ def test_a_slower_concurrent_merge_does_not_drop_a_newer_update(
                 threading.Thread(
                     target=_event,
                     args=(tmp_path, "b", "UserPromptSubmit"),
-                    kwargs={"prompt": "see b_term"},
+                    kwargs={"transcript": cli, "prompt": "see b_term"},
                 )
             )
             racer[0].start()
             time.sleep(0.3)
         real(path, text)
 
+    cli = _cli_transcript(tmp_path)
     monkeypatch.setattr(session_terms, "_replace_atomically", interleave)
-    _event(tmp_path, "a", "UserPromptSubmit", prompt="see a_term")
+    _event(tmp_path, "a", "UserPromptSubmit", transcript=cli, prompt="see a_term")
     racer[0].join()
 
     assert sorted(_current(tmp_path / "terms")) == ["a_term", "b_term"]
@@ -679,7 +701,13 @@ def test_a_prompt_log_failure_still_updates_the_terms(tmp_path: Path) -> None:
     tmp_path.joinpath("prompts.jsonl").write_text("")
     tmp_path.joinpath("prompts.jsonl").chmod(0o400)
 
-    _event(tmp_path, "s1", "UserPromptSubmit", prompt="see kept_term")
+    _event(
+        tmp_path,
+        "s1",
+        "UserPromptSubmit",
+        transcript=_cli_transcript(tmp_path),
+        prompt="see kept_term",
+    )
 
     assert _current(tmp_path / "terms") == ["kept_term"]
     assert "prompt log" in (tmp_path / "terms" / "hook.log").read_text()

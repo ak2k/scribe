@@ -428,7 +428,9 @@ def write_merged(terms_dir: Path, *, now: datetime) -> None:
             for record in records
             if record.ranked is not None
             and record.ranked >= now - WINDOW
-            and record.entrypoint in {None, _INTERACTIVE}
+            # Unknown is not interactive: a headless worker's first events can
+            # come before its transcript, and later ones may never run.
+            and record.entrypoint == _INTERACTIVE
         ),
         key=lambda live: live[0],
         reverse=True,

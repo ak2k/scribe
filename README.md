@@ -115,9 +115,11 @@ pass them to xAI as keyterms. It writes under `$XDG_STATE_HOME/scribe`, else
   deleted after 7 days.
 - `terms/current.txt`: up to 60 terms, one per line, usable as a terms file as
   is. Every interactive session you prompted or started in the last 30 minutes
-  contributes, the sessions taking turns, most recent first. Headless
-  (`claude -p`) sessions are left out, and a Stop event refreshes a session's
-  terms without making it more recent.
+  contributes, the sessions taking turns, most recent first. A session
+  contributes only once its transcript shows it is interactive, so a new
+  session's terms join from its first prompt rather than from its start, and
+  headless (`claude -p`) sessions are left out. A Stop event refreshes a
+  session's terms without making it more recent.
 - `prompts.jsonl`: every prompt you submit, with time, host, session and
   directory. It holds your prompts verbatim; delete it whenever you like.
 - `terms/hook.log`: one line per failure, started afresh past 1 MB. The hook
