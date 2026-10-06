@@ -7,9 +7,11 @@ import stat
 import tempfile
 import threading
 import time
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, cast, override
 
 import anyio
+import anyio.to_thread
 import httpx
 import pytest
 import stamina
@@ -19,11 +21,12 @@ from uvicorn.lifespan.on import LifespanOn
 from uvicorn.protocols.http.h11_impl import H11Protocol
 
 from scribe.serve import ENDPOINT, create_app, dictation_client, run
+from scribe.session_sources import SessionTerms, local_source, remote_source
 from scribe.vocab import TermsFile
 from tests.xai_fixtures import xai_payload
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Iterator
+    from collections.abc import AsyncIterator, Iterator, Sequence
     from pathlib import Path
 
     from starlette.types import ASGIApp, Message
@@ -35,6 +38,8 @@ AUDIO = b"RIFF-pretend-wav-bytes"
 VOICEINK_FIELDS = {"model": "scribe", "response_format": "json", "temperature": "0"}
 KEPT_NAME = re.compile(r"\d{8}T\d{6}Z-[0-9a-f]{6}")
 pytestmark = pytest.mark.anyio
+NOW = datetime(2026, 10, 5, 12, 0, tzinfo=UTC)
+NO_SESSIONS = SessionTerms([])
 
 
 @pytest.fixture(autouse=True)
@@ -81,10 +86,12 @@ def _client(
     keep: bool = True,
     max_bytes: int = 25 * 1024 * 1024,
     host: str = "127.0.0.1:8765",
+    sessions: SessionTerms = NO_SESSIONS,
 ) -> httpx.AsyncClient:
     app = create_app(
         dictation_client(KEY, transport=httpx.MockTransport(xai)),
         _terms(tmp_path, terms),
+        session_terms=sessions,
         keep=tmp_path / "keep" if keep else None,
         flags={"host": "127.0.0.1", "port": 8765},
         max_bytes=max_bytes,
@@ -123,6 +130,161 @@ async def test_health_answers_200(tmp_path: Path) -> None:
         response = await client.get("/health")
 
     assert response.status_code == 200
+
+
+def _session_file(*blocks: tuple[str, datetime, Sequence[str]]) -> str:
+    return "".join(
+        f"# session {session} ranked {ranked.isoformat()}"
+        f" expires {(ranked + timedelta(minutes=30)).isoformat()}\n"
+        + "".join(f"{term}\n" for term in terms)
+        for session, ranked, terms in blocks
+    )
+
+
+class Ssh:
+    """A fake ssh runner answering one fixed file, or raising."""
+
+    def __init__(self, answer: str | Exception) -> None:
+        self.answer = answer
+        self.calls: list[list[str]] = []
+        self.polled = threading.Event()
+
+    def __call__(self, argv: Sequence[str], _timeout: float) -> str:
+        self.calls.append(list(argv))
+        self.polled.set()
+        if isinstance(self.answer, Exception):
+            raise self.answer
+        return self.answer
+
+
+def _sessions(tmp_path: Path, **hosts: Ssh) -> SessionTerms:
+    local = tmp_path / "current.txt"
+    local.write_text(
+        _session_file(("local-s", NOW - timedelta(minutes=10), ["local_a", "local_b"])),
+        encoding="utf-8",
+    )
+    sources = [local_source(local)]
+    sources += [remote_source(host, runner=runner) for host, runner in hosts.items()]
+    sessions = SessionTerms(sources, clock=lambda: NOW)
+    sessions.refresh()
+    return sessions
+
+
+def _two_hosts() -> dict[str, Ssh]:
+    return {
+        "box-a": Ssh(_session_file(("a-s", NOW - timedelta(minutes=1), ["kbx25", "herdr"]))),
+        "box-b": Ssh(_session_file(("b-s", NOW - timedelta(minutes=5), ["b_term"]))),
+    }
+
+
+async def test_session_terms_follow_the_static_terms_newest_session_first(
+    tmp_path: Path,
+) -> None:
+    xai = Xai()
+    hosts = _two_hosts()
+    sessions = _sessions(tmp_path, **hosts)
+    async with _client(xai, tmp_path, terms="herdr\nVoiceInk\n", sessions=sessions) as client:
+        await _post(client)
+
+    keyterms = [body for name, body in _fields(xai.seen[0]) if name == "keyterm"]
+    assert keyterms == [b"herdr", b"VoiceInk", b"kbx25", b"b_term", b"local_a", b"local_b"]
+    (kept,) = _kept(tmp_path)
+    result = _json(kept / "result.json")
+    assert result["terms"] == [term.decode() for term in keyterms]
+    assert result["session_terms"] == {"local file": 2, "box-a": 1, "box-b": 1}
+
+
+async def test_session_terms_are_snapped_like_static_terms(tmp_path: Path) -> None:
+    heard = ["check", "kbx", "25"]
+    payload = {
+        "text": " ".join(heard),
+        "duration": 1.0,
+        "words": [{"text": text, "start": n, "end": n + 0.5} for n, text in enumerate(heard)],
+    }
+    sessions = _sessions(tmp_path, **_two_hosts())
+    async with _client(Xai(httpx.Response(200, json=payload)), tmp_path, sessions=sessions) as c:
+        response = await _post(c)
+
+    assert response.json() == {"text": "check kbx25"}
+
+
+async def test_a_dictation_never_runs_ssh(tmp_path: Path) -> None:
+    ssh = Ssh(AssertionError("ssh ran during a request"))
+    sessions = SessionTerms([remote_source("box-a", runner=ssh)], clock=lambda: NOW)
+    async with _client(Xai(), tmp_path, sessions=sessions) as client:
+        response = await _post(client)
+        health = await client.get("/health")
+
+    assert response.status_code == 200
+    assert health.status_code == 200
+    assert ssh.calls == []
+
+
+async def test_health_counts_each_source_without_terms_or_session_ids(tmp_path: Path) -> None:
+    hosts = {**_two_hosts(), "box-c": Ssh(RuntimeError("down"))}
+    async with _client(
+        Xai(), tmp_path, terms="herdr\nVoiceInk\n", sessions=_sessions(tmp_path, **hosts)
+    ) as client:
+        response = await client.get("/health")
+
+    assert response.json() == {
+        "status": "ok",
+        "static_terms": 2,
+        "session_terms": [
+            {"source": "local file", "blocks": 1, "terms": 2, "age_seconds": 0},
+            {"source": "box-a", "blocks": 1, "terms": 2, "age_seconds": 0},
+            {"source": "box-b", "blocks": 1, "terms": 1, "age_seconds": 0},
+            {"source": "box-c", "blocks": 0, "terms": 0, "age_seconds": None},
+        ],
+    }
+    for secret in ("local_a", "kbx25", "b_term", "a-s", "b-s", "local-s"):
+        assert secret not in response.text
+
+
+async def test_the_request_log_line_counts_session_terms_and_names_none(tmp_path: Path) -> None:
+    with capture_logs() as logs:
+        async with _client(Xai(), tmp_path, sessions=_sessions(tmp_path, **_two_hosts())) as c:
+            await _post(c)
+
+    (line,) = [entry for entry in logs if entry["event"] == "serve.request"]
+    assert line["session_terms"] == 5
+    assert "local_a" not in repr(logs)
+
+
+async def test_the_poller_runs_from_startup_until_shutdown(tmp_path: Path) -> None:
+    ssh = Ssh(_session_file(("s", NOW, ["polled_term"])))
+    sessions = SessionTerms([remote_source("box-a", runner=ssh, interval=0.01)])
+    app = create_app(
+        dictation_client(KEY, transport=httpx.MockTransport(Xai())),
+        _terms(tmp_path),
+        session_terms=sessions,
+        keep=None,
+        flags={},
+    )
+    sent: list[Message] = []
+    shut = False
+
+    async def receive() -> Message:
+        nonlocal shut
+        if not sent:
+            return {"type": "lifespan.startup"}
+        assert await anyio.to_thread.run_sync(ssh.polled.wait, 2)
+        shut = True
+        return {"type": "lifespan.shutdown"}
+
+    async def send(message: Message) -> None:
+        sent.append(message)
+
+    await app({"type": "lifespan", "asgi": {"version": "3.0"}, "state": {}}, receive, send)
+
+    assert shut
+    assert [message["type"] for message in sent] == [
+        "lifespan.startup.complete",
+        "lifespan.shutdown.complete",
+    ]
+    calls = len(ssh.calls)
+    await anyio.sleep(0.1)
+    assert len(ssh.calls) == calls
 
 
 async def test_a_voiceink_upload_gets_xais_words_joined_by_single_spaces(tmp_path: Path) -> None:
@@ -424,6 +586,7 @@ async def test_one_client_serves_every_dictation_with_an_8_s_budget(tmp_path: Pa
     app = create_app(
         dictation_client(KEY, transport=Transport(xai)),
         _terms(tmp_path),
+        session_terms=NO_SESSIONS,
         keep=None,
         flags={},
     )
@@ -543,7 +706,11 @@ async def test_the_xai_client_is_closed_when_the_server_shuts_down(tmp_path: Pat
             closed.append(True)
 
     app = create_app(
-        dictation_client(KEY, transport=Transport(Xai())), _terms(tmp_path), keep=None, flags={}
+        dictation_client(KEY, transport=Transport(Xai())),
+        _terms(tmp_path),
+        session_terms=NO_SESSIONS,
+        keep=None,
+        flags={},
     )
     events: list[Message] = [{"type": "lifespan.startup"}, {"type": "lifespan.shutdown"}]
     sent: list[Message] = []
@@ -568,6 +735,7 @@ async def test_a_client_that_hangs_up_mid_upload_is_one_log_line(tmp_path: Path)
     app = create_app(
         dictation_client(KEY, transport=httpx.MockTransport(xai)),
         _terms(tmp_path),
+        session_terms=NO_SESSIONS,
         keep=tmp_path / "keep",
         flags={},
     )
@@ -663,6 +831,7 @@ async def test_missed_deadlines_leave_no_worker_reading_from_xai(
     app = create_app(
         dictation_client(KEY, transport=httpx.MockTransport(trickling)),
         _terms(tmp_path),
+        session_terms=NO_SESSIONS,
         keep=None,
         flags={},
     )
@@ -739,7 +908,14 @@ async def test_a_stalled_upload_does_not_hold_off_shutdown(
         started.append((app, settings))
 
     monkeypatch.setattr("uvicorn.run", record)
-    run(api_key=KEY, terms=_terms(tmp_path), keep=None, host="127.0.0.1", port=8765)
+    run(
+        api_key=KEY,
+        terms=_terms(tmp_path),
+        session_terms=NO_SESSIONS,
+        keep=None,
+        host="127.0.0.1",
+        port=8765,
+    )
     ((app, settings),) = started
 
     config = uvicorn.Config(app, **settings, log_config=None)  # pyright: ignore[reportArgumentType]  # the settings run passed

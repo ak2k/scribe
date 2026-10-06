@@ -206,6 +206,16 @@ means a digit, a capital after a lowercase letter, or punctuation inside it, and
 at least 3 letters and digits; so `TODO`, `c++` and `.bashrc` are sent to xAI but
 never snapped to. Use an alias for those. The file is re-read when it changes.
 
+The terms of your live Claude Code sessions follow the file's, snapped the same
+way: from this machine's `terms/current.txt` (see above) and from each
+`--session-terms-host HOST`, whose file is read over
+`ssh -o BatchMode=yes HOST` every 3 s in the background, so a dictation never
+waits on it. A host that stops answering keeps its last list until each
+session's block expires. Sessions take turns, most recently prompted first, up
+to xAI's 100 keyterms; the file's terms always go first. `--no-session-terms`
+sends none. `GET /health` shows each source's live sessions, terms and the age
+of its last read.
+
 Each dictation (the audio, xAI's reply and `result.json`) is kept under
 `--keep`, default `~/.local/state/scribe/serve`, newest 1000; `--no-keep`
 keeps nothing.

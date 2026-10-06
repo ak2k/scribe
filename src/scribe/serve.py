@@ -42,6 +42,7 @@ if TYPE_CHECKING:
     from starlette.types import ASGIApp, Message, Receive, Scope, Send
     from structlog.stdlib import BoundLogger
 
+    from scribe.session_sources import SessionTerms
     from scribe.vocab import TermsFile, Vocab
 
 ENDPOINT = "/v1/audio/transcriptions"
@@ -59,7 +60,7 @@ _HOST = re.compile(r"(?:\[(?P<bracketed>[^\]]*)\]|(?P<name>[^:]*))(?::\d*)?")
 _KEPT_NAME = re.compile(r"\d{8}T\d{6}Z-[0-9a-f]{6}")
 _SUFFIX = re.compile(r"\.[A-Za-z0-9]{1,10}")
 
-Flags = dict[str, str | int | None]
+Flags = dict[str, str | int | list[str] | None]
 
 
 def _logger() -> BoundLogger:
@@ -107,6 +108,7 @@ class KeepRecord(_Record):
     text: str | None
     xai_text: str | None
     terms: list[str]
+    session_terms: dict[str, int]
     aliases: list[dict[str, str]]
     edits: list[dict[str, str]]
     latency_ms: dict[str, int]
@@ -265,16 +267,29 @@ def _prune(root: Path) -> None:
 
 class _Server:
     def __init__(
-        self, stt: XaiStt, terms: TermsFile, keep: Path | None, flags: Flags, max_bytes: int
+        self,
+        stt: XaiStt,
+        terms: TermsFile,
+        sessions: SessionTerms,
+        keep: Path | None,
+        flags: Flags,
+        max_bytes: int,
     ) -> None:
         self.stt = stt
         self.terms = terms
+        self.sessions = sessions
         self.keep = keep
         self.flags = flags
         self.max_bytes = max_bytes
 
     async def health(self, _request: Request) -> Response:
-        return JSONResponse({"status": "ok"})
+        return JSONResponse(
+            {
+                "status": "ok",
+                "static_terms": len(self.terms.current().terms),
+                "session_terms": self.sessions.health(),
+            }
+        )
 
     async def transcriptions(self, request: Request) -> Response:
         started = time.monotonic()
@@ -293,7 +308,7 @@ class _Server:
         if isinstance(parsed, Response):
             return parsed
         fields, audio = parsed
-        vocab = self.terms.current()
+        vocab, session_counts = self.sessions.vocab(self.terms.current())
         workdir = Path(await anyio.to_thread.run_sync(tempfile.mkdtemp))
         dictated: _Dictation | None = None
         try:
@@ -322,6 +337,7 @@ class _Server:
             total_ms=total_ms,
             xai_ms=result.xai_ms,
             terms=len(vocab.terms),
+            session_terms=sum(session_counts.values()),
             edits=len(result.edits),
         )
         record = KeepRecord(
@@ -330,6 +346,7 @@ class _Server:
             text=result.text,
             xai_text=result.xai_text,
             terms=list(vocab.terms),
+            session_terms=session_counts,
             aliases=[{"heard": alias.heard, "written": alias.written} for alias in vocab.aliases],
             edits=result.edits,
             latency_ms={"total": total_ms, "xai": result.xai_ms},
@@ -409,6 +426,7 @@ def create_app(
     stt: XaiStt,
     terms: TermsFile,
     *,
+    session_terms: SessionTerms,
     keep: Path | None,
     flags: Flags,
     max_bytes: int = MAX_UPLOAD_BYTES,
@@ -418,19 +436,23 @@ def create_app(
     Args:
         stt: The xAI client, held for the app's lifetime and closed at its shutdown.
         terms: The terms file, re-read when it changes.
+        session_terms: The session term sources, polled while the app runs.
         keep: Where dictations are kept, or None to keep nothing.
         flags: The server's settings, recorded with each kept dictation.
         max_bytes: Upload cap, counted as the body streams in.
 
     """
-    server = _Server(stt, terms, keep, flags, max_bytes)
+    server = _Server(stt, terms, session_terms, keep, flags, max_bytes)
 
     # Closed on shutdown, where SIGTERM lands too: uvicorn re-raises the signal
     # after shutting down, so code after its `run` never sees a launchd stop.
     @asynccontextmanager
     async def lifespan(_app: Starlette) -> AsyncGenerator[None]:
         try:
-            yield
+            async with anyio.create_task_group() as group:
+                group.start_soon(session_terms.poll)
+                yield
+                group.cancel_scope.cancel()
         finally:
             stt.close()
 
@@ -445,19 +467,28 @@ def create_app(
     )
 
 
-def run(*, api_key: str, terms: TermsFile, keep: Path | None, host: str, port: int) -> None:
+def run(
+    *,
+    api_key: str,
+    terms: TermsFile,
+    session_terms: SessionTerms,
+    keep: Path | None,
+    host: str,
+    port: int,
+) -> None:
     """Serve until interrupted."""
     stt = dictation_client(api_key)
     flags: Flags = {
         "host": host,
         "port": port,
         "terms": str(terms.path),
+        "session_terms": [source.name for source in session_terms.sources],
         "keep": None if keep is None else str(keep),
     }
     shown = f"[{host}]" if ":" in host else host
     _logger().info("serve.listening", voiceink_endpoint=f"http://{shown}:{port}{ENDPOINT}")
     uvicorn.run(
-        create_app(stt, terms, keep=keep, flags=flags),
+        create_app(stt, terms, session_terms=session_terms, keep=keep, flags=flags),
         host=host,
         port=port,
         log_level="warning",
