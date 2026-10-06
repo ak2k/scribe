@@ -12,7 +12,17 @@ from hypothesis import strategies as st
 from structlog.testing import capture_logs
 
 from scribe.errors import ExternalServiceError, InputValidationError
-from scribe.focus import ARGV, QUERY_TIMEOUT_SECONDS, Focus, Tab, match, parse_answer, title_key
+from scribe.focus import (
+    ARGV,
+    POLL_SECONDS,
+    QUERY_TIMEOUT_SECONDS,
+    STALE_AFTER,
+    Focus,
+    Tab,
+    match,
+    parse_answer,
+    title_key,
+)
 from scribe.session_terms import SessionBlock
 
 if TYPE_CHECKING:
@@ -75,6 +85,11 @@ def test_the_query_runs_osascript_by_absolute_path_with_a_2_s_timeout() -> None:
     assert "linefeed" in ARGV[2]
 
 
+def test_the_tab_is_polled_every_3_s_so_a_sample_is_read_before_it_goes_stale() -> None:
+    assert Focus(Osascript(_front())).interval == 3.0
+    assert STALE_AFTER.total_seconds() > POLL_SECONDS + QUERY_TIMEOUT_SECONDS
+
+
 @pytest.mark.parametrize(
     "title",
     [
@@ -133,7 +148,7 @@ def test_any_text_parses_to_a_sample_or_is_refused(text: str) -> None:
 
 
 def test_an_untitled_tab_is_a_miss_even_when_one_block_has_its_cwd() -> None:
-    blocks = [_block("mine", titles=()), _block("titled")]
+    blocks = [_block("mine", titles=()), _block("named", titles=("Claude Code",)), _block("titled")]
     focus = Focus(Osascript(_front("\u2733 Claude Code", "/w")))
 
     focus.refresh(lambda: NOW, lambda _now: blocks)

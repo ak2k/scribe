@@ -738,12 +738,24 @@ def test_focus_off_is_reported_as_off() -> None:
 
 @pytest.mark.anyio
 async def test_the_focus_poller_takes_its_own_token_and_stops_at_shutdown() -> None:
-    started, release = threading.Event(), threading.Event()
+    remote_started, local_started = threading.Event(), threading.Event()
+    release = threading.Event()
 
     def hung(_argv: Sequence[str], _timeout: float) -> str:
-        started.set()
-        release.wait(2)
+        remote_started.set()
+        release.wait(5)
         return ""
+
+    reads = iter([format_block(_block("s", NOW, ["t"]))])
+
+    def hung_local() -> str:
+        # The first read gives focus a recent block to query for; every later one hangs.
+        text = next(reads, None)
+        if text is None:
+            local_started.set()
+            release.wait(5)
+            return ""
+        return text
 
     asked = threading.Event()
 
@@ -751,7 +763,8 @@ async def test_the_focus_poller_takes_its_own_token_and_stops_at_shutdown() -> N
         asked.set()
         return "back\n"
 
-    local = _local(_block("s", NOW, ["t"]))
+    local = Source(LOCAL_NAME, hung_local, interval=0.01)
+    local.refresh(lambda: NOW)
     sessions = SessionTerms(
         [local, remote_source("box-a", runner=hung)],
         clock=lambda: NOW,
@@ -760,7 +773,8 @@ async def test_the_focus_poller_takes_its_own_token_and_stops_at_shutdown() -> N
     try:
         async with anyio.create_task_group() as group:
             group.start_soon(sessions.poll)
-            assert await anyio.to_thread.run_sync(started.wait, 2)
+            assert await anyio.to_thread.run_sync(remote_started.wait, 2)
+            assert await anyio.to_thread.run_sync(local_started.wait, 2)
             assert await anyio.to_thread.run_sync(asked.wait, 2)
             group.cancel_scope.cancel()
     finally:

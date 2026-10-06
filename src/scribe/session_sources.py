@@ -260,7 +260,7 @@ def merge(
         counts[owner] = counts.get(owner, 0) + lead
     first = list(taken)
     live = sorted(
-        ((name, block) for name, blocks in sources for block in blocks if (name, block) != focused),
+        ((name, block) for name, blocks in sources for block in blocks),
         key=lambda pair: pair[1].ranked,
         reverse=True,
     )
