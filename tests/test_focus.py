@@ -214,6 +214,18 @@ def test_a_symlinked_tab_cwd_is_resolved_before_matching(tmp_path: Path) -> None
     assert focus.pick([mine], NOW) == ("hit", mine)
 
 
+def test_a_tab_cwd_that_cannot_be_resolved_is_matched_as_reported(tmp_path: Path) -> None:
+    (tmp_path / "a").symlink_to(tmp_path / "b")
+    (tmp_path / "b").symlink_to(tmp_path / "a")
+    looped = str(tmp_path / "a")
+    mine = _block("mine", titles=(), cwd=looped)
+    focus = Focus(Osascript(_front("Claude Code", looped)))
+
+    focus.refresh(lambda: NOW, lambda _now: [mine])
+
+    assert focus.pick([mine], NOW) == ("hit", mine)
+
+
 # The poller's sample, as a request reads it.
 
 
