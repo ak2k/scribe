@@ -99,6 +99,10 @@ class _Good:
     at: datetime
 
 
+def _live(good: _Good | None, now: datetime) -> tuple[SessionBlock, ...]:
+    return () if good is None else tuple(block for block in good.blocks if block.expires > now)
+
+
 class Source:
     """One hook file, with the blocks of its last good read."""
 
@@ -138,13 +142,13 @@ class Source:
 
     def live(self, now: datetime) -> tuple[SessionBlock, ...]:
         """The blocks of the last good read that have not expired by `now`."""
-        good = self._good
-        return () if good is None else tuple(block for block in good.blocks if block.expires > now)
+        return _live(self._good, now)
 
     def health(self, now: datetime) -> dict[str, object]:
         """Counts and the last good read's age; no term or session id."""
-        live = self.live(now)
+        # One read: the poller may swap in a newer read meanwhile.
         good = self._good
+        live = _live(good, now)
         return {
             "source": self.name,
             "blocks": len(live),
