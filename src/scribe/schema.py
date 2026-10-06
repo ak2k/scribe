@@ -186,6 +186,11 @@ class XaiWord(BaseModel):
     start: FiniteFloat
     end: FiniteFloat
     speaker: int | None = None
+    # DIVERGE: documented as 0.0-1.0 but entropy-based and read by nothing, so an
+    # out-of-range rounding overshoot must not fail the whole transcription. NaN
+    # and Infinity stay refused: they are not valid JSON and mean a broken
+    # upstream, not rounding.
+    confidence: FiniteFloat | None = None
 
 
 class XaiResponse(BaseModel):
