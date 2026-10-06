@@ -1,8 +1,9 @@
 """The focused Ghostty tab for `scribe serve`: polled off the request path, matched to a session.
 
 A dictation goes to the frontmost app; when that is a Ghostty tab running Claude
-Code, the tab's title and directory single out that session's block in the
-local hook file, whose terms then lead the keyterms.
+Code, the tab's title, and its directory when two sessions share a title,
+single out that session's block in the local hook file, whose terms then lead
+the keyterms.
 """
 
 from __future__ import annotations
@@ -102,22 +103,18 @@ def parse_answer(text: str) -> Tab | None:
     return Tab(parts[1], parts[2])
 
 
-def match(
-    tab: Tab, blocks: Sequence[SessionBlock], now: datetime
-) -> tuple[Verdict, SessionBlock | None]:
+def match(tab: Tab, blocks: Sequence[SessionBlock]) -> tuple[Verdict, SessionBlock | None]:
     """Pick the block of the session `tab` shows, among local blocks ranked within 24 h."""
     key = title_key(tab.title)
-    if key == UNTITLED_KEY:
-        # Only the cwd tells untitled sessions apart, so only the recently prompted count.
-        found = [b for b in blocks if b.expires > now and not b.titles and b.cwd == tab.cwd]
-    elif not key:
+    # An untitled tab picks nothing: a session gets its block only at its first prompt,
+    # so a new session's directory would find a sibling's block instead of its own.
+    if key in {"", UNTITLED_KEY}:
         return "miss", None
-    else:
-        found = [b for b in blocks if b.titles and title_key(b.titles[0]) == key] or [
-            b for b in blocks if any(title_key(title) == key for title in b.titles[1:])
-        ]
-        if len(found) > 1:
-            found = [b for b in found if b.cwd == tab.cwd] or found
+    found = [b for b in blocks if b.titles and title_key(b.titles[0]) == key] or [
+        b for b in blocks if any(title_key(title) == key for title in b.titles[1:])
+    ]
+    if len(found) > 1:
+        found = [b for b in found if b.cwd == tab.cwd] or found
     if not found:
         return "miss", None
     if len(found) > 1:
@@ -195,7 +192,7 @@ class Focus:
             return "stale", None
         if sample.tab is None:
             return "away", None
-        return match(sample.tab, recent, now)
+        return match(sample.tab, recent)
 
     def health(self, now: datetime) -> dict[str, object]:
         """The last poll's outcome and the sample's age; nothing from the tab."""

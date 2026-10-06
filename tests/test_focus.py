@@ -129,28 +129,16 @@ def test_any_text_parses_to_a_sample_or_is_refused(text: str) -> None:
     assert answer is None or isinstance(answer, Tab)
 
 
-# An untitled tab: unexpired blocks with no title and the tab's cwd.
+# An untitled tab picks nothing: a new session has no block yet, so its directory finds a sibling's.
 
 
-def test_an_untitled_tab_hits_the_one_untitled_live_block_in_its_cwd() -> None:
-    mine = _block("mine", titles=())
-    blocks = [mine, _block("elsewhere", titles=(), cwd="/v"), _block("titled")]
+def test_an_untitled_tab_is_a_miss_even_when_one_block_has_its_cwd() -> None:
+    blocks = [_block("mine", titles=()), _block("titled")]
+    focus = Focus(Osascript(_front("\u2733 Claude Code", "/w")))
 
-    assert match(Tab("\u2733 Claude Code", "/w"), blocks, NOW) == ("hit", mine)
+    focus.refresh(lambda: NOW, lambda _now: blocks)
 
-
-def test_an_untitled_tab_with_two_candidates_is_ambiguous() -> None:
-    blocks = [_block("one", titles=()), _block("two", titles=())]
-
-    assert match(Tab("Claude Code", "/w"), blocks, NOW) == ("ambiguous", None)
-
-
-def test_an_untitled_tab_never_takes_an_expired_block() -> None:
-    live = _block("live", titles=(), ago=timedelta(minutes=29, seconds=59))
-    expired = _block("expired", titles=(), ago=timedelta(minutes=30))
-
-    assert match(Tab("Claude Code", "/w"), [expired], NOW) == ("miss", None)
-    assert match(Tab("Claude Code", "/w"), [live, expired], NOW) == ("hit", live)
+    assert focus.pick(blocks, NOW) == ("miss", None)
 
 
 # A titled tab: blocks ranked within 24 h, by current title, then by an earlier one.
@@ -159,7 +147,7 @@ def test_an_untitled_tab_never_takes_an_expired_block() -> None:
 def test_a_titled_tab_hits_a_block_past_its_expiry_by_title() -> None:
     old = _block("old", ago=timedelta(hours=23), cwd="/elsewhere")
 
-    assert match(Tab(f"\u2733 {TITLE}", "/w"), [old, _block("other", titles=("x",))], NOW) == (
+    assert match(Tab(f"\u2733 {TITLE}", "/w"), [old, _block("other", titles=("x",))]) == (
         "hit",
         old,
     )
@@ -169,13 +157,13 @@ def test_a_current_title_beats_an_earlier_one() -> None:
     current = _block("current")
     renamed = _block("renamed", titles=("Newer name", TITLE))
 
-    assert match(Tab(TITLE, "/w"), [renamed, current], NOW) == ("hit", current)
+    assert match(Tab(TITLE, "/w"), [renamed, current]) == ("hit", current)
 
 
 def test_an_earlier_title_hits_when_no_current_title_matches() -> None:
     renamed = _block("renamed", titles=("Newer name", TITLE))
 
-    assert match(Tab(TITLE, "/w"), [renamed, _block("other", titles=("x",))], NOW) == (
+    assert match(Tab(TITLE, "/w"), [renamed, _block("other", titles=("x",))]) == (
         "hit",
         renamed,
     )
@@ -184,19 +172,19 @@ def test_an_earlier_title_hits_when_no_current_title_matches() -> None:
 def test_two_title_matches_are_split_by_the_tab_cwd_or_ambiguous() -> None:
     here, there = _block("here"), _block("there", cwd="/v")
 
-    assert match(Tab(TITLE, "/w"), [here, there], NOW) == ("hit", here)
-    assert match(Tab(TITLE, "/u"), [here, there], NOW) == ("ambiguous", None)
-    assert match(Tab(TITLE, "/w"), [here, _block("twin")], NOW) == ("ambiguous", None)
+    assert match(Tab(TITLE, "/w"), [here, there]) == ("hit", here)
+    assert match(Tab(TITLE, "/u"), [here, there]) == ("ambiguous", None)
+    assert match(Tab(TITLE, "/w"), [here, _block("twin")]) == ("ambiguous", None)
 
 
 def test_a_titled_tab_never_falls_back_to_the_cwd() -> None:
     blocks = [_block("same_cwd", titles=("Something else",)), _block("untitled", titles=())]
 
-    assert match(Tab(TITLE, "/w"), blocks, NOW) == ("miss", None)
+    assert match(Tab(TITLE, "/w"), blocks) == ("miss", None)
 
 
 def test_a_tab_whose_title_is_only_glyphs_matches_nothing() -> None:
-    assert match(Tab("\u2733 ", "/w"), [_block("glyphs", titles=("\u2733",))], NOW) == (
+    assert match(Tab("\u2733 ", "/w"), [_block("glyphs", titles=("\u2733",))]) == (
         "miss",
         None,
     )
@@ -206,24 +194,24 @@ def test_a_symlinked_tab_cwd_is_resolved_before_matching(tmp_path: Path) -> None
     real = tmp_path / "real"
     real.mkdir()
     (tmp_path / "link").symlink_to(real)
-    mine = _block("mine", titles=(), cwd=str(real))
-    focus = Focus(Osascript(_front("Claude Code", str(tmp_path / "link"))))
+    mine, twin = _block("mine", cwd=str(real)), _block("twin")
+    focus = Focus(Osascript(_front(TITLE, str(tmp_path / "link"))))
 
-    focus.refresh(lambda: NOW, lambda _now: [mine])
+    focus.refresh(lambda: NOW, lambda _now: [mine, twin])
 
-    assert focus.pick([mine], NOW) == ("hit", mine)
+    assert focus.pick([mine, twin]) == ("hit", mine)
 
 
 def test_a_tab_cwd_that_cannot_be_resolved_is_matched_as_reported(tmp_path: Path) -> None:
     (tmp_path / "a").symlink_to(tmp_path / "b")
     (tmp_path / "b").symlink_to(tmp_path / "a")
     looped = str(tmp_path / "a")
-    mine = _block("mine", titles=(), cwd=looped)
-    focus = Focus(Osascript(_front("Claude Code", looped)))
+    mine, twin = _block("mine", cwd=looped), _block("twin")
+    focus = Focus(Osascript(_front(TITLE, looped)))
 
-    focus.refresh(lambda: NOW, lambda _now: [mine])
+    focus.refresh(lambda: NOW, lambda _now: [mine, twin])
 
-    assert focus.pick([mine], NOW) == ("hit", mine)
+    assert focus.pick([mine, twin]) == ("hit", mine)
 
 
 # The poller's sample, as a request reads it.
@@ -236,7 +224,7 @@ def test_no_local_block_within_24_h_runs_no_query_and_is_a_miss() -> None:
     focus.refresh(lambda: NOW, lambda _now: [])
 
     assert osascript.calls == []
-    assert focus.pick([], NOW) == ("miss", None)
+    assert focus.pick([]) == ("miss", None)
     assert focus.health(NOW) == {"state": "idle", "age_seconds": None}
 
 
@@ -251,14 +239,14 @@ def test_a_sample_is_stale_after_6_s() -> None:
 def test_before_any_sample_a_request_is_stale() -> None:
     focus = Focus(Osascript(AssertionError("a request ran the query")))
 
-    assert focus.pick([_block("s")], NOW) == ("stale", None)
+    assert focus.pick([_block("s")]) == ("stale", None)
     assert focus.health(NOW) == {"state": "never", "age_seconds": None}
 
 
 def test_ghostty_away_is_away() -> None:
     focus = _sampled("back\n")
 
-    assert focus.pick([_block("s")], NOW) == ("away", None)
+    assert focus.pick([_block("s")]) == ("away", None)
     assert focus.health(NOW + timedelta(seconds=2)) == {"state": "away", "age_seconds": 2}
 
 
@@ -291,7 +279,7 @@ def test_a_failed_query_logs_only_its_cause_and_is_an_error(error: Exception, ca
         focus.refresh(lambda: NOW, lambda _now: [_block("s")])
 
     assert logs == [{"event": "serve.focus_failed", "error": cause, "log_level": "warning"}]
-    assert focus.pick([_block("s")], NOW) == ("error", None)
+    assert focus.pick([_block("s")]) == ("error", None)
     assert focus.health(NOW)["state"] == "error"
 
 

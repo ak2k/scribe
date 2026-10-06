@@ -677,6 +677,21 @@ def test_a_focus_hit_puts_that_sessions_terms_first_and_says_so() -> None:
     assert focus == FocusUse("hit", 2)
 
 
+def test_an_untitled_tab_leaves_the_turns_as_they_were() -> None:
+    untitled = SessionBlock(
+        "mine", NOW - timedelta(minutes=5), NOW + timedelta(minutes=25), ("mine_a",), "/w", ()
+    )
+    newer = _titled("newer", NOW - timedelta(minutes=1), ["newer_a"], "Other tab")
+    sessions = SessionTerms(
+        [_local(newer, untitled)], clock=lambda: NOW, focus=_focused_on("Claude Code")
+    )
+
+    vocab, _, focus = sessions.vocab(Vocab((), ()))
+
+    assert focus == FocusUse("miss", 0)
+    assert vocab.terms == ("newer_a", "mine_a")
+
+
 def test_a_remote_block_holding_the_tabs_title_is_never_focused() -> None:
     remote = remote_source(
         "box-a", runner=Runner(format_block(_titled("r", NOW, ["remote_t"], "My tab")))
