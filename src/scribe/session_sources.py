@@ -258,14 +258,21 @@ class SessionTerms:
 
     async def poll(self) -> None:
         """Refresh each source on its interval until cancelled."""
+        if not self.sources:
+            return
+        # Off AnyIO's default limiter, which dictations share, so hung fetches can
+        # never stall one; a thread per source so a hung host delays no other source.
+        limiter = anyio.CapacityLimiter(len(self.sources))
         async with anyio.create_task_group() as group:
             for source in self.sources:
-                group.start_soon(self._poll, source)
+                group.start_soon(self._poll, source, limiter)
 
-    async def _poll(self, source: Source) -> None:
+    async def _poll(self, source: Source, limiter: anyio.CapacityLimiter) -> None:
         while True:
             # Abandoned on shutdown: the fetch's own timeout ends it soon after.
-            await anyio.to_thread.run_sync(source.refresh, self._clock, abandon_on_cancel=True)
+            await anyio.to_thread.run_sync(
+                source.refresh, self._clock, abandon_on_cancel=True, limiter=limiter
+            )
             await anyio.sleep(source.interval)
 
     def health(self) -> list[dict[str, object]]:
