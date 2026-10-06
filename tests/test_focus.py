@@ -199,7 +199,7 @@ def test_a_symlinked_tab_cwd_is_resolved_before_matching(tmp_path: Path) -> None
 
     focus.refresh(lambda: NOW, lambda _now: [mine, twin])
 
-    assert focus.pick([mine, twin]) == ("hit", mine)
+    assert focus.pick([mine, twin], NOW) == ("hit", mine)
 
 
 def test_a_tab_cwd_that_cannot_be_resolved_is_matched_as_reported(tmp_path: Path) -> None:
@@ -211,7 +211,7 @@ def test_a_tab_cwd_that_cannot_be_resolved_is_matched_as_reported(tmp_path: Path
 
     focus.refresh(lambda: NOW, lambda _now: [mine, twin])
 
-    assert focus.pick([mine, twin]) == ("hit", mine)
+    assert focus.pick([mine, twin], NOW) == ("hit", mine)
 
 
 # The poller's sample, as a request reads it.
@@ -224,7 +224,7 @@ def test_no_local_block_within_24_h_runs_no_query_and_is_a_miss() -> None:
     focus.refresh(lambda: NOW, lambda _now: [])
 
     assert osascript.calls == []
-    assert focus.pick([]) == ("miss", None)
+    assert focus.pick([], NOW) == ("miss", None)
     assert focus.health(NOW) == {"state": "idle", "age_seconds": None}
 
 
@@ -239,14 +239,14 @@ def test_a_sample_is_stale_after_6_s() -> None:
 def test_before_any_sample_a_request_is_stale() -> None:
     focus = Focus(Osascript(AssertionError("a request ran the query")))
 
-    assert focus.pick([_block("s")]) == ("stale", None)
+    assert focus.pick([_block("s")], NOW) == ("stale", None)
     assert focus.health(NOW) == {"state": "never", "age_seconds": None}
 
 
 def test_ghostty_away_is_away() -> None:
     focus = _sampled("back\n")
 
-    assert focus.pick([_block("s")]) == ("away", None)
+    assert focus.pick([_block("s")], NOW) == ("away", None)
     assert focus.health(NOW + timedelta(seconds=2)) == {"state": "away", "age_seconds": 2}
 
 
@@ -279,7 +279,7 @@ def test_a_failed_query_logs_only_its_cause_and_is_an_error(error: Exception, ca
         focus.refresh(lambda: NOW, lambda _now: [_block("s")])
 
     assert logs == [{"event": "serve.focus_failed", "error": cause, "log_level": "warning"}]
-    assert focus.pick([_block("s")]) == ("error", None)
+    assert focus.pick([_block("s")], NOW) == ("error", None)
     assert focus.health(NOW)["state"] == "error"
 
 
