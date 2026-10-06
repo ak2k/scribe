@@ -218,7 +218,7 @@ def _keyterm(term: str) -> bool:
 
 
 def merge(static: Sequence[str], sources: Sequence[tuple[str, Sequence[SessionBlock]]]) -> Merged:
-    """Static terms whole, then every source's blocks, newest rank first, taking turns a term each.
+    """Static terms whole, then terms the blocks take by turns, listed newest rank first.
 
     `static` is a parsed terms file, so at most `MAX_KEYTERMS`, and each source's
     blocks are its live ones. Repeats and terms xAI would refuse are skipped; the
@@ -242,7 +242,13 @@ def merge(static: Sequence[str], sources: Sequence[tuple[str, Sequence[SessionBl
             elif len(taken) < MAX_KEYTERMS:
                 taken[term] = None
                 counts[name] += 1
-    return Merged(tuple(taken), counts)
+    # Turns choose the terms; they are listed newest block first because snapping
+    # takes the first of two spellings sharing letters, and the newer one is meant.
+    chosen = taken.keys() - static
+    listed = dict.fromkeys(static)
+    for _, block in live:
+        listed.update((term, None) for term in block.terms if term in chosen)
+    return Merged(tuple(listed), counts)
 
 
 class SessionTerms:

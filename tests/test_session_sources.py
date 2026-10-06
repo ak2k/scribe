@@ -90,11 +90,11 @@ def test_merge_puts_static_terms_first_then_sessions_newest_first_taking_turns()
         "herdr",
         "VoiceInk",
         "new_a",
+        "new_b",
+        "new_c",
         "mid_a",
         "old_a",
-        "new_b",
         "old_b",
-        "new_c",
     )
     assert merged.counts == {"local": 2, "box-a": 3, "box-b": 1}
 
@@ -107,7 +107,7 @@ def test_merge_drops_repeats_and_a_bad_term_alone() -> None:
 
     merged = merge(["herdr"], sources)
 
-    assert merged.terms == ("herdr", "shared_t", "b_only", "a_only")
+    assert merged.terms == ("herdr", "shared_t", "a_only", "b_only")
     assert merged.counts == {"local": 2, "box-a": 1}
 
 
