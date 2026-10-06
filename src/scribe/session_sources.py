@@ -276,8 +276,8 @@ def merge(
                 taken[term] = None
                 counts[name] += 1
     # Turns choose the terms; they are listed newest block first because snapping
-    # takes the first of two spellings sharing letters, and the newer one is meant,
-    # unless the focused session's is: it was listed first, and update keeps places.
+    # takes the first of two spellings sharing letters, and the newer one is meant;
+    # the focused block's terms are listed before all of them, so its spelling wins.
     chosen = taken.keys() - static
     listed = dict.fromkeys(first)
     for _, block in live:
