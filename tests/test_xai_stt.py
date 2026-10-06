@@ -514,3 +514,23 @@ def test_a_reply_read_under_a_deadline_is_decoded_as_sent(tmp_path: Path) -> Non
     client = XaiStt(KEY, transport=httpx.MockTransport(gzipped), deadline_seconds=8)
 
     assert client.transcribe(_clip(tmp_path)) == xai_payload()
+
+
+def test_no_retry_starts_after_the_deadline(tmp_path: Path) -> None:
+    starts: list[float] = []
+
+    def unavailable_at_the_end(_request: httpx.Request) -> httpx.Response:
+        starts.append(time.monotonic())
+        time.sleep(0.25)
+        return httpx.Response(503, text="upstream unavailable")
+
+    client = XaiStt(
+        KEY, transport=httpx.MockTransport(unavailable_at_the_end), attempts=2, deadline_seconds=0.3
+    )
+    started = time.monotonic()
+
+    # Real backoff, at least 0.1 s, so the retry falls due after the deadline.
+    with stamina.set_testing(False), pytest.raises(ExternalServiceError):
+        client.transcribe(_clip(tmp_path))
+
+    assert [at for at in starts if at >= started + 0.3] == []

@@ -300,7 +300,8 @@ class XaiStt:
             max_bytes: Upload ceiling enforced before any request.
             attempts: Most attempts one `transcribe` makes.
             deadline_seconds: Seconds after which one `transcribe` starts no
-                new attempt, each attempt's timeout cut to what is left, and
+                new attempt, even one a retry backoff scheduled, with each
+                attempt's timeout cut to what is left, and
                 closes a reply still arriving once it passes; or None for no
                 bound. An attempt ends by the deadline plus one read timeout.
             keep_alive: Hold one client, and its connections, across calls
@@ -421,5 +422,9 @@ class XaiStt:
             on=_is_retryable, attempts=self._attempts, timeout=self._deadline_seconds
         ):
             with attempt:
+                # stamina checks its timeout before the backoff sleep, not after,
+                # so a retry can otherwise fall due past the deadline.
+                if ends_at is not None and time.monotonic() >= ends_at:
+                    raise ExternalServiceError("xAI did not answer before the deadline")
                 return _post(client, path, scalars, self._attempt_timeout(started), ends_at)
         raise AssertionError("unreachable: stamina re-raises the last failure")  # pragma: no cover
