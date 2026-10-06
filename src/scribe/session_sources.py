@@ -171,10 +171,13 @@ class _LocalFile:
             if signature == self._signature:
                 return None
             text = self.path.read_text(encoding="utf-8")
+        # Forgotten, so a file put back unchanged is read and its recovery seen.
         except OSError as exc:
+            self._signature = None
             raise ExternalServiceError(f"cannot read {self.path}: {exc.strerror}") from exc
         # A non-UTF-8 file raises UnicodeDecodeError, not OSError.
         except ValueError as exc:
+            self._signature = None
             raise ExternalServiceError(f"cannot read {self.path}: {exc}") from exc
         self._signature = signature
         return text
