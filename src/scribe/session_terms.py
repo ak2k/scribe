@@ -27,7 +27,7 @@ from scribe.errors import InputValidationError
 from scribe.xai_stt import MAX_KEYTERM_CHARS, MAX_KEYTERMS, check_keyterms
 
 if TYPE_CHECKING:
-    from collections.abc import Generator, Iterator, Mapping
+    from collections.abc import Callable, Generator, Iterator, Mapping
     from typing import BinaryIO
 
 TAIL_BYTES = 256 * 1024
@@ -471,8 +471,14 @@ def _refusal(exc: ValidationError) -> str:
     return "hook input refused: " + "; ".join(causes)
 
 
-def run_hook(raw: bytes, *, state: Path, now: datetime, host: str) -> None:
-    """Log the prompt, rebuild the session's terms and the merged list; never raise."""
+def run_hook(
+    raw: bytes, *, state: Path, now: datetime, clock: Callable[[], datetime], host: str
+) -> None:
+    """Log the prompt, rebuild the session's terms and the merged list; never raise.
+
+    `now` is when the event happened; `clock` gives the time the merge runs at,
+    read once the lock is held.
+    """
     terms_dir = state / "terms"
     try:
         hook = HookInput.model_validate_json(raw)
@@ -508,7 +514,9 @@ def run_hook(raw: bytes, *, state: Path, now: datetime, host: str) -> None:
                 return
             record = _session_record(hook, terms_dir, now, previous)
             _replace_atomically(record_path, record.model_dump_json())
-            write_merged(terms_dir, now=now)
+            # Another session's hook may have merged after this event was taken;
+            # merging at the event's time would restore what that merge expired.
+            write_merged(terms_dir, now=clock())
     except Exception as exc:  # noqa: BLE001 - any failure becomes one log line, never an exit
         log_failure(terms_dir, now, f"{type(exc).__name__}: {exc}")
 
@@ -522,4 +530,10 @@ def main(stdin: BinaryIO, environ: Mapping[str, str]) -> None:
     except OSError as exc:
         log_failure(state / "terms", now, f"stdin unreadable: {exc}")
         return
-    run_hook(raw, state=state, now=now, host=socket.gethostname().split(".")[0])
+    run_hook(
+        raw,
+        state=state,
+        now=now,
+        clock=lambda: datetime.now(UTC),
+        host=socket.gethostname().split(".")[0],
+    )

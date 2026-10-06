@@ -142,7 +142,13 @@ def test_hook_reads_each_part_type_it_should_and_skips_the_rest(tmp_path: Path) 
     cwd.mkdir()
     state = tmp_path / "state"
 
-    run_hook(_payload(_transcript(tmp_path), cwd).encode(), state=state, now=NOW, host="box")
+    run_hook(
+        _payload(_transcript(tmp_path), cwd).encode(),
+        state=state,
+        now=NOW,
+        clock=lambda: NOW,
+        host="box",
+    )
 
     terms = _terms(state / "terms" / "sessions" / "11111111-aaaa-4bbb-8ccc-222222222222.json")
     for wanted in (
@@ -175,8 +181,8 @@ def test_hook_logs_the_prompt_as_one_private_line(tmp_path: Path) -> None:
     state = tmp_path / "state"
     payload = _payload(_transcript(tmp_path), tmp_path)
 
-    run_hook(payload.encode(), state=state, now=NOW, host="box")
-    run_hook(payload.encode(), state=state, now=NOW, host="box")
+    run_hook(payload.encode(), state=state, now=NOW, clock=lambda: NOW, host="box")
+    run_hook(payload.encode(), state=state, now=NOW, clock=lambda: NOW, host="box")
 
     log = state / "prompts.jsonl"
     lines = log.read_text().splitlines()
@@ -197,7 +203,7 @@ def test_other_events_log_no_prompt_but_still_update_terms(tmp_path: Path) -> No
     del payload["prompt"]
     payload["hook_event_name"] = "SessionStart"
 
-    run_hook(json.dumps(payload).encode(), state=state, now=NOW, host="box")
+    run_hook(json.dumps(payload).encode(), state=state, now=NOW, clock=lambda: NOW, host="box")
 
     assert not (state / "prompts.jsonl").exists()
     assert "GadgetPanel" in (state / "terms" / "current.txt").read_text().split("\n")
@@ -207,7 +213,7 @@ def test_session_id_that_is_not_a_plain_name_is_refused(tmp_path: Path) -> None:
     state = tmp_path / "state"
     payload = _payload(_transcript(tmp_path), tmp_path, session_id="../escape")
 
-    run_hook(payload.encode(), state=state, now=NOW, host="box")
+    run_hook(payload.encode(), state=state, now=NOW, clock=lambda: NOW, host="box")
 
     assert not (state / "terms" / "sessions").exists()
     assert not (state / "escape.json").exists()
@@ -235,7 +241,7 @@ def test_missing_transcript_is_logged_and_the_prompt_still_counts(tmp_path: Path
     state = tmp_path / "state"
     payload = _payload(tmp_path / "gone.jsonl", tmp_path)
 
-    run_hook(payload.encode(), state=state, now=NOW, host="box")
+    run_hook(payload.encode(), state=state, now=NOW, clock=lambda: NOW, host="box")
 
     record_path = state / "terms" / "sessions" / "11111111-aaaa-4bbb-8ccc-222222222222.json"
     assert "DictationBox" in _terms(record_path)
@@ -395,7 +401,9 @@ def test_shape_drift_and_a_corrupt_record_are_logged_not_fatal(tmp_path: Path) -
     (state / "terms" / "sessions").mkdir(parents=True)
     (state / "terms" / "sessions" / "broken.json").write_text("{}")
 
-    run_hook(_payload(transcript, tmp_path).encode(), state=state, now=NOW, host="box")
+    run_hook(
+        _payload(transcript, tmp_path).encode(), state=state, now=NOW, clock=lambda: NOW, host="box"
+    )
 
     log = (state / "terms" / "hook.log").read_text().splitlines()
     assert len(log) == 2
@@ -413,7 +421,9 @@ def _event(
         "cwd": "/x",
         "transcript_path": str(transcript) if transcript else None,
     }
-    run_hook(json.dumps(payload | extra).encode(), state=state, now=NOW, host="box")
+    run_hook(
+        json.dumps(payload | extra).encode(), state=state, now=NOW, clock=lambda: NOW, host="box"
+    )
 
 
 def _current(terms_dir: Path) -> list[str]:
@@ -488,7 +498,9 @@ def test_stop_updates_terms_but_not_the_rank_time(tmp_path: Path) -> None:
     )
     later = NOW + timedelta(minutes=20)
     payload = {"session_id": "s1", "hook_event_name": "Stop", "cwd": "/x", "prompt": None}
-    run_hook(json.dumps(payload).encode(), state=tmp_path, now=later, host="box")
+    run_hook(
+        json.dumps(payload).encode(), state=tmp_path, now=later, clock=lambda: later, host="box"
+    )
 
     record = SessionRecord.model_validate_json(
         (tmp_path / "terms" / "sessions" / "s1.json").read_text()
@@ -505,9 +517,14 @@ def test_a_delayed_older_event_changes_nothing_in_the_record(tmp_path: Path) -> 
     older = {"session_id": "s1", "hook_event_name": "SessionStart", "cwd": "/x"}
     late_prompt = older | {"hook_event_name": "UserPromptSubmit", "prompt": "see older_term"}
 
+    earlier = NOW - timedelta(seconds=2)
     for payload in (older, late_prompt):
         run_hook(
-            json.dumps(payload).encode(), state=tmp_path, now=NOW - timedelta(seconds=2), host="box"
+            json.dumps(payload).encode(),
+            state=tmp_path,
+            now=earlier,
+            clock=lambda: earlier,
+            host="box",
         )
 
     assert record_path.read_text() == before
@@ -515,6 +532,41 @@ def test_a_delayed_older_event_changes_nothing_in_the_record(tmp_path: Path) -> 
         json.loads(line)["prompt"] for line in (tmp_path / "prompts.jsonl").read_text().splitlines()
     ]
     assert logged == ["see newer_term", "see older_term"]
+
+
+def test_a_delayed_hook_from_another_session_does_not_restore_expired_terms(
+    tmp_path: Path,
+) -> None:
+    transcript = _cli_transcript(tmp_path)
+
+    def hook(session: str, event_at: datetime, processed_at: datetime, prompt: str) -> None:
+        payload = {
+            "session_id": session,
+            "hook_event_name": "UserPromptSubmit",
+            "cwd": "/x",
+            "transcript_path": str(transcript),
+            "prompt": prompt,
+        }
+        run_hook(
+            json.dumps(payload).encode(),
+            state=tmp_path,
+            now=event_at,
+            clock=lambda: processed_at,
+            host="box",
+        )
+
+    hook("a", NOW, NOW, "see alpha_term")
+    expired = NOW + timedelta(minutes=30, seconds=1)
+    hook("c", expired, expired, "see charlie_term")
+    # Taken before c's hook, processed after it: a's session has left the window by then.
+    hook("b", expired - timedelta(seconds=2), expired + timedelta(seconds=1), "see bravo_term")
+
+    assert "alpha_term" not in _current(tmp_path / "terms")
+    assert "bravo_term" in _current(tmp_path / "terms")
+    record = SessionRecord.model_validate_json(
+        (tmp_path / "terms" / "sessions" / "b.json").read_text()
+    )
+    assert record.updated == expired - timedelta(seconds=2)
 
 
 def test_terms_carry_over_when_a_big_tool_result_fills_the_tail(tmp_path: Path) -> None:
@@ -541,6 +593,7 @@ def test_terms_carry_over_when_a_big_tool_result_fills_the_tail(tmp_path: Path) 
         json.dumps(payload | {"transcript_path": str(transcript)}).encode(),
         state=tmp_path,
         now=later,
+        clock=lambda: later,
         host="box",
     )
 
@@ -830,7 +883,7 @@ def test_hook_log_never_holds_the_raw_input(tmp_path: Path) -> None:
         }
     )
     for raw in (bad_id.encode(), f"{marker} {{".encode(), json.dumps({"prompt": marker}).encode()):
-        run_hook(raw, state=tmp_path, now=NOW, host="box")
+        run_hook(raw, state=tmp_path, now=NOW, clock=lambda: NOW, host="box")
 
     log = (tmp_path / "terms" / "hook.log").read_text()
     assert len(log.splitlines()) == 3
