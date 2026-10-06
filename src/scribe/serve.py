@@ -50,6 +50,9 @@ KEEP_NEWEST = 1000
 # A dictation is waited on by someone at a keyboard: two quick tries, never minutes.
 XAI_ATTEMPTS = 2
 XAI_DEADLINE_SECONDS = 8.0
+# Past the xAI budget plus cleanup; a client that stalls mid-upload is cut off then
+# rather than holding off a stop forever.
+SHUTDOWN_GRACE_SECONDS = 10
 LOOPBACK_NAMES = frozenset({"127.0.0.1", "localhost", "::1"})
 # A Host header: a name, or a bracketed IPv6 address, then an optional port.
 _HOST = re.compile(r"(?:\[(?P<bracketed>[^\]]*)\]|(?P<name>[^:]*))(?::\d*)?")
@@ -459,4 +462,5 @@ def run(*, api_key: str, terms: TermsFile, keep: Path | None, host: str, port: i
         port=port,
         log_level="warning",
         access_log=False,
+        timeout_graceful_shutdown=SHUTDOWN_GRACE_SECONDS,
     )

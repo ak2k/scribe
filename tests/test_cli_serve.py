@@ -40,7 +40,13 @@ def test_it_serves_on_loopback_and_names_the_url_to_configure(
 
     assert result.exit_code == 0, result.output
     assert served == [
-        {"host": "127.0.0.1", "port": 8765, "log_level": "warning", "access_log": False}
+        {
+            "host": "127.0.0.1",
+            "port": 8765,
+            "log_level": "warning",
+            "access_log": False,
+            "timeout_graceful_shutdown": 10,
+        }
     ]
     assert "http://127.0.0.1:8765/v1/audio/transcriptions" in result.output
     assert KEY not in result.output

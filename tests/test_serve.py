@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import stat
@@ -12,9 +13,12 @@ import anyio
 import httpx
 import pytest
 import stamina
+import uvicorn
 from structlog.testing import capture_logs
+from uvicorn.lifespan.on import LifespanOn
+from uvicorn.protocols.http.h11_impl import H11Protocol
 
-from scribe.serve import ENDPOINT, create_app, dictation_client
+from scribe.serve import ENDPOINT, create_app, dictation_client, run
 from scribe.vocab import TermsFile
 from tests.xai_fixtures import xai_payload
 
@@ -22,7 +26,9 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterator
     from pathlib import Path
 
-    from starlette.types import Message
+    from starlette.types import ASGIApp, Message
+
+    from scribe.xai_stt import XaiStt
 
 KEY = "xai-test-key-never-logged"
 AUDIO = b"RIFF-pretend-wav-bytes"
@@ -674,3 +680,86 @@ async def test_missed_deadlines_leave_no_worker_reading_from_xai(
     assert statuses == [502] * 4
     assert len(opened) == 4
     assert live == 0
+
+
+class _Wire(asyncio.Transport):
+    """An in-memory connection to uvicorn's HTTP protocol: no socket is opened."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.closed = False
+
+    @override
+    def get_extra_info(self, name: str, default: object = None) -> object:
+        return {"sockname": ("127.0.0.1", 8765), "peername": ("127.0.0.1", 50000)}.get(
+            name, default
+        )
+
+    @override
+    def write(self, data: bytes | bytearray | memoryview) -> None:
+        return None
+
+    @override
+    def is_closing(self) -> bool:
+        return self.closed
+
+    @override
+    def close(self) -> None:
+        self.closed = True
+
+    @override
+    def pause_reading(self) -> None:
+        return None
+
+    @override
+    def resume_reading(self) -> None:
+        return None
+
+
+async def test_a_stalled_upload_does_not_hold_off_shutdown(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("scribe.serve.SHUTDOWN_GRACE_SECONDS", 0.2)
+    closed: list[bool] = []
+
+    class Transport(httpx.MockTransport):
+        @override
+        def close(self) -> None:
+            closed.append(True)
+
+    held = dictation_client(KEY, transport=Transport(Xai()))
+
+    def holding(_key: str) -> XaiStt:
+        return held
+
+    monkeypatch.setattr("scribe.serve.dictation_client", holding)
+    started: list[tuple[ASGIApp, dict[str, object]]] = []
+
+    def record(app: ASGIApp, **settings: object) -> None:
+        started.append((app, settings))
+
+    monkeypatch.setattr("uvicorn.run", record)
+    run(api_key=KEY, terms=_terms(tmp_path), keep=None, host="127.0.0.1", port=8765)
+    ((app, settings),) = started
+
+    config = uvicorn.Config(app, **settings, log_config=None)  # pyright: ignore[reportArgumentType]  # the settings run passed
+    config.load()
+    server = uvicorn.Server(config)
+    server.servers = []
+    lifespan = LifespanOn(config)
+    server.lifespan = lifespan
+    await lifespan.startup()
+    protocol = H11Protocol(config, server.server_state, lifespan.state)
+    wire = _Wire()
+    protocol.connection_made(wire)
+    protocol.data_received(
+        b"POST /v1/audio/transcriptions HTTP/1.1\r\nHost: 127.0.0.1:8765\r\n"
+        b"Content-Type: multipart/form-data; boundary=b\r\nContent-Length: 1000\r\n\r\n--b\r\n"
+    )
+    await anyio.sleep(0.05)
+    assert len(server.server_state.tasks) == 1
+
+    with anyio.fail_after(3):
+        await server.shutdown()
+
+    assert closed == [True]
