@@ -466,6 +466,25 @@ def test_stop_updates_terms_but_not_the_rank_time(tmp_path: Path) -> None:
     assert record.updated == later
 
 
+def test_a_delayed_older_event_changes_nothing_in_the_record(tmp_path: Path) -> None:
+    _event(tmp_path, "s1", "UserPromptSubmit", prompt="see newer_term")
+    record_path = tmp_path / "terms" / "sessions" / "s1.json"
+    before = record_path.read_text()
+    older = {"session_id": "s1", "hook_event_name": "SessionStart", "cwd": "/x"}
+    late_prompt = older | {"hook_event_name": "UserPromptSubmit", "prompt": "see older_term"}
+
+    for payload in (older, late_prompt):
+        run_hook(
+            json.dumps(payload).encode(), state=tmp_path, now=NOW - timedelta(seconds=2), host="box"
+        )
+
+    assert record_path.read_text() == before
+    logged = [
+        json.loads(line)["prompt"] for line in (tmp_path / "prompts.jsonl").read_text().splitlines()
+    ]
+    assert logged == ["see newer_term", "see older_term"]
+
+
 def test_a_session_seen_only_at_stop_is_not_merged(tmp_path: Path) -> None:
     _event(tmp_path, "s1", "Stop", transcript=_transcript(tmp_path))
 

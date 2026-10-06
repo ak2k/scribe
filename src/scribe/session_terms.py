@@ -325,10 +325,9 @@ def _session_record(
         tallies[term] += 1
         seen[term] = max(when, seen.get(term, when))
         order[term] = position
+    ranked = previous.ranked if previous is not None else None
     if hook.hook_event_name in _ACTIVE_EVENTS:
-        ranked = now
-    else:
-        ranked = previous.ranked if previous is not None else None
+        ranked = now if ranked is None else max(ranked, now)
     return SessionRecord(
         session_id=hook.session_id,
         cwd=hook.cwd,
@@ -484,7 +483,11 @@ def run_hook(raw: bytes, *, state: Path, now: datetime, host: str) -> None:
         record_path = terms_dir / "sessions" / f"{hook.session_id}.json"
         # One writer at a time, so a slower merge cannot overwrite a newer one.
         with _locked(terms_dir / ".lock"):
-            record = _session_record(hook, terms_dir, now, _previous(record_path))
+            previous = _previous(record_path)
+            # Events can arrive out of order; an older one would erase newer terms.
+            if previous is not None and now < previous.updated:
+                return
+            record = _session_record(hook, terms_dir, now, previous)
             _replace_atomically(record_path, record.model_dump_json())
             write_merged(terms_dir, now=now)
     except Exception as exc:  # noqa: BLE001 - any failure becomes one log line, never an exit
