@@ -325,9 +325,10 @@ def _identifiers(draw: st.DrawFn) -> tuple[str, str, str]:
     return lead, first + joint + second + rest, trail
 
 
-def _spoken(data: st.DataObject, key: str) -> list[str]:
-    """`key` cut into 1-4 words, each in some case, as a speaker might be heard."""
-    cuts = data.draw(st.sets(st.integers(1, len(key) - 1), max_size=MAX_RUN_WORDS - 1))
+def _spoken(data: st.DataObject, key: str, words: int = 4) -> list[str]:
+    """`key` cut into 1 to `words` words, each in some case, as a speaker might be heard."""
+    # 4 written out, not the module's cap, so a lowered cap fails here.
+    cuts = data.draw(st.sets(st.integers(1, len(key) - 1), max_size=words - 1))
     pieces = [key[start:end] for start, end in pairwise([0, *sorted(cuts), len(key)])]
     return [data.draw(st.sampled_from([piece, piece.upper(), piece.title()])) for piece in pieces]
 
@@ -348,6 +349,16 @@ def test_an_identifier_heard_in_pieces_snaps_back_to_the_first_term_spelling_it(
 
     assert snap(words, terms)[0] == expected
     assert snap(expected, terms) == (expected, [])
+
+
+@given(data=st.data())
+def test_the_longest_run_spelling_a_term_wins(data: st.DataObject) -> None:
+    _, short, _ = data.draw(_identifiers())
+    _, tail, _ = data.draw(_identifiers())
+    long = f"{short}/{tail}"
+    words = _spoken(data, _key(short), 2) + _spoken(data, _key(tail), 2)
+
+    assert snap(words, (short, long))[0] == long.split()
 
 
 @given(data=st.data())
