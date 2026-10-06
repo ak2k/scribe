@@ -67,8 +67,6 @@ from scribe.pick import (
     replay_readings,
 )
 from scribe.schema import Engine, Source, Transcript, from_xai_response
-from scribe.serve import is_loopback
-from scribe.serve import run as run_server
 from scribe.speakers import (
     DEFAULT_SPEAKER_MODEL,
     NAMES_PROMPT_VERSION,
@@ -2030,6 +2028,10 @@ def serve_command(
     that are not web pages are served. Each dictation (audio, xAI's reply and a
     record of the result) is kept under --keep, newest 1000.
     """
+    # Imported here so no other command pays for loading the server stack.
+    from scribe.serve import is_loopback  # noqa: PLC0415  # see above
+    from scribe.serve import run as run_server  # noqa: PLC0415  # see above
+
     configure()
     try:
         if not is_loopback(host):

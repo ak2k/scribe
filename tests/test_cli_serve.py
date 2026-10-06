@@ -1,14 +1,18 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+import importlib.util
+import sys
+from typing import TYPE_CHECKING, cast
 
 import pytest
 from typer.testing import CliRunner
 
+from scribe import cli
 from scribe.cli import app
 
 if TYPE_CHECKING:
     from pathlib import Path
+    from types import ModuleType
 
 runner = CliRunner()
 KEY = "xai-test-key-never-logged"
@@ -93,3 +97,13 @@ def test_ipv6_loopback_is_served_with_a_bracketed_url(served: list[dict[str, obj
 
     assert result.exit_code == 0, result.output
     assert "http://[::1]:9000/v1/audio/transcriptions" in result.output
+
+
+def test_the_cli_loads_without_the_server_stack(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in ("scribe.serve", "uvicorn", "starlette"):
+        monkeypatch.setitem(sys.modules, name, cast("ModuleType", None))
+    spec = importlib.util.spec_from_file_location("scribe_cli_alone", cli.__file__)
+    assert spec is not None
+    assert spec.loader is not None
+
+    spec.loader.exec_module(importlib.util.module_from_spec(spec))
