@@ -36,6 +36,8 @@ if TYPE_CHECKING:
 LOCAL_POLL_SECONDS = 1.0
 REMOTE_POLL_SECONDS = 3.0
 FETCH_TIMEOUT_SECONDS = 4.0
+# The hook writes about 1 KiB per session; far more is not a hook file.
+MAX_FETCH_BYTES = 2**20
 # Relative to the remote home: the hosts set no XDG_STATE_HOME.
 REMOTE_FILE = ".local/state/scribe/terms/current.txt"
 # Holds a space, so no valid host can share its name.
@@ -184,7 +186,14 @@ def local_source(path: Path, *, interval: float = LOCAL_POLL_SECONDS) -> Source:
 def remote_source(host: str, *, runner: Runner, interval: float = REMOTE_POLL_SECONDS) -> Source:
     """The hook file on `host`, fetched with `runner` over ssh."""
     argv = ["ssh", "-o", "ConnectTimeout=2", "-o", "BatchMode=yes", host, "cat", REMOTE_FILE]
-    return Source(host, lambda: runner(argv, FETCH_TIMEOUT_SECONDS), interval=interval)
+
+    def fetch() -> str:
+        text = runner(argv, FETCH_TIMEOUT_SECONDS)
+        if len(text.encode()) > MAX_FETCH_BYTES:
+            raise ExternalServiceError(f"more than {MAX_FETCH_BYTES} bytes of output")
+        return text
+
+    return Source(host, fetch, interval=interval)
 
 
 @dataclass(frozen=True)

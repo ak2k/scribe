@@ -217,7 +217,8 @@ def parse_blocks(text: str) -> list[SessionBlock]:
             quotes nothing from the text.
 
     """
-    blocks: list[SessionBlock] = []
+    # Each header with the terms read after it; a block is built once, at the end.
+    parts: list[tuple[SessionBlock, list[str]]] = []
     for number, raw in enumerate(text.splitlines(), start=1):
         line = raw.strip()
         if line.startswith("# session "):
@@ -229,15 +230,13 @@ def parse_blocks(text: str) -> list[SessionBlock]:
                     about = _About.model_validate_json(header["about"])
             if header is None or ranked is None or expires is None or about is None:
                 raise InputValidationError(f"line {number}: malformed session header")
-            blocks.append(
-                SessionBlock(header["id"], ranked, expires, (), about.cwd, tuple(about.titles))
-            )
+            head = SessionBlock(header["id"], ranked, expires, (), about.cwd, tuple(about.titles))
+            parts.append((head, []))
         elif line and not line.startswith("#"):
-            if not blocks:
+            if not parts:
                 raise InputValidationError(f"line {number}: a term before any session header")
-            last = blocks[-1]
-            blocks[-1] = replace(last, terms=(*last.terms, line))
-    return blocks
+            parts[-1][1].append(line)
+    return [replace(head, terms=tuple(terms)) for head, terms in parts]
 
 
 def _opaque(term: str) -> bool:

@@ -227,6 +227,30 @@ def test_a_header_field_this_serve_does_not_know_still_yields_the_terms() -> Non
     assert source.live(NOW) == (_block("s1", NOW, ["newer_term"]),)
 
 
+def test_a_remote_answer_over_a_mebibyte_is_a_failure_that_keeps_the_last_good() -> None:
+    good = _file(("s1", NOW, ["kept_term"]))
+    huge = good + "filler_term\n" * (2**20 // len("filler_term\n"))
+    source = remote_source("box-a", runner=Runner(good, huge, huge))
+
+    with capture_logs() as logs:
+        for _ in range(3):
+            source.refresh(lambda: NOW)
+
+    assert source.live(NOW) == (_block("s1", NOW, ["kept_term"]),)
+    assert [entry["event"] for entry in logs] == ["serve.session_terms_failed"]
+
+
+def test_one_long_block_parses_in_linear_time() -> None:
+    text = _header("s1", NOW) + "".join(f"term_{n}\n" for n in range(60_000))
+    source = remote_source("box-a", runner=Runner(text))
+
+    started = time.monotonic()
+    source.refresh(lambda: NOW)
+
+    assert len(source.live(NOW)[0].terms) == 60_000
+    assert time.monotonic() - started < 3  # a rebuild per term takes several times this
+
+
 def test_a_source_never_fetched_contributes_nothing_and_says_never() -> None:
     source = remote_source("box-a", runner=Runner(ExternalServiceError("timed out")))
     sessions = SessionTerms([source], clock=lambda: NOW)
