@@ -325,6 +325,18 @@ def test_a_missing_local_file_contributes_nothing(tmp_path: Path) -> None:
     ]
 
 
+def test_a_local_file_that_is_not_utf8_contributes_nothing(tmp_path: Path) -> None:
+    path = tmp_path / "current.txt"
+    path.write_bytes(b"\xff\n")
+    source = local_source(path)
+
+    with capture_logs() as logs:
+        source.refresh(lambda: NOW)
+
+    assert source.live(NOW) == ()
+    assert [str(entry["error"]).count(str(path)) for entry in logs] == [1]
+
+
 def test_a_blocks_expiry_ages_it_out_even_while_its_host_is_down() -> None:
     runner = Runner(_file(("s1", NOW, ["kept_term"])), ExternalServiceError("timed out"))
     source = remote_source("box-a", runner=runner)
