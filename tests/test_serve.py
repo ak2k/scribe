@@ -135,8 +135,8 @@ async def test_health_answers_200(tmp_path: Path) -> None:
 def _session_file(*blocks: tuple[str, datetime, Sequence[str]]) -> str:
     return "".join(
         f"# session {session} ranked {ranked.isoformat()}"
-        f" expires {(ranked + timedelta(minutes=30)).isoformat()}\n"
-        + "".join(f"{term}\n" for term in terms)
+        f" expires {(ranked + timedelta(minutes=30)).isoformat()}"
+        ' {"cwd": "/w", "titles": ["A tab"]}\n' + "".join(f"{term}\n" for term in terms)
         for session, ranked, terms in blocks
     )
 
@@ -192,6 +192,7 @@ async def test_session_terms_follow_the_static_terms_newest_session_first(
     result = _json(kept / "result.json")
     assert result["terms"] == [term.decode() for term in keyterms]
     assert result["session_terms"] == {"local file": 2, "box-a": 1, "box-b": 1}
+    assert "A tab" not in (kept / "result.json").read_text(encoding="utf-8")
 
 
 async def test_session_terms_are_snapped_like_static_terms(tmp_path: Path) -> None:
@@ -237,7 +238,7 @@ async def test_health_counts_each_source_without_terms_or_session_ids(tmp_path: 
             {"source": "box-c", "blocks": 0, "terms": 0, "age_seconds": None},
         ],
     }
-    for secret in ("local_a", "kbx25", "b_term", "a-s", "b-s", "local-s"):
+    for secret in ("local_a", "kbx25", "b_term", "a-s", "b-s", "local-s", "A tab", "/w"):
         assert secret not in response.text
 
 
@@ -249,6 +250,7 @@ async def test_the_request_log_line_counts_session_terms_and_names_none(tmp_path
     (line,) = [entry for entry in logs if entry["event"] == "serve.request"]
     assert line["session_terms"] == 5
     assert "local_a" not in repr(logs)
+    assert "A tab" not in repr(logs)
 
 
 async def test_the_poller_runs_from_startup_until_shutdown(tmp_path: Path) -> None:

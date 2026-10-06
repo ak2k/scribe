@@ -115,9 +115,11 @@ pass them to xAI as keyterms. It writes under `$XDG_STATE_HOME/scribe`, else
   deleted after 7 days.
 - `terms/current.txt`: one block per interactive session you prompted or
   started in the last 30 minutes, most recent first. A block opens with the
-  comment `# session <id> ranked <UTC time> expires <UTC time>` (when you last
-  prompted or started it, and when it leaves the window), then up to 60 of its
-  terms, one per line, best first; it is usable as a terms file as is. Nothing
+  comment `# session <id> ranked <UTC time> expires <UTC time> {"cwd": ...,
+  "titles": [...]}` (when you last prompted or started it, when it leaves the
+  window, its directory, and its 5 latest titles, `/rename` titles before
+  automatic ones), then up to 60 of its terms, one per line, best first; it is
+  usable as a terms file as is. Nothing
   rewrites the file until the next hook event, so its reader drops a block once
   it expires. A session contributes only once its transcript shows it is
   interactive, so a new session's terms join from its first prompt rather than

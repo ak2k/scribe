@@ -15,8 +15,8 @@ import re
 import socket
 import tempfile
 from collections import Counter
-from contextlib import contextmanager
-from dataclasses import dataclass, field
+from contextlib import contextmanager, suppress
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -33,6 +33,8 @@ if TYPE_CHECKING:
 TAIL_BYTES = 256 * 1024
 MERGED_CAP = 60
 MIN_TERM_CHARS = 3
+# A terminal tab can lag a re-title, so a few earlier titles still identify the session.
+MAX_TITLES = 5
 WINDOW = timedelta(minutes=30)
 RETENTION = timedelta(days=7)
 LOG_LIMIT = 1024 * 1024
@@ -60,7 +62,9 @@ _KEY_PREFIX = re.compile(
     r"(?<![A-Za-z0-9])(?:gh[opusr]_|github_pat_|sk-|xai-|AKIA|xox[a-z]-)[A-Za-z0-9_-]{16,}"
 )
 _OPAQUE = re.compile(r"[A-Za-z0-9_-]{20,}")
-_BLOCK_HEADER = re.compile(r"# session (?P<id>\S+) ranked (?P<ranked>\S+) expires (?P<expires>\S+)")
+_BLOCK_HEADER = re.compile(
+    r"# session (?P<id>\S+) ranked (?P<ranked>\S+) expires (?P<expires>\S+) (?P<about>\{.*\})"
+)
 _SESSION_ID = r"^[A-Za-z0-9_-]{1,128}$"
 
 
@@ -100,6 +104,9 @@ class SessionRecord(BaseModel):
     ranked: AwareDatetime | None = None
     entrypoint: str | None = None
     terms: list[TermCount]
+    # Newest first; a title record can fall out of the tail, so both carry over.
+    custom_titles: list[str] = Field(default_factory=list[str])
+    ai_titles: list[str] = Field(default_factory=list[str])
 
 
 class _Part(BaseModel):
@@ -133,6 +140,8 @@ class _Record(BaseModel):
     origin: _Origin | None = None
     timestamp: datetime | None = None
     message: JsonValue = None
+    custom_title: str | None = Field(default=None, alias="customTitle")
+    ai_title: str | None = Field(default=None, alias="aiTitle")
 
 
 @dataclass
@@ -141,6 +150,9 @@ class _Transcript:
     branch: str | None = None
     entrypoint: str | None = None
     drifted: int = 0
+    # Oldest first, as the transcript holds them.
+    custom_titles: list[str] = field(default_factory=list[str])
+    ai_titles: list[str] = field(default_factory=list[str])
 
 
 @dataclass(frozen=True)
@@ -151,6 +163,17 @@ class SessionBlock:
     ranked: datetime
     expires: datetime
     terms: tuple[str, ...]
+    cwd: str
+    titles: tuple[str, ...]
+
+
+class _About(BaseModel):
+    """What a block header says of its session beyond its times."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    cwd: str
+    titles: list[str]
 
 
 def xdg_home(environ: Mapping[str, str], variable: str, fallback: str, *, home: Path) -> Path:
@@ -173,6 +196,17 @@ def _block_time(text: str) -> datetime | None:
     return when if when.tzinfo is not None else None
 
 
+def format_block(block: SessionBlock) -> str:
+    """Render one block of `current.txt`: its header line, then a line per term."""
+    # ASCII JSON escapes every line break and control character a title can hold.
+    about = json.dumps({"cwd": block.cwd, "titles": list(block.titles)}, ensure_ascii=True)
+    header = (
+        f"# session {block.session_id} ranked {block.ranked.astimezone(UTC).isoformat()}"
+        f" expires {block.expires.astimezone(UTC).isoformat()} {about}"
+    )
+    return "".join(f"{line}\n" for line in (header, *block.terms))
+
+
 def parse_blocks(text: str) -> list[SessionBlock]:
     """Parse `current.txt`: per session, a `# session` header line, then its terms.
 
@@ -187,19 +221,21 @@ def parse_blocks(text: str) -> list[SessionBlock]:
         line = raw.strip()
         if line.startswith("# session "):
             header = _BLOCK_HEADER.fullmatch(line)
-            ranked = expires = None
+            ranked = expires = about = None
             if header is not None and re.fullmatch(_SESSION_ID, header["id"]) is not None:
                 ranked, expires = _block_time(header["ranked"]), _block_time(header["expires"])
-            if header is None or ranked is None or expires is None:
+                with suppress(ValidationError):
+                    about = _About.model_validate_json(header["about"])
+            if header is None or ranked is None or expires is None or about is None:
                 raise InputValidationError(f"line {number}: malformed session header")
-            blocks.append(SessionBlock(header["id"], ranked, expires, ()))
+            blocks.append(
+                SessionBlock(header["id"], ranked, expires, (), about.cwd, tuple(about.titles))
+            )
         elif line and not line.startswith("#"):
             if not blocks:
                 raise InputValidationError(f"line {number}: a term before any session header")
             last = blocks[-1]
-            blocks[-1] = SessionBlock(
-                last.session_id, last.ranked, last.expires, (*last.terms, line)
-            )
+            blocks[-1] = replace(last, terms=(*last.terms, line))
     return blocks
 
 
@@ -325,6 +361,10 @@ def _read_transcript(lines: list[str]) -> _Transcript:
         if when is not None and when.tzinfo is None:
             when = when.replace(tzinfo=UTC)
         found.texts.extend((when, text) for text in texts)
+        if record.type == "custom-title" and record.custom_title:
+            found.custom_titles.append(record.custom_title)
+        elif record.type == "ai-title" and record.ai_title:
+            found.ai_titles.append(record.ai_title)
         found.branch = record.git_branch or found.branch
         found.entrypoint = record.entrypoint or found.entrypoint
     return found
@@ -364,6 +404,11 @@ def _previous(path: Path) -> SessionRecord | None:
         return SessionRecord.model_validate_json(path.read_bytes())
     except (OSError, ValidationError):
         return None
+
+
+def _recent(seen: list[str], carried: list[str]) -> list[str]:
+    """The newest distinct titles: `seen` oldest first, then `carried` newest first."""
+    return list(dict.fromkeys([*reversed(seen), *carried]))[:MAX_TITLES]
 
 
 def _session_record(
@@ -406,6 +451,8 @@ def _session_record(
         ranked=ranked,
         entrypoint=found.entrypoint or (previous.entrypoint if previous is not None else None),
         terms=_rank(tallies, seen, order),
+        custom_titles=_recent(found.custom_titles, previous.custom_titles if previous else []),
+        ai_titles=_recent(found.ai_titles, previous.ai_titles if previous else []),
     )
 
 
@@ -489,7 +536,7 @@ def write_merged(terms_dir: Path, *, now: datetime) -> None:
                 log_failure(terms_dir, now, f"{path.name} unreadable: {exc.error_count()} errors")
     live = sorted(
         (
-            (record.ranked, record.session_id, record.terms)
+            (record.ranked, record)
             for record in records
             if record.ranked is not None
             and record.ranked >= now - WINDOW
@@ -500,18 +547,22 @@ def write_merged(terms_dir: Path, *, now: datetime) -> None:
         key=lambda live: live[0],
         reverse=True,
     )
-    lines: list[str] = []
-    for ranked, session_id, terms in live:
+    blocks: list[str] = []
+    for ranked, record in live:
+        best = sorted(record.terms, key=lambda t: (t.last_seen, t.count), reverse=True)
         # Without a later hook nothing rewrites the file, so each block says when
         # its session leaves the window; a terms file reads the header as a comment.
-        lines.append(
-            f"# session {session_id} ranked {ranked.astimezone(UTC).isoformat()}"
-            f" expires {(ranked + WINDOW).astimezone(UTC).isoformat()}"
+        block = SessionBlock(
+            session_id=record.session_id,
+            ranked=ranked,
+            expires=ranked + WINDOW,
+            terms=tuple([t.term for t in best if _mergeable(t.term)][:MERGED_CAP]),
+            cwd=record.cwd,
+            titles=tuple(dict.fromkeys(record.custom_titles + record.ai_titles))[:MAX_TITLES],
         )
-        best = sorted(terms, key=lambda t: (t.last_seen, t.count), reverse=True)
-        lines.extend([t.term for t in best if _mergeable(t.term)][:MERGED_CAP])
+        blocks.append(format_block(block))
     terms_dir.mkdir(parents=True, exist_ok=True)
-    _replace_atomically(terms_dir / "current.txt", "".join(f"{line}\n" for line in lines))
+    _replace_atomically(terms_dir / "current.txt", "".join(blocks))
 
 
 def _refusal(exc: ValidationError) -> str:

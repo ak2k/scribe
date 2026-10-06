@@ -27,6 +27,7 @@ from scribe.session_terms import (
     SessionRecord,
     TermCount,
     extract_terms,
+    format_block,
     log_failure,
     parse_blocks,
     read_tail,
@@ -454,17 +455,29 @@ def test_each_session_block_says_when_that_session_leaves_the_window(tmp_path: P
     write_merged(tmp_path / "terms", now=NOW)
 
     assert (tmp_path / "terms" / "current.txt").read_text().splitlines() == [
-        "# session newer ranked 2026-10-05T11:59:00+00:00 expires 2026-10-05T12:29:00+00:00",
+        "# session newer ranked 2026-10-05T11:59:00+00:00 expires 2026-10-05T12:29:00+00:00"
+        ' {"cwd": "/w", "titles": []}',
         "newer_term",
-        "# session older ranked 2026-10-05T11:50:00+00:00 expires 2026-10-05T12:20:00+00:00",
+        "# session older ranked 2026-10-05T11:50:00+00:00 expires 2026-10-05T12:20:00+00:00"
+        ' {"cwd": "/w", "titles": []}',
         "older_term",
     ]
     assert parse_blocks((tmp_path / "terms" / "current.txt").read_text()) == [
         SessionBlock(
-            "newer", NOW - timedelta(minutes=1), NOW + timedelta(minutes=29), ("newer_term",)
+            "newer",
+            NOW - timedelta(minutes=1),
+            NOW + timedelta(minutes=29),
+            ("newer_term",),
+            cwd="/w",
+            titles=(),
         ),
         SessionBlock(
-            "older", NOW - timedelta(minutes=10), NOW + timedelta(minutes=20), ("older_term",)
+            "older",
+            NOW - timedelta(minutes=10),
+            NOW + timedelta(minutes=20),
+            ("older_term",),
+            cwd="/w",
+            titles=(),
         ),
     ]
 
@@ -485,6 +498,9 @@ def test_every_terms_file_reader_takes_each_block_header_as_a_comment(tmp_path: 
     assert vocab.terms == ("one_term",)
 
 
+_HEAD = "# session s ranked 2026-10-05T12:00:00+00:00 expires 2026-10-05T12:30:00+00:00"
+
+
 @pytest.mark.parametrize(
     "text",
     [
@@ -492,7 +508,12 @@ def test_every_terms_file_reader_takes_each_block_header_as_a_comment(tmp_path: 
         "plain_term\n",
         "# session s ranked 2026-10-05T12:00:00 expires 2026-10-05T12:30:00+00:00\n",
         "# session s ranked 2026-10-05T12:00:00+00:00 expires soon\n",
-        "# session s/../x ranked 2026-10-05T12:00:00+00:00 expires 2026-10-05T12:30:00+00:00\n",
+        "# session s/../x ranked 2026-10-05T12:00:00+00:00 expires 2026-10-05T12:30:00+00:00"
+        ' {"cwd": "/w", "titles": []}\n',
+        _HEAD + "\n",
+        _HEAD + ' {"cwd": "/w"}\n',
+        _HEAD + ' {"cwd": "/w", "titles": [1]}\n',
+        _HEAD + ' {"cwd": "/w", "titles": []} trailing\n',
     ],
 )
 def test_text_that_is_not_session_blocks_is_refused(text: str) -> None:
@@ -503,7 +524,8 @@ def test_text_that_is_not_session_blocks_is_refused(text: str) -> None:
 def test_blank_lines_and_other_comments_are_skipped() -> None:
     text = (
         "# written by a test\n\n"
-        "# session s ranked 2026-10-05T12:00:00+00:00 expires 2026-10-05T12:30:00+00:00\n"
+        "# session s ranked 2026-10-05T12:00:00+00:00 expires 2026-10-05T12:30:00+00:00"
+        ' {"cwd": "/w", "titles": []}\n'
         "  a_term  \n\n# aside\nb_term\n"
     )
 
@@ -985,3 +1007,77 @@ def test_hook_log_starts_afresh_past_its_limit(tmp_path: Path) -> None:
     log_failure(tmp_path, NOW, "one more")
 
     assert log.read_text() == "2026-10-05T12:00:00+00:00 one more\n"
+
+
+_SAFE = st.characters(exclude_categories=["Cs"])
+
+
+@given(
+    session=st.from_regex(r"[A-Za-z0-9_-]{1,128}", fullmatch=True),
+    minutes=st.integers(min_value=-10_000, max_value=10_000),
+    cwd=st.text(alphabet=_SAFE),
+    titles=st.lists(st.text(alphabet=_SAFE), max_size=5),
+    terms=st.lists(st.from_regex(r"[a-z_]{3,12}", fullmatch=True), max_size=5),
+)
+def test_a_block_header_round_trips_any_title_and_cwd(
+    session: str, minutes: int, cwd: str, titles: list[str], terms: list[str]
+) -> None:
+    ranked = NOW + timedelta(minutes=minutes)
+    block = SessionBlock(
+        session, ranked, ranked + timedelta(minutes=30), tuple(terms), cwd=cwd, titles=tuple(titles)
+    )
+
+    text = format_block(block)
+
+    assert text.count("\n") == 1 + len(terms)
+    assert text.startswith("# session ")
+    assert parse_blocks(text) == [block]
+    assert parse_terms(text, where="current.txt").terms == tuple(dict.fromkeys(terms))
+
+
+def _titled(tmp_path: Path, *titles: tuple[str, str]) -> Path:
+    records: list[dict[str, object]] = [{"type": "system", "entrypoint": "cli"}]
+    for kind, title in titles:
+        key = "customTitle" if kind == "custom-title" else "aiTitle"
+        records.append({"type": kind, key: title, "sessionId": "s1"})
+    return _transcript(tmp_path, records)
+
+
+def _titles(tmp_path: Path) -> tuple[str, ...]:
+    (block,) = _blocks(tmp_path / "terms")
+    return block.titles
+
+
+def test_a_custom_title_wins_over_a_later_ai_title(tmp_path: Path) -> None:
+    transcript = _titled(
+        tmp_path,
+        ("ai-title", "First topic"),
+        ("custom-title", 'My # "named" tab \u00e9'),
+        ("ai-title", "Later topic"),
+    )
+
+    _event(tmp_path, "s1", "UserPromptSubmit", transcript=transcript, prompt="see a_term")
+
+    assert _titles(tmp_path) == ('My # "named" tab \u00e9', "Later topic", "First topic")
+    (block,) = _blocks(tmp_path / "terms")
+    assert block.cwd == "/x"
+
+
+def test_titles_carry_over_when_the_tail_holds_none(tmp_path: Path) -> None:
+    titled = _titled(tmp_path, ("ai-title", "Old topic"), ("custom-title", "Renamed"))
+    _event(tmp_path, "s1", "UserPromptSubmit", transcript=titled, prompt="see a_term")
+    later = tmp_path / "later"
+    later.mkdir()
+
+    _event(tmp_path, "s1", "UserPromptSubmit", transcript=_cli_transcript(later), prompt="b_term")
+
+    assert _titles(tmp_path) == ("Renamed", "Old topic")
+
+
+def test_only_the_five_newest_distinct_titles_are_kept(tmp_path: Path) -> None:
+    names = ["t1", "t2", "t3", "t2", "t4", "t5", "t6", "t6"]
+    transcript = _titled(tmp_path, *(("ai-title", name) for name in names))
+
+    _event(tmp_path, "s1", "UserPromptSubmit", transcript=transcript, prompt="see a_term")
+
+    assert _titles(tmp_path) == ("t6", "t5", "t4", "t2", "t3")

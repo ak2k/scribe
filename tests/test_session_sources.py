@@ -40,7 +40,10 @@ SSH_FILE = ".local/state/scribe/terms/current.txt"
 
 def _header(session: str, ranked: datetime, expires: datetime | None = None) -> str:
     leaves = ranked + timedelta(minutes=30) if expires is None else expires
-    return f"# session {session} ranked {ranked.isoformat()} expires {leaves.isoformat()}\n"
+    return (
+        f"# session {session} ranked {ranked.isoformat()} expires {leaves.isoformat()}"
+        ' {"cwd": "/w", "titles": ["A tab"]}\n'
+    )
 
 
 def _file(*blocks: tuple[str, datetime, list[str]]) -> str:
@@ -50,7 +53,9 @@ def _file(*blocks: tuple[str, datetime, list[str]]) -> str:
 
 
 def _block(session: str, ranked: datetime, terms: Sequence[str]) -> SessionBlock:
-    return SessionBlock(session, ranked, ranked + timedelta(minutes=30), tuple(terms))
+    return SessionBlock(
+        session, ranked, ranked + timedelta(minutes=30), tuple(terms), cwd="/w", titles=("A tab",)
+    )
 
 
 class Runner:
@@ -117,10 +122,17 @@ def test_merge_cuts_at_100_keeping_every_static_term() -> None:
 
 
 def test_an_expired_block_contributes_nothing_while_its_sibling_does() -> None:
-    gone = SessionBlock("gone", NOW - timedelta(minutes=30), NOW, ("gone_term",))
+    gone = SessionBlock(
+        "gone", NOW - timedelta(minutes=30), NOW, ("gone_term",), cwd="/w", titles=()
+    )
     # Ranked earlier, yet its own expiry is still ahead.
     here = SessionBlock(
-        "here", NOW - timedelta(minutes=40), NOW + timedelta(seconds=1), ("here_t",)
+        "here",
+        NOW - timedelta(minutes=40),
+        NOW + timedelta(seconds=1),
+        ("here_t",),
+        cwd="/w",
+        titles=(),
     )
 
     merged = merge([], [("local", gone), ("local", here)], NOW)
@@ -152,6 +164,8 @@ def test_merge_properties(static: list[str], blocks: list[tuple[str, int, int, l
                 NOW - timedelta(minutes=ranked),
                 NOW + timedelta(minutes=expires),
                 tuple(terms),
+                cwd="/w",
+                titles=(),
             ),
         )
         for name, ranked, expires, terms in blocks
