@@ -214,17 +214,17 @@ def _keyterm(term: str) -> bool:
     return True
 
 
-def merge(
-    static: Sequence[str], blocks: Sequence[tuple[str, SessionBlock]], now: datetime
-) -> Merged:
-    """Static terms whole, then the live blocks, newest rank first, taking turns a term each.
+def merge(static: Sequence[str], sources: Sequence[tuple[str, Sequence[SessionBlock]]]) -> Merged:
+    """Static terms whole, then every source's blocks, newest rank first, taking turns a term each.
 
-    Repeats and terms xAI would refuse are skipped; the list ends at `MAX_KEYTERMS`.
+    `static` is a parsed terms file, so at most `MAX_KEYTERMS`, and each source's
+    blocks are its live ones. Repeats and terms xAI would refuse are skipped; the
+    list ends at `MAX_KEYTERMS`.
     """
-    taken = dict.fromkeys(static[:MAX_KEYTERMS])
-    counts = dict.fromkeys((name for name, _ in blocks), 0)
+    taken = dict.fromkeys(static)
+    counts = dict.fromkeys((name for name, _ in sources), 0)
     live = sorted(
-        (pair for pair in blocks if pair[1].expires > now),
+        ((name, block) for name, blocks in sources for block in blocks),
         key=lambda pair: pair[1].ranked,
         reverse=True,
     )
@@ -253,15 +253,8 @@ class SessionTerms:
     def vocab(self, static: Vocab) -> tuple[Vocab, dict[str, int]]:
         """The static vocabulary with the live session terms merged in, and per-source counts."""
         now = self._clock()
-        blocks = [(source.name, block) for source in self.sources for block in source.live(now)]
-        merged = merge(static.terms, blocks, now)
-        counts = {source.name: merged.counts.get(source.name, 0) for source in self.sources}
-        return Vocab(terms=merged.terms, aliases=static.aliases), counts
-
-    def refresh(self) -> None:
-        """Read every source once, in turn."""
-        for source in self.sources:
-            source.refresh(self._clock)
+        merged = merge(static.terms, [(source.name, source.live(now)) for source in self.sources])
+        return Vocab(terms=merged.terms, aliases=static.aliases), merged.counts
 
     async def poll(self) -> None:
         """Refresh each source on its interval until cancelled."""

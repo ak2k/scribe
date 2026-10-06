@@ -165,9 +165,9 @@ def _sessions(tmp_path: Path, **hosts: Ssh) -> SessionTerms:
     )
     sources = [local_source(local)]
     sources += [remote_source(host, runner=runner) for host, runner in hosts.items()]
-    sessions = SessionTerms(sources, clock=lambda: NOW)
-    sessions.refresh()
-    return sessions
+    for source in sources:
+        source.refresh(lambda: NOW)
+    return SessionTerms(sources, clock=lambda: NOW)
 
 
 def _two_hosts() -> dict[str, Ssh]:

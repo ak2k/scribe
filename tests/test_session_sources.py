@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING
 import anyio
 import anyio.to_thread
 import pytest
-from hypothesis import given
+from hypothesis import event, given
 from hypothesis import strategies as st
 from structlog.testing import capture_logs
 
@@ -77,13 +77,13 @@ class Runner:
 
 
 def test_merge_puts_static_terms_first_then_sessions_newest_first_taking_turns() -> None:
-    blocks = [
-        ("local", _block("old", NOW - timedelta(minutes=20), ["old_a", "old_b"])),
-        ("box-a", _block("new", NOW - timedelta(minutes=1), ["new_a", "new_b", "new_c"])),
-        ("box-b", _block("mid", NOW - timedelta(minutes=5), ["mid_a"])),
+    sources = [
+        ("local", [_block("old", NOW - timedelta(minutes=20), ["old_a", "old_b"])]),
+        ("box-a", [_block("new", NOW - timedelta(minutes=1), ["new_a", "new_b", "new_c"])]),
+        ("box-b", [_block("mid", NOW - timedelta(minutes=5), ["mid_a"])]),
     ]
 
-    merged = merge(["herdr", "VoiceInk"], blocks, NOW)
+    merged = merge(["herdr", "VoiceInk"], sources)
 
     assert merged.terms == (
         "herdr",
@@ -99,12 +99,12 @@ def test_merge_puts_static_terms_first_then_sessions_newest_first_taking_turns()
 
 
 def test_merge_drops_repeats_and_a_bad_term_alone() -> None:
-    blocks = [
-        ("local", _block("a", NOW, ["herdr", "x" * 51, "shared_t", "a_only"])),
-        ("box-a", _block("b", NOW - timedelta(minutes=1), ["shared_t", "b_only"])),
+    sources = [
+        ("local", [_block("a", NOW, ["herdr", "x" * 51, "shared_t", "a_only"])]),
+        ("box-a", [_block("b", NOW - timedelta(minutes=1), ["shared_t", "b_only"])]),
     ]
 
-    merged = merge(["herdr"], blocks, NOW)
+    merged = merge(["herdr"], sources)
 
     assert merged.terms == ("herdr", "shared_t", "b_only", "a_only")
     assert merged.counts == {"local": 2, "box-a": 1}
@@ -112,74 +112,77 @@ def test_merge_drops_repeats_and_a_bad_term_alone() -> None:
 
 def test_merge_cuts_at_100_keeping_every_static_term() -> None:
     static = [f"static_{n}" for n in range(90)]
-    blocks = [("local", _block("a", NOW, [f"session_{n}" for n in range(60)]))]
+    sources = [("local", [_block("a", NOW, [f"session_{n}" for n in range(60)])])]
 
-    merged = merge(static, blocks, NOW)
+    merged = merge(static, sources)
 
     assert len(merged.terms) == MAX_KEYTERMS
     assert merged.terms[:90] == tuple(static)
     assert merged.counts == {"local": 10}
 
 
+def test_the_cut_holds_when_it_falls_mid_turn() -> None:
+    static = [f"static_{n}" for n in range(MAX_KEYTERMS - 1)]
+    sources = [
+        ("local", [_block("a", NOW - timedelta(minutes=1), ["a_one", "a_two"])]),
+        ("box-a", [_block("b", NOW - timedelta(minutes=2), ["b_one"])]),
+    ]
+
+    merged = merge(static, sources)
+
+    assert merged.terms == (*static, "a_one")
+    assert merged.counts == {"local": 1, "box-a": 0}
+
+
 def test_an_expired_block_contributes_nothing_while_its_sibling_does() -> None:
-    gone = SessionBlock(
-        "gone", NOW - timedelta(minutes=30), NOW, ("gone_term",), cwd="/w", titles=()
-    )
+    gone = _header("gone", NOW - timedelta(minutes=30), NOW) + "gone_term\n"
     # Ranked earlier, yet its own expiry is still ahead.
-    here = SessionBlock(
-        "here",
-        NOW - timedelta(minutes=40),
-        NOW + timedelta(seconds=1),
-        ("here_t",),
-        cwd="/w",
-        titles=(),
-    )
+    here = _header("here", NOW - timedelta(minutes=40), NOW + timedelta(seconds=1)) + "here_t\n"
+    source = remote_source("box-a", runner=Runner(gone + here))
+    source.refresh(lambda: NOW)
 
-    merged = merge([], [("local", gone), ("local", here)], NOW)
+    vocab, counts = SessionTerms([source], clock=lambda: NOW).vocab(Vocab((), ()))
 
-    assert merged.terms == ("here_t",)
+    assert vocab.terms == ("here_t",)
+    assert counts == {"box-a": 1}
 
 
 _TERM = st.text(alphabet="abcdefghij_", min_size=1, max_size=6)
+_BAD_TERMS = ("x" * 51, " ")
 
 
+# Short and near-full static lists alike, so the 100 cut is met as often as not.
 @given(
-    static=st.lists(_TERM, max_size=120, unique=True),
+    static=st.one_of(
+        st.lists(_TERM, max_size=10, unique=True),
+        st.lists(_TERM, min_size=90, max_size=MAX_KEYTERMS, unique=True),
+    ),
     blocks=st.lists(
         st.tuples(
             st.sampled_from(["local", "box-a", "box-b"]),
-            st.integers(min_value=-40, max_value=40),
-            st.integers(min_value=-5, max_value=30),
-            st.lists(st.one_of(_TERM, st.just("x" * 51), st.just(" ")), max_size=70),
+            st.integers(min_value=0, max_value=40),
+            st.lists(st.one_of(_TERM, st.sampled_from(_BAD_TERMS)), min_size=1, max_size=70),
         ),
+        min_size=2,
         max_size=6,
     ),
 )
-def test_merge_properties(static: list[str], blocks: list[tuple[str, int, int, list[str]]]) -> None:
-    given_blocks = [
-        (
-            name,
-            SessionBlock(
-                "s",
-                NOW - timedelta(minutes=ranked),
-                NOW + timedelta(minutes=expires),
-                tuple(terms),
-                cwd="/w",
-                titles=(),
-            ),
-        )
-        for name, ranked, expires, terms in blocks
-    ]
+def test_merge_properties(static: list[str], blocks: list[tuple[str, int, list[str]]]) -> None:
+    sources: dict[str, list[SessionBlock]] = {}
+    for name, ranked, terms in blocks:
+        sources.setdefault(name, []).append(_block("s", NOW - timedelta(minutes=ranked), terms))
+    offered = set(static) | {t for _, _, terms in blocks for t in terms if t not in _BAD_TERMS}
+    if len(offered) > MAX_KEYTERMS:
+        event("the cut falls while two or more blocks take turns")
 
-    merged = merge(static, given_blocks, NOW)
+    merged = merge(static, list(sources.items()))
 
     assert len(merged.terms) == len(set(merged.terms))
-    assert len(merged.terms) <= MAX_KEYTERMS
-    if len(static) <= MAX_KEYTERMS:
-        assert merged.terms[: len(static)] == tuple(static)
-    live = {term for _, block in given_blocks if block.expires > NOW for term in block.terms}
-    assert set(merged.terms) <= set(static) | live
-    assert sum(merged.counts.values()) == len(merged.terms) - min(len(static), MAX_KEYTERMS)
+    assert len(merged.terms) == min(len(offered), MAX_KEYTERMS)
+    assert merged.terms[: len(static)] == tuple(static)
+    assert set(merged.terms) <= offered
+    assert sum(merged.counts.values()) == len(merged.terms) - len(static)
+    assert set(merged.counts) == set(sources)
 
 
 def test_a_remote_source_runs_ssh_with_a_short_connect_timeout() -> None:
@@ -255,7 +258,7 @@ def test_a_source_never_fetched_contributes_nothing_and_says_never() -> None:
     source = remote_source("box-a", runner=Runner(ExternalServiceError("timed out")))
     sessions = SessionTerms([source], clock=lambda: NOW)
 
-    sessions.refresh()
+    source.refresh(lambda: NOW)
 
     assert source.live(NOW) == ()
     assert sessions.health() == [{"source": "box-a", "blocks": 0, "terms": 0, "age_seconds": None}]
@@ -311,7 +314,7 @@ def test_a_blocks_expiry_ages_it_out_even_while_its_host_is_down() -> None:
     runner = Runner(_file(("s1", NOW, ["kept_term"])), ExternalServiceError("timed out"))
     source = remote_source("box-a", runner=runner)
     sessions = SessionTerms([source], clock=lambda: NOW)
-    sessions.refresh()
+    source.refresh(lambda: NOW)
     static = Vocab(terms=("herdr",), aliases=(Alias("her der", "herdr"),))
 
     vocab, counts = sessions.vocab(static)
@@ -319,7 +322,7 @@ def test_a_blocks_expiry_ages_it_out_even_while_its_host_is_down() -> None:
     assert counts == {"box-a": 1}
 
     gone = SessionTerms([source], clock=lambda: NOW + timedelta(minutes=30))
-    gone.refresh()
+    source.refresh(lambda: NOW + timedelta(minutes=30))
     assert gone.vocab(static) == (static, {"box-a": 0})
 
 
