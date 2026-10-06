@@ -297,6 +297,21 @@ def test_the_local_file_is_read_again_only_when_it_changes(tmp_path: Path) -> No
     assert source.live(later)[0].terms == ("second_term", "more_term")
 
 
+def test_a_local_file_failing_unchanged_keeps_aging(tmp_path: Path) -> None:
+    path = tmp_path / "current.txt"
+    path.write_text(_file(("s1", NOW, ["first_term"])))
+    source = local_source(path)
+    source.refresh(lambda: NOW)
+    path.write_text("not_a_session_file\n")
+    stamp = time.time() + 10
+    os.utime(path, (stamp, stamp))
+
+    source.refresh(lambda: NOW + timedelta(seconds=5))
+    source.refresh(lambda: NOW + timedelta(seconds=10))
+
+    assert source.health(NOW + timedelta(seconds=10))["age_seconds"] == 10
+
+
 def test_a_missing_local_file_contributes_nothing(tmp_path: Path) -> None:
     path = tmp_path / "absent.txt"
     source = local_source(path)
@@ -362,6 +377,40 @@ async def test_the_poller_refreshes_every_source_until_cancelled() -> None:
     assert len(runner.calls) == calls
 
 
+@pytest.mark.anyio
+async def test_a_remote_source_is_polled_once_per_interval() -> None:
+    runner = Runner(_file(("s1", NOW, ["polled_term"])))
+    sessions = SessionTerms([remote_source("box-a", runner=runner)], clock=lambda: NOW)
+
+    async with anyio.create_task_group() as group:
+        group.start_soon(sessions.poll)
+        await anyio.sleep(0.5)  # well inside the 3 s interval
+        group.cancel_scope.cancel()
+
+    assert len(runner.calls) == 1
+
+
+@pytest.mark.anyio
+async def test_shutdown_does_not_wait_for_a_fetch_in_flight() -> None:
+    started, release = threading.Event(), threading.Event()
+
+    def hung(_argv: Sequence[str], _timeout: float) -> str:
+        started.set()
+        release.wait(2)
+        return ""
+
+    sessions = SessionTerms([remote_source("box-a", runner=hung)], clock=lambda: NOW)
+    try:
+        async with anyio.create_task_group() as group:
+            group.start_soon(sessions.poll)
+            assert await anyio.to_thread.run_sync(started.wait, 2)
+            cancelled = time.monotonic()
+            group.cancel_scope.cancel()
+        assert time.monotonic() - cancelled < 0.5
+    finally:
+        release.set()
+
+
 @pytest.mark.parametrize("host", ["", "-oProxyCommand=x", "box a", "box\ta", "box\x7f"])
 def test_a_bad_host_is_refused(host: str) -> None:
     with pytest.raises(InputValidationError):
@@ -392,6 +441,22 @@ def test_the_runner_kills_a_program_past_its_timeout() -> None:
     with pytest.raises(ExternalServiceError, match=r"no answer within 0\.3 s"):
         run_program(_python("import time; time.sleep(30)"), 0.3)
     assert time.monotonic() - started < 5  # far below the child's 30 s
+
+
+def test_the_runner_gives_its_child_no_stdin() -> None:
+    # Serve's own stdin is a pipe holding data here; the child must not read it.
+    read, write = os.pipe()
+    os.write(write, b"typed into the terminal")
+    os.close(write)
+    saved = os.dup(0)
+    os.dup2(read, 0)
+    try:
+        out = run_program(_python("import sys; print(repr(sys.stdin.read()))"), 5)
+    finally:
+        os.dup2(saved, 0)
+        os.close(saved)
+        os.close(read)
+    assert out == "''\n"
 
 
 def test_the_runner_refuses_output_that_is_not_utf8() -> None:
