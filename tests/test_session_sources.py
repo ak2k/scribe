@@ -400,12 +400,14 @@ async def test_shutdown_does_not_wait_for_a_fetch_in_flight() -> None:
         return ""
 
     sessions = SessionTerms([remote_source("box-a", runner=hung)], clock=lambda: NOW)
+    cancelled: float | None = None
     try:
         async with anyio.create_task_group() as group:
             group.start_soon(sessions.poll)
             assert await anyio.to_thread.run_sync(started.wait, 2)
             cancelled = time.monotonic()
             group.cancel_scope.cancel()
+        assert cancelled is not None
         assert time.monotonic() - cancelled < 0.5
     finally:
         release.set()
