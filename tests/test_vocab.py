@@ -80,6 +80,12 @@ def test_an_alias_rewrites_whole_words_case_insensitively_keeping_edge_punctuati
     assert _deliver(heard, vocab) == expected
 
 
+def test_an_alias_heard_with_punctuation_needs_that_punctuation() -> None:
+    vocab = Vocab(terms=(), aliases=(Alias(heard="ok.", written="okay"),))
+
+    assert _deliver("ok then, ok. done", vocab) == "ok then, okay done"
+
+
 def test_a_multi_word_alias_takes_the_longest_leftmost_run() -> None:
     vocab = Vocab(
         terms=(),
