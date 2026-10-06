@@ -119,7 +119,9 @@ pass them to xAI as keyterms. It writes under `$XDG_STATE_HOME/scribe`, else
   contributes only once its transcript shows it is interactive, so a new
   session's terms join from its first prompt rather than from its start, and
   headless (`claude -p`) sessions are left out. A Stop event refreshes a
-  session's terms without making it more recent.
+  session's terms without making it more recent. Its first line, the comment
+  `# expires <UTC time>`, says when its earliest session leaves the window, since
+  nothing rewrites the file until the next hook event.
 - `prompts.jsonl`: every prompt you submit, with time, host, session and
   directory. It holds your prompts verbatim; delete it whenever you like.
 - `terms/hook.log`: one line per failure, started afresh past 1 MB. The hook

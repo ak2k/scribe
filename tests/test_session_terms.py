@@ -335,7 +335,7 @@ def test_merged_file_fills_round_robin_newest_first_capped(tmp_path: Path) -> No
 
     write_merged(tmp_path / "terms", now=NOW)
 
-    lines = (tmp_path / "terms" / "current.txt").read_text().splitlines()
+    lines = _current(tmp_path / "terms")
     assert len(lines) == MERGED_CAP
     assert lines[:4] == ["shared_x", "mid_a", "t_0", "t_1"]
     assert "stale_term" not in lines
@@ -362,7 +362,7 @@ def test_merged_file_ranks_within_a_session_by_last_seen_then_count(tmp_path: Pa
 
     write_merged(tmp_path / "terms", now=NOW)
 
-    assert (tmp_path / "terms" / "current.txt").read_text().splitlines() == [
+    assert _current(tmp_path / "terms") == [
         "late_many",
         "other_t",
         "late_few",
@@ -417,7 +417,31 @@ def _event(
 
 
 def _current(terms_dir: Path) -> list[str]:
-    return (terms_dir / "current.txt").read_text().splitlines()
+    header, *lines = (terms_dir / "current.txt").read_text().splitlines()
+    assert header.startswith("# expires ")
+    return lines
+
+
+def test_merged_file_expires_when_its_first_session_leaves_the_window(tmp_path: Path) -> None:
+    sessions = tmp_path / "terms" / "sessions"
+    _store(sessions, _record("older", NOW - timedelta(minutes=10), ["older_term"]))
+    _store(sessions, _record("newer", NOW - timedelta(minutes=1), ["newer_term"]))
+    _store(sessions, _record("gone", NOW - timedelta(minutes=31), ["gone_term"]))
+
+    write_merged(tmp_path / "terms", now=NOW)
+
+    header, *lines = (tmp_path / "terms" / "current.txt").read_text().splitlines()
+    assert header == "# expires 2026-10-05T12:20:00+00:00"
+    assert lines == ["newer_term", "older_term"]
+    check_keyterms(lines)
+
+
+def test_an_empty_merged_file_expires_at_once(tmp_path: Path) -> None:
+    write_merged(tmp_path / "terms", now=NOW)
+
+    assert (tmp_path / "terms" / "current.txt").read_text() == (
+        "# expires 2026-10-05T12:00:00+00:00\n"
+    )
 
 
 def test_window_alone_drops_a_31_minute_old_session(tmp_path: Path) -> None:

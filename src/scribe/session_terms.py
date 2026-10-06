@@ -404,7 +404,9 @@ def write_merged(terms_dir: Path, *, now: datetime) -> None:
     """Rewrite `current.txt` from the recently active sessions; drop week-old records.
 
     The window's interactive sessions, newest rank time first, take turns filling
-    the slots, so one busy session cannot crowd out another.
+    the slots, so one busy session cannot crowd out another. The first line,
+    `# expires <time>`, is when the earliest of the file's sessions leaves the
+    window.
     """
     sessions = terms_dir / "sessions"
     records: list[SessionRecord] = []
@@ -436,20 +438,28 @@ def write_merged(terms_dir: Path, *, now: datetime) -> None:
         reverse=True,
     )
     queues = [
-        iter(sorted(terms, key=lambda t: (t.last_seen, t.count), reverse=True)) for _, terms in live
+        (ranked + WINDOW, iter(sorted(terms, key=lambda t: (t.last_seen, t.count), reverse=True)))
+        for ranked, terms in live
     ]
     merged: list[str] = []
+    leaves: list[datetime] = []
     while queues and len(merged) < MERGED_CAP:
-        for queue in list(queues):
+        for entry in list(queues):
             term = next(
-                (t.term for t in queue if t.term not in merged and _mergeable(t.term)), None
+                (t.term for t in entry[1] if t.term not in merged and _mergeable(t.term)), None
             )
             if term is None:
-                queues.remove(queue)
+                queues.remove(entry)
             elif len(merged) < MERGED_CAP:
                 merged.append(term)
+                leaves.append(entry[0])
+    # Without a later hook nothing rewrites the file, so it says when its first
+    # session leaves the window; a terms file reads the line as a comment.
+    expires = min(leaves, default=now).astimezone(UTC).isoformat()
     terms_dir.mkdir(parents=True, exist_ok=True)
-    _replace_atomically(terms_dir / "current.txt", "".join(f"{term}\n" for term in merged))
+    _replace_atomically(
+        terms_dir / "current.txt", f"# expires {expires}\n" + "".join(f"{t}\n" for t in merged)
+    )
 
 
 def _refusal(exc: ValidationError) -> str:
