@@ -515,8 +515,9 @@ def write_merged(terms_dir: Path, *, now: datetime) -> None:
     """Rewrite `current.txt` from the recently active sessions; drop week-old records.
 
     One block per interactive session in the window, newest rank time first: a
-    header `# session <id> ranked <time> expires <time>`, the expiry being when
-    the session leaves the window, then up to `MERGED_CAP` of its terms, best first.
+    header `# session <id> ranked <time> expires <time> {"cwd": ..., "titles": [...]}`,
+    the expiry being when the session leaves the window, then up to `MERGED_CAP`
+    of its terms, best first.
     """
     sessions = terms_dir / "sessions"
     records: list[SessionRecord] = []
