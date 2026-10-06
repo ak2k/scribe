@@ -308,7 +308,8 @@ class _Server:
         if isinstance(parsed, Response):
             return parsed
         fields, audio = parsed
-        vocab, session_counts = self.sessions.vocab(self.terms.current())
+        static = self.terms.current()
+        vocab, session_counts = self.sessions.vocab(static)
         workdir = Path(await anyio.to_thread.run_sync(tempfile.mkdtemp))
         dictated: _Dictation | None = None
         try:
@@ -345,7 +346,8 @@ class _Server:
             request=fields,
             text=result.text,
             xai_text=result.xai_text,
-            terms=list(vocab.terms),
+            # On disk a session term would outlive its window, so only the counts are kept.
+            terms=list(static.terms),
             session_terms=session_counts,
             aliases=[{"heard": alias.heard, "written": alias.written} for alias in vocab.aliases],
             edits=result.edits,

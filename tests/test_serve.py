@@ -213,7 +213,7 @@ async def test_the_keep_record_holds_no_session_term_only_its_count(tmp_path: Pa
     assert b"unspoken_project" in keyterms
     (kept,) = _kept(tmp_path)
     written = (kept / "result.json").read_text(encoding="utf-8")
-    for secret in ("unspoken_project", "kbx25", "b_term", "local_a", "a-s", "local-s", "/w"):
+    for secret in ("unspoken_project", "kbx25", "b_term", "local_a", "a-s", "local-s", "A tab"):
         assert secret not in written
     result = _json(kept / "result.json")
     assert result["terms"] == ["herdr", "VoiceInk"]
