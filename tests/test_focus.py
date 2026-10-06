@@ -144,6 +144,27 @@ def test_any_text_parses_to_a_sample_or_is_refused(text: str) -> None:
     assert answer is None or isinstance(answer, Tab)
 
 
+_LINE = st.text(st.characters(exclude_characters="\n"))
+
+
+@given(st.one_of(st.text(), st.builds(_front, _LINE, _LINE)))
+def test_any_query_output_leaves_the_poll_with_a_verdict(text: str) -> None:
+    focus = Focus(Osascript(text))
+
+    focus.refresh(lambda: NOW, lambda _now: [_block("s")])
+
+    assert focus.pick([_block("s")], NOW)[0] in {"error", "away", "miss", "hit", "ambiguous"}
+
+
+def test_a_tab_cwd_holding_a_nul_is_matched_as_reported() -> None:
+    mine, twin = _block("mine", cwd="/w\x00x"), _block("twin")
+    focus = Focus(Osascript(_front(TITLE, "/w\x00x")))
+
+    focus.refresh(lambda: NOW, lambda _now: [mine, twin])
+
+    assert focus.pick([mine, twin], NOW) == ("hit", mine)
+
+
 # An untitled tab picks nothing: a new session has no block yet, so its directory finds a sibling's.
 
 

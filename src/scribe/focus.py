@@ -136,7 +136,8 @@ def _resolved(cwd: str) -> str:
     # A tab reports the logical $PWD, a session its physical directory.
     try:
         return str(Path(cwd).resolve()) if cwd else ""
-    except (OSError, RuntimeError):
+    # A loop raises RuntimeError, a NUL byte ValueError.
+    except (OSError, RuntimeError, ValueError):
         return cwd
 
 
