@@ -500,16 +500,16 @@ def test_code_fragments_flags_caps_and_digit_led_tokens_are_dropped() -> None:
         "8-bit ~410K 5-minute 13-fix keep_me ~/notes.md"
     )
 
-    # "null" is the basename of "/dev/null": a basename needs no identifier shape.
-    assert extract_terms(text) == ["run_hook", "null", "keep_me", "notes.md", "~/notes.md"]
+    assert extract_terms(text) == ["run_hook", "keep_me", "notes.md", "~/notes.md"]
 
 
-def test_a_path_basename_needs_no_shape_but_still_the_drop_rules() -> None:
-    assert extract_terms("edit src/Makefile and src/README then a/b/x1") == [
+def test_a_capitalized_basename_needs_no_shape_but_still_the_drop_rules() -> None:
+    assert extract_terms("edit src/Makefile and src/README then a/b/x1 /dev/null") == [
         "Makefile",
         "src/Makefile",
         "src/README",
         "a/b/x1",
+        "/dev/null",
     ]
 
 

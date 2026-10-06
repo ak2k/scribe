@@ -184,9 +184,13 @@ def extract_terms(text: str) -> list[str]:
         if "://" in token or token.lower().startswith("www."):
             continue
         if "/" in token:
-            # A basename needs no identifier shape, so "Makefile" counts.
-            candidates = [token.rstrip("/").rsplit("/", 1)[-1], token]
-            terms.extend(term for term in candidates if _admissible(term))
+            base = token.rstrip("/").rsplit("/", 1)[-1]
+            # A capitalized basename such as "Makefile" needs no other identifier
+            # shape; a lowercase one such as "null" or "status" is an ordinary word.
+            if _admissible(base) and (base[0].isupper() or _identifier_shaped(base)):
+                terms.append(base)
+            if _admissible(token):
+                terms.append(token)
         elif _admissible(token) and _identifier_shaped(token):
             terms.append(token)
     return terms
