@@ -128,7 +128,9 @@ def snap(words: Sequence[str], terms: Sequence[str]) -> tuple[list[str], list[Ed
 
     Only a term ordinary speech cannot spell is a target (see `_target`), and a
     run is only ever replaced by a term with its exact letters and digits, and
-    only when the term holds, in order, the punctuation inside the run.
+    only when the term holds, in order, the punctuation inside the run. Of terms
+    sharing letters and digits, the first is the target, and a run already
+    spelled exactly as any term is left as it is.
 
     Returns:
         The snapped words and the edits made, in order.
@@ -138,12 +140,16 @@ def snap(words: Sequence[str], terms: Sequence[str]) -> tuple[list[str], list[Ed
     for term in terms:
         if _target(term):
             targets.setdefault(_key(term), term)
+    exact = frozenset(terms)
 
     def respell(run: str) -> str | None:
         term = targets.get(_key(run))
         # Punctuation the term lacks is a boundary the speaker made: "my voice. Ink".
         if term is None or not _in_order(_inner_punctuation(run), _inner_punctuation(term)):
             return None
+        # Two terms can share a key; one heard already spelled as written stays.
+        if _edges(run)[1] in exact:
+            return run
         return _wrap(run, term, term)
 
     return _rewrite(words, "snap", respell)

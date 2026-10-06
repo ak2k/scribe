@@ -1,8 +1,8 @@
 """Session vocabulary and the prompt log, kept by a Claude Code hook.
 
 Each hook event rebuilds one session's term record from the tail of its
-transcript; every update then rewrites one merged list, the terms of every
-recently active session, which a dictation server can pass to xAI as keyterms.
+transcript; every update then rewrites `current.txt`, one block of terms per
+recently active session, which a dictation server merges into xAI keyterms.
 Every submitted prompt is also logged, as truth for a later bake-off.
 """
 
@@ -15,8 +15,8 @@ import re
 import socket
 import tempfile
 from collections import Counter
-from contextlib import contextmanager
-from dataclasses import dataclass, field
+from contextlib import contextmanager, suppress
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -33,6 +33,8 @@ if TYPE_CHECKING:
 TAIL_BYTES = 256 * 1024
 MERGED_CAP = 60
 MIN_TERM_CHARS = 3
+# A terminal tab can lag a re-title, so a few earlier titles still identify the session.
+MAX_TITLES = 5
 WINDOW = timedelta(minutes=30)
 RETENTION = timedelta(days=7)
 LOG_LIMIT = 1024 * 1024
@@ -60,6 +62,10 @@ _KEY_PREFIX = re.compile(
     r"(?<![A-Za-z0-9])(?:gh[opusr]_|github_pat_|sk-|xai-|AKIA|xox[a-z]-)[A-Za-z0-9_-]{16,}"
 )
 _OPAQUE = re.compile(r"[A-Za-z0-9_-]{20,}")
+_BLOCK_HEADER = re.compile(
+    r"# session (?P<id>\S+) ranked (?P<ranked>\S+) expires (?P<expires>\S+) (?P<about>\{.*\})"
+)
+_SESSION_ID = r"^[A-Za-z0-9_-]{1,128}$"
 
 
 class HookInput(BaseModel):
@@ -70,7 +76,7 @@ class HookInput(BaseModel):
     model_config = ConfigDict(extra="ignore", frozen=True)
 
     # It names a file, so nothing that could leave the sessions directory.
-    session_id: str = Field(pattern=r"^[A-Za-z0-9_-]{1,128}$")
+    session_id: str = Field(pattern=_SESSION_ID)
     hook_event_name: str
     cwd: str
     transcript_path: str | None = None
@@ -98,6 +104,9 @@ class SessionRecord(BaseModel):
     ranked: AwareDatetime | None = None
     entrypoint: str | None = None
     terms: list[TermCount]
+    # Newest first; a title record can fall out of the tail, so both carry over.
+    custom_titles: list[str] = Field(default_factory=list[str])
+    ai_titles: list[str] = Field(default_factory=list[str])
 
 
 class _Part(BaseModel):
@@ -131,6 +140,8 @@ class _Record(BaseModel):
     origin: _Origin | None = None
     timestamp: datetime | None = None
     message: JsonValue = None
+    custom_title: str | None = Field(default=None, alias="customTitle")
+    ai_title: str | None = Field(default=None, alias="aiTitle")
 
 
 @dataclass
@@ -139,13 +150,93 @@ class _Transcript:
     branch: str | None = None
     entrypoint: str | None = None
     drifted: int = 0
+    # Oldest first, as the transcript holds them.
+    custom_titles: list[str] = field(default_factory=list[str])
+    ai_titles: list[str] = field(default_factory=list[str])
+
+
+@dataclass(frozen=True)
+class SessionBlock:
+    """One session's terms in `current.txt`, best first, with its place in the window."""
+
+    session_id: str
+    ranked: datetime
+    expires: datetime
+    terms: tuple[str, ...]
+    cwd: str
+    titles: tuple[str, ...]
+
+
+class _About(BaseModel):
+    """What a block header says of its session beyond its times."""
+
+    # DIVERGE: hosts upgrade at different times; an added header field must not black out a source
+    model_config = ConfigDict(extra="ignore", frozen=True)
+
+    cwd: str
+    titles: list[str]
+
+
+def xdg_home(environ: Mapping[str, str], variable: str, fallback: str, *, home: Path) -> Path:
+    """Return an XDG base directory: `variable` if it is absolute, else `home / fallback`."""
+    # The XDG spec has a relative value ignored, as if unset.
+    configured = Path(environ.get(variable, ""))
+    return configured if configured.is_absolute() else home / fallback
 
 
 def state_dir(environ: Mapping[str, str], *, home: Path) -> Path:
     """Return scribe's state directory under the XDG base directory rules."""
-    configured = environ.get("XDG_STATE_HOME", "")
-    base = Path(configured) if Path(configured).is_absolute() else home / ".local" / "state"
-    return base / "scribe"
+    return xdg_home(environ, "XDG_STATE_HOME", ".local/state", home=home) / "scribe"
+
+
+def _block_time(text: str) -> datetime | None:
+    try:
+        when = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    return when if when.tzinfo is not None else None
+
+
+def format_block(block: SessionBlock) -> str:
+    """Render one block of `current.txt`: its header line, then a line per term."""
+    # ASCII JSON escapes every line break and control character a title can hold.
+    about = json.dumps({"cwd": block.cwd, "titles": list(block.titles)}, ensure_ascii=True)
+    header = (
+        f"# session {block.session_id} ranked {block.ranked.astimezone(UTC).isoformat()}"
+        f" expires {block.expires.astimezone(UTC).isoformat()} {about}"
+    )
+    return "".join(f"{line}\n" for line in (header, *block.terms))
+
+
+def parse_blocks(text: str) -> list[SessionBlock]:
+    """Parse `current.txt`: per session, a `# session` header line, then its terms.
+
+    Raises:
+        InputValidationError: a `# session` line is malformed, or a term comes
+            before any header, as in a file an older hook wrote. The message
+            quotes nothing from the text.
+
+    """
+    # Each header with the terms read after it; a block is built once, at the end.
+    parts: list[tuple[SessionBlock, list[str]]] = []
+    for number, raw in enumerate(text.splitlines(), start=1):
+        line = raw.strip()
+        if line.startswith("# session "):
+            header = _BLOCK_HEADER.fullmatch(line)
+            ranked = expires = about = None
+            if header is not None and re.fullmatch(_SESSION_ID, header["id"]) is not None:
+                ranked, expires = _block_time(header["ranked"]), _block_time(header["expires"])
+                with suppress(ValidationError):
+                    about = _About.model_validate_json(header["about"])
+            if header is None or ranked is None or expires is None or about is None:
+                raise InputValidationError(f"line {number}: malformed session header")
+            head = SessionBlock(header["id"], ranked, expires, (), about.cwd, tuple(about.titles))
+            parts.append((head, []))
+        elif line and not line.startswith("#"):
+            if not parts:
+                raise InputValidationError(f"line {number}: a term before any session header")
+            parts[-1][1].append(line)
+    return [replace(head, terms=tuple(terms)) for head, terms in parts]
 
 
 def _opaque(term: str) -> bool:
@@ -270,6 +361,10 @@ def _read_transcript(lines: list[str]) -> _Transcript:
         if when is not None and when.tzinfo is None:
             when = when.replace(tzinfo=UTC)
         found.texts.extend((when, text) for text in texts)
+        if record.type == "custom-title" and record.custom_title:
+            found.custom_titles.append(record.custom_title)
+        elif record.type == "ai-title" and record.ai_title:
+            found.ai_titles.append(record.ai_title)
         found.branch = record.git_branch or found.branch
         found.entrypoint = record.entrypoint or found.entrypoint
     return found
@@ -309,6 +404,11 @@ def _previous(path: Path) -> SessionRecord | None:
         return SessionRecord.model_validate_json(path.read_bytes())
     except (OSError, ValidationError):
         return None
+
+
+def _recent(seen: list[str], carried: list[str]) -> list[str]:
+    """The newest distinct titles: `seen` oldest first, then `carried` newest first."""
+    return list(dict.fromkeys([*reversed(seen), *carried]))[:MAX_TITLES]
 
 
 def _session_record(
@@ -351,6 +451,8 @@ def _session_record(
         ranked=ranked,
         entrypoint=found.entrypoint or (previous.entrypoint if previous is not None else None),
         terms=_rank(tallies, seen, order),
+        custom_titles=_recent(found.custom_titles, previous.custom_titles if previous else []),
+        ai_titles=_recent(found.ai_titles, previous.ai_titles if previous else []),
     )
 
 
@@ -412,10 +514,10 @@ def _mergeable(term: str) -> bool:
 def write_merged(terms_dir: Path, *, now: datetime) -> None:
     """Rewrite `current.txt` from the recently active sessions; drop week-old records.
 
-    The window's interactive sessions, newest rank time first, take turns filling
-    the slots, so one busy session cannot crowd out another. The first line,
-    `# expires <time>`, is when the earliest of the file's sessions leaves the
-    window.
+    One block per interactive session in the window, newest rank time first: a
+    header `# session <id> ranked <time> expires <time> {"cwd": ..., "titles": [...]}`,
+    the expiry being when the session leaves the window, then up to `MERGED_CAP`
+    of its terms, best first.
     """
     sessions = terms_dir / "sessions"
     records: list[SessionRecord] = []
@@ -435,7 +537,7 @@ def write_merged(terms_dir: Path, *, now: datetime) -> None:
                 log_failure(terms_dir, now, f"{path.name} unreadable: {exc.error_count()} errors")
     live = sorted(
         (
-            (record.ranked, record.terms)
+            (record.ranked, record)
             for record in records
             if record.ranked is not None
             and record.ranked >= now - WINDOW
@@ -446,29 +548,22 @@ def write_merged(terms_dir: Path, *, now: datetime) -> None:
         key=lambda live: live[0],
         reverse=True,
     )
-    queues = [
-        (ranked + WINDOW, iter(sorted(terms, key=lambda t: (t.last_seen, t.count), reverse=True)))
-        for ranked, terms in live
-    ]
-    merged: list[str] = []
-    leaves: list[datetime] = []
-    while queues and len(merged) < MERGED_CAP:
-        for entry in list(queues):
-            term = next(
-                (t.term for t in entry[1] if t.term not in merged and _mergeable(t.term)), None
-            )
-            if term is None:
-                queues.remove(entry)
-            elif len(merged) < MERGED_CAP:
-                merged.append(term)
-                leaves.append(entry[0])
-    # Without a later hook nothing rewrites the file, so it says when its first
-    # session leaves the window; a terms file reads the line as a comment.
-    expires = min(leaves, default=now).astimezone(UTC).isoformat()
+    blocks: list[str] = []
+    for ranked, record in live:
+        best = sorted(record.terms, key=lambda t: (t.last_seen, t.count), reverse=True)
+        # Without a later hook nothing rewrites the file, so each block says when
+        # its session leaves the window; a terms file reads the header as a comment.
+        block = SessionBlock(
+            session_id=record.session_id,
+            ranked=ranked,
+            expires=ranked + WINDOW,
+            terms=tuple([t.term for t in best if _mergeable(t.term)][:MERGED_CAP]),
+            cwd=record.cwd,
+            titles=tuple(dict.fromkeys(record.custom_titles + record.ai_titles))[:MAX_TITLES],
+        )
+        blocks.append(format_block(block))
     terms_dir.mkdir(parents=True, exist_ok=True)
-    _replace_atomically(
-        terms_dir / "current.txt", f"# expires {expires}\n" + "".join(f"{t}\n" for t in merged)
-    )
+    _replace_atomically(terms_dir / "current.txt", "".join(blocks))
 
 
 def _refusal(exc: ValidationError) -> str:

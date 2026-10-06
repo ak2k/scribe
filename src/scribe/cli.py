@@ -2180,9 +2180,9 @@ def terms_hook() -> None:
     """Run as a Claude Code hook: read its JSON on stdin, keep the session's terms.
 
     Writes under $XDG_STATE_HOME/scribe (else ~/.local/state/scribe): the
-    session's terms in terms/sessions/, the merged list of the last 30 minutes'
-    sessions in terms/current.txt, and, on UserPromptSubmit, the prompt in
-    prompts.jsonl. Prints nothing and exits 0 whatever happens, since a
+    session's terms in terms/sessions/, the terms of the last 30 minutes'
+    sessions, one block each, in terms/current.txt, and, on UserPromptSubmit,
+    the prompt in prompts.jsonl. Prints nothing and exits 0 whatever happens, since a
     UserPromptSubmit hook's stdout becomes model context; failures go to
     terms/hook.log.
     """
@@ -2191,9 +2191,7 @@ def terms_hook() -> None:
 
 
 def _xdg_home(variable: str, fallback: str) -> Path:
-    # The XDG spec has a relative value ignored, as if unset.
-    value = Path(os.environ.get(variable, ""))
-    return value if value.is_absolute() else Path.home() / fallback
+    return session_terms.xdg_home(os.environ, variable, fallback, home=Path.home())
 
 
 @app.command(name="serve")
@@ -2213,6 +2211,15 @@ def serve_command(
         help="Where each dictation is kept. Default: $XDG_STATE_HOME/scribe/serve.",
     ),
     no_keep: bool = typer.Option(False, "--no-keep", help="Keep no dictation."),
+    session_terms_hosts: list[str] | None = typer.Option(
+        None,
+        "--session-terms-host",
+        metavar="HOST",
+        help="Also take session terms from HOST's hook, read over ssh. Repeatable.",
+    ),
+    no_session_terms: bool = typer.Option(
+        False, "--no-session-terms", help="Send no session terms, local or remote."
+    ),
 ) -> None:
     """Serve an OpenAI-compatible transcription endpoint for dictation apps.
 
@@ -2221,27 +2228,47 @@ def serve_command(
     and identifier spellings applied. Needs XAI_API_KEY. Only loopback clients
     that are not web pages are served. Each dictation (audio, xAI's reply and a
     record of the result) is kept under --keep, newest 1000.
+
+    The terms of your live Claude Code sessions follow the file's, as written by
+    `scribe terms hook` here and on each --session-terms-host, which is polled
+    over ssh in the background; GET /health shows each source's counts.
     """
     # Imported here so no other command pays for loading the server stack.
+    from scribe import session_sources  # noqa: PLC0415  # see above
     from scribe.serve import is_loopback  # noqa: PLC0415  # see above
     from scribe.serve import run as run_server  # noqa: PLC0415  # see above
 
     configure()
+    hosts = list(dict.fromkeys(session_terms_hosts or []))
+    state = session_terms.state_dir(os.environ, home=Path.home())
     try:
         if not is_loopback(host):
             raise InputValidationError(f"--host {host} is not a loopback address")
         if keep is not None and no_keep:
             raise InputValidationError("--keep and --no-keep cannot both be given")
+        if hosts and no_session_terms:
+            raise InputValidationError(
+                "--session-terms-host and --no-session-terms cannot both be given"
+            )
+        for name in hosts:
+            session_sources.check_host(name)
         api_key = resolve_api_key()
         default_terms = _xdg_home("XDG_CONFIG_HOME", ".config") / "scribe" / "terms.txt"
         vocab = TermsFile(terms or default_terms, required=terms is not None)
     except AppError as exc:
         _fail(exc)
-    default_keep = _xdg_home("XDG_STATE_HOME", ".local/state") / "scribe" / "serve"
+    sources = [
+        session_sources.local_source(state / "terms" / "current.txt"),
+        *(
+            session_sources.remote_source(name, runner=session_sources.run_program)
+            for name in hosts
+        ),
+    ]
     run_server(
         api_key=api_key,
         terms=vocab,
-        keep=None if no_keep else keep or default_keep,
+        session_terms=session_sources.SessionTerms([] if no_session_terms else sources),
+        keep=None if no_keep else keep or state / "serve",
         host=host,
         port=port,
     )

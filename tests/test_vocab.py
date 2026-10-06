@@ -142,6 +142,19 @@ def test_snapping_records_no_edit_where_the_words_already_match() -> None:
     assert edits == []
 
 
+def test_a_run_spelled_exactly_as_one_term_is_never_respelled_to_another() -> None:
+    terms = ("foo_bar", "fooBar", "foo bar")
+
+    assert snap(["fooBar,", "foo_bar", "foo", "bar"], terms) == (
+        ["fooBar,", "foo_bar", "foo", "bar"],
+        [],
+    )
+    assert snap(["foo", "bar"], terms[:2]) == (
+        ["foo_bar"],
+        [Edit(rule="snap", before="foo bar", after="foo_bar")],
+    )
+
+
 _WORD = st.text(alphabet="abAB1. -/,", min_size=1, max_size=6).filter(lambda w: " " not in w)
 
 

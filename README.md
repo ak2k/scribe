@@ -113,15 +113,19 @@ pass them to xAI as keyterms. It writes under `$XDG_STATE_HOME/scribe`, else
 
 - `terms/sessions/<session_id>.json`: one session's terms, with counts;
   deleted after 7 days.
-- `terms/current.txt`: up to 60 terms, one per line, usable as a terms file as
-  is. Every interactive session you prompted or started in the last 30 minutes
-  contributes, the sessions taking turns, most recent first. A session
-  contributes only once its transcript shows it is interactive, so a new
-  session's terms join from its first prompt rather than from its start, and
-  headless (`claude -p`) sessions are left out. A Stop event refreshes a
-  session's terms without making it more recent. Its first line, the comment
-  `# expires <UTC time>`, says when its earliest session leaves the window, since
-  nothing rewrites the file until the next hook event.
+- `terms/current.txt`: one block per interactive session you prompted or
+  started in the last 30 minutes, most recent first. A block opens with the
+  comment `# session <id> ranked <UTC time> expires <UTC time> {"cwd": ...,
+  "titles": [...]}` (when you last prompted or started it, when it leaves the
+  window, its directory, and its 5 latest titles, `/rename` titles before
+  automatic ones), then up to 60 of its terms, one per line, best first. The
+  cap is per block, so the file as a whole can hold more terms than xAI
+  accepts; `scribe serve` reads it block by block. Nothing rewrites the file
+  until the next hook event, so its reader drops a block once it expires. A
+  session contributes only once its transcript shows it is interactive, so a
+  new session's terms join from its first prompt rather than from its start,
+  and headless (`claude -p`) sessions are left out. A Stop event
+  refreshes a session's terms without making it more recent.
 - `prompts.jsonl`: every prompt you submit, with time, host, session and
   directory. It holds your prompts verbatim; delete it whenever you like.
 - `terms/hook.log`: one line per failure, started afresh past 1 MB. The hook
@@ -204,6 +208,16 @@ term comes back as the term ("voice ink" becomes "VoiceInk"). Identifier-shaped
 means a digit, a capital after a lowercase letter, or punctuation inside it, and
 at least 3 letters and digits; so `TODO`, `c++` and `.bashrc` are sent to xAI but
 never snapped to. Use an alias for those. The file is re-read when it changes.
+
+The terms of your live Claude Code sessions follow the file's, snapped the same
+way: from this machine's `terms/current.txt` (see above) and from each
+`--session-terms-host HOST`, whose file is read over
+`ssh -o BatchMode=yes HOST` every 3 s in the background, so a dictation never
+waits on it. A host that stops answering keeps its last list until each
+session's block expires. Sessions take turns, most recently prompted first, up
+to xAI's 100 keyterms; the file's terms always go first. `--no-session-terms`
+sends none. `GET /health` shows each source's live sessions, terms and the age
+of its last read.
 
 Each dictation (the audio, xAI's reply and `result.json`) is kept under
 `--keep`, default `~/.local/state/scribe/serve`, newest 1000; `--no-keep`
