@@ -10,6 +10,7 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 import anyio
+import anyio.from_thread
 import anyio.to_thread
 import pytest
 from hypothesis import event, given
@@ -422,6 +423,36 @@ async def test_shutdown_does_not_wait_for_a_fetch_in_flight() -> None:
             group.cancel_scope.cancel()
         assert cancelled is not None
         assert time.monotonic() - cancelled < 0.5
+    finally:
+        release.set()
+
+
+@pytest.mark.anyio
+async def test_fetches_in_flight_never_hold_a_requests_worker_thread() -> None:
+    hosts = anyio.to_thread.current_default_thread_limiter().total_tokens
+    lock, release, all_started = threading.Lock(), threading.Event(), anyio.Event()
+    started = 0
+
+    def hung(_argv: Sequence[str], _timeout: float) -> str:
+        nonlocal started
+        with lock:
+            started += 1
+            last = started == hosts
+        if last:
+            anyio.from_thread.run_sync(all_started.set)
+        release.wait(2)
+        return ""
+
+    sessions = SessionTerms(
+        [remote_source(f"box-{n}", runner=hung) for n in range(hosts)], clock=lambda: NOW
+    )
+    try:
+        async with anyio.create_task_group() as group:
+            group.start_soon(sessions.poll)
+            await all_started.wait()
+            with anyio.fail_after(0.5):
+                assert await anyio.to_thread.run_sync(lambda: "served") == "served"
+            group.cancel_scope.cancel()
     finally:
         release.set()
 

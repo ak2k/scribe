@@ -190,9 +190,34 @@ async def test_session_terms_follow_the_static_terms_newest_session_first(
     assert keyterms == [b"herdr", b"VoiceInk", b"kbx25", b"b_term", b"local_a", b"local_b"]
     (kept,) = _kept(tmp_path)
     result = _json(kept / "result.json")
-    assert result["terms"] == [term.decode() for term in keyterms]
+    assert result["terms"] == ["herdr", "VoiceInk"]
     assert result["session_terms"] == {"local file": 2, "box-a": 1, "box-b": 1}
     assert "A tab" not in (kept / "result.json").read_text(encoding="utf-8")
+
+
+async def test_the_keep_record_holds_no_session_term_only_its_count(tmp_path: Path) -> None:
+    heard = ["ordinary", "dictation"]
+    payload = {
+        "text": " ".join(heard),
+        "duration": 1.0,
+        "words": [{"text": text, "start": n, "end": n + 0.5} for n, text in enumerate(heard)],
+    }
+    xai = Xai(httpx.Response(200, json=payload))
+    unspoken = _session_file(("a-s", NOW - timedelta(minutes=1), ["kbx25", "unspoken_project"]))
+    sessions = _sessions(tmp_path, **{**_two_hosts(), "box-a": Ssh(unspoken)})
+    async with _client(xai, tmp_path, terms="herdr\nVoiceInk\n", sessions=sessions) as client:
+        response = await _post(client)
+
+    assert response.json() == {"text": "ordinary dictation"}
+    keyterms = [body for name, body in _fields(xai.seen[0]) if name == "keyterm"]
+    assert b"unspoken_project" in keyterms
+    (kept,) = _kept(tmp_path)
+    written = (kept / "result.json").read_text(encoding="utf-8")
+    for secret in ("unspoken_project", "kbx25", "b_term", "local_a", "a-s", "local-s", "/w"):
+        assert secret not in written
+    result = _json(kept / "result.json")
+    assert result["terms"] == ["herdr", "VoiceInk"]
+    assert result["session_terms"] == {"local file": 2, "box-a": 2, "box-b": 1}
 
 
 async def test_session_terms_are_snapped_like_static_terms(tmp_path: Path) -> None:
