@@ -334,7 +334,8 @@ def test_a_local_file_that_is_not_utf8_contributes_nothing(tmp_path: Path) -> No
         source.refresh(lambda: NOW)
 
     assert source.live(NOW) == ()
-    assert [str(entry["error"]).count(str(path)) for entry in logs] == [1]
+    cause = "'utf-8' codec can't decode byte 0xff in position 0: invalid start byte"
+    assert [entry["error"] for entry in logs] == [f"cannot read {path}: {cause}"]
 
 
 def test_a_blocks_expiry_ages_it_out_even_while_its_host_is_down() -> None:
