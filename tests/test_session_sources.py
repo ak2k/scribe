@@ -295,13 +295,16 @@ def test_the_local_file_is_read_again_only_when_it_changes(tmp_path: Path) -> No
 
 
 def test_a_missing_local_file_contributes_nothing(tmp_path: Path) -> None:
-    source = local_source(tmp_path / "absent.txt")
+    path = tmp_path / "absent.txt"
+    source = local_source(path)
 
     with capture_logs() as logs:
         source.refresh(lambda: NOW)
 
     assert source.live(NOW) == ()
-    assert [entry["event"] for entry in logs] == ["serve.session_terms_failed"]
+    assert [(entry["event"], entry["error"]) for entry in logs] == [
+        ("serve.session_terms_failed", f"cannot read {path}: No such file or directory")
+    ]
 
 
 def test_a_blocks_expiry_ages_it_out_even_while_its_host_is_down() -> None:
