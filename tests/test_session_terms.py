@@ -9,32 +9,34 @@ import threading
 import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import IO, TYPE_CHECKING
+from typing import IO
 
+import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 from typer.testing import CliRunner
 
 from scribe import session_terms
 from scribe.cli import app
+from scribe.errors import InputValidationError
 from scribe.session_terms import (
     LOG_LIMIT,
     MERGED_CAP,
     TAIL_BYTES,
+    SessionBlock,
     SessionRecord,
     TermCount,
     extract_terms,
     log_failure,
+    parse_blocks,
     read_tail,
     repo_name,
     run_hook,
     state_dir,
     write_merged,
 )
+from scribe.vocab import parse_terms
 from scribe.xai_stt import check_keyterms
-
-if TYPE_CHECKING:
-    import pytest
 
 runner = CliRunner()
 NOW = datetime(2026, 10, 5, 12, 0, tzinfo=UTC)
@@ -338,7 +340,7 @@ def _store(sessions: Path, record: SessionRecord) -> Path:
     return path
 
 
-def test_merged_file_fills_round_robin_newest_first_capped(tmp_path: Path) -> None:
+def test_each_session_block_is_newest_first_and_capped(tmp_path: Path) -> None:
     sessions = tmp_path / "terms" / "sessions"
     _store(sessions, _record("old", NOW - timedelta(minutes=31), ["stale_term"]))
     _store(sessions, _record("mid", NOW - timedelta(minutes=10), ["mid_a", "shared_x"]))
@@ -349,11 +351,12 @@ def test_merged_file_fills_round_robin_newest_first_capped(tmp_path: Path) -> No
 
     write_merged(tmp_path / "terms", now=NOW)
 
-    lines = _current(tmp_path / "terms")
-    assert len(lines) == MERGED_CAP
-    assert lines[:4] == ["shared_x", "mid_a", "t_0", "t_1"]
-    assert "stale_term" not in lines
-    check_keyterms(lines)
+    new, mid = _blocks(tmp_path / "terms")
+    assert new.session_id == "new"
+    assert new.terms[:3] == ("shared_x", "t_0", "t_1")
+    assert len(new.terms) == MERGED_CAP
+    assert (mid.session_id, mid.terms) == ("mid", ("mid_a", "shared_x"))
+    check_keyterms(new.terms)
 
 
 def test_merged_file_ranks_within_a_session_by_last_seen_then_count(tmp_path: Path) -> None:
@@ -376,12 +379,7 @@ def test_merged_file_ranks_within_a_session_by_last_seen_then_count(tmp_path: Pa
 
     write_merged(tmp_path / "terms", now=NOW)
 
-    assert _current(tmp_path / "terms") == [
-        "late_many",
-        "other_t",
-        "late_few",
-        "early_many",
-    ]
+    assert _current(tmp_path / "terms") == ["late_many", "late_few", "early_many", "other_t"]
 
 
 def test_records_older_than_a_week_are_deleted(tmp_path: Path) -> None:
@@ -439,13 +437,15 @@ def _event(
     )
 
 
+def _blocks(terms_dir: Path) -> list[SessionBlock]:
+    return parse_blocks((terms_dir / "current.txt").read_text())
+
+
 def _current(terms_dir: Path) -> list[str]:
-    header, *lines = (terms_dir / "current.txt").read_text().splitlines()
-    assert header.startswith("# expires ")
-    return lines
+    return [term for block in _blocks(terms_dir) for term in block.terms]
 
 
-def test_merged_file_expires_when_its_first_session_leaves_the_window(tmp_path: Path) -> None:
+def test_each_session_block_says_when_that_session_leaves_the_window(tmp_path: Path) -> None:
     sessions = tmp_path / "terms" / "sessions"
     _store(sessions, _record("older", NOW - timedelta(minutes=10), ["older_term"]))
     _store(sessions, _record("newer", NOW - timedelta(minutes=1), ["newer_term"]))
@@ -453,18 +453,63 @@ def test_merged_file_expires_when_its_first_session_leaves_the_window(tmp_path: 
 
     write_merged(tmp_path / "terms", now=NOW)
 
-    header, *lines = (tmp_path / "terms" / "current.txt").read_text().splitlines()
-    assert header == "# expires 2026-10-05T12:20:00+00:00"
-    assert lines == ["newer_term", "older_term"]
-    check_keyterms(lines)
+    assert (tmp_path / "terms" / "current.txt").read_text().splitlines() == [
+        "# session newer ranked 2026-10-05T11:59:00+00:00 expires 2026-10-05T12:29:00+00:00",
+        "newer_term",
+        "# session older ranked 2026-10-05T11:50:00+00:00 expires 2026-10-05T12:20:00+00:00",
+        "older_term",
+    ]
+    assert parse_blocks((tmp_path / "terms" / "current.txt").read_text()) == [
+        SessionBlock(
+            "newer", NOW - timedelta(minutes=1), NOW + timedelta(minutes=29), ("newer_term",)
+        ),
+        SessionBlock(
+            "older", NOW - timedelta(minutes=10), NOW + timedelta(minutes=20), ("older_term",)
+        ),
+    ]
 
 
-def test_an_empty_merged_file_expires_at_once(tmp_path: Path) -> None:
+def test_no_session_in_the_window_is_an_empty_file(tmp_path: Path) -> None:
     write_merged(tmp_path / "terms", now=NOW)
 
-    assert (tmp_path / "terms" / "current.txt").read_text() == (
-        "# expires 2026-10-05T12:00:00+00:00\n"
+    assert (tmp_path / "terms" / "current.txt").read_text() == ""
+    assert _blocks(tmp_path / "terms") == []
+
+
+def test_every_terms_file_reader_takes_each_block_header_as_a_comment(tmp_path: Path) -> None:
+    _store(tmp_path / "terms" / "sessions", _record("s", NOW, ["one_term"]))
+
+    write_merged(tmp_path / "terms", now=NOW)
+
+    vocab = parse_terms((tmp_path / "terms" / "current.txt").read_text(), where="current.txt")
+    assert vocab.terms == ("one_term",)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "# expires 2026-10-05T12:00:00+00:00\nold_term\n",
+        "plain_term\n",
+        "# session s ranked 2026-10-05T12:00:00 expires 2026-10-05T12:30:00+00:00\n",
+        "# session s ranked 2026-10-05T12:00:00+00:00 expires soon\n",
+        "# session s/../x ranked 2026-10-05T12:00:00+00:00 expires 2026-10-05T12:30:00+00:00\n",
+    ],
+)
+def test_text_that_is_not_session_blocks_is_refused(text: str) -> None:
+    with pytest.raises(InputValidationError):
+        parse_blocks(text)
+
+
+def test_blank_lines_and_other_comments_are_skipped() -> None:
+    text = (
+        "# written by a test\n\n"
+        "# session s ranked 2026-10-05T12:00:00+00:00 expires 2026-10-05T12:30:00+00:00\n"
+        "  a_term  \n\n# aside\nb_term\n"
     )
+
+    (block,) = parse_blocks(text)
+
+    assert block.terms == ("a_term", "b_term")
 
 
 def test_window_alone_drops_a_31_minute_old_session(tmp_path: Path) -> None:
@@ -490,7 +535,7 @@ def test_no_merged_line_reads_as_an_alias_or_a_comment(tmp_path: Path) -> None:
     assert [line for line in lines if "=>" in line or line.startswith("#")] == []
 
 
-def test_a_second_active_session_keeps_some_slots(tmp_path: Path) -> None:
+def test_a_busier_session_does_not_shorten_another_sessions_block(tmp_path: Path) -> None:
     sessions = tmp_path / "terms" / "sessions"
     mine = [f"mine_{n}" for n in range(100)]
     _store(sessions, _record("dictated", NOW - timedelta(minutes=2), mine))
@@ -498,9 +543,9 @@ def test_a_second_active_session_keeps_some_slots(tmp_path: Path) -> None:
 
     write_merged(tmp_path / "terms", now=NOW)
 
-    lines = _current(tmp_path / "terms")
-    assert lines[:4] == ["worker_0", "mine_0", "worker_1", "mine_1"]
-    assert len([line for line in lines if line.startswith("mine_")]) == MERGED_CAP // 2
+    worker, dictated = _blocks(tmp_path / "terms")
+    assert worker.terms[:2] == ("worker_0", "worker_1")
+    assert dictated.terms == tuple(mine[:MERGED_CAP])
 
 
 def test_stop_updates_terms_but_not_the_rank_time(tmp_path: Path) -> None:

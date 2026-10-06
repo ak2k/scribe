@@ -2180,9 +2180,9 @@ def terms_hook() -> None:
     """Run as a Claude Code hook: read its JSON on stdin, keep the session's terms.
 
     Writes under $XDG_STATE_HOME/scribe (else ~/.local/state/scribe): the
-    session's terms in terms/sessions/, the merged list of the last 30 minutes'
-    sessions in terms/current.txt, and, on UserPromptSubmit, the prompt in
-    prompts.jsonl. Prints nothing and exits 0 whatever happens, since a
+    session's terms in terms/sessions/, the terms of the last 30 minutes'
+    sessions, one block each, in terms/current.txt, and, on UserPromptSubmit,
+    the prompt in prompts.jsonl. Prints nothing and exits 0 whatever happens, since a
     UserPromptSubmit hook's stdout becomes model context; failures go to
     terms/hook.log.
     """
@@ -2191,9 +2191,7 @@ def terms_hook() -> None:
 
 
 def _xdg_home(variable: str, fallback: str) -> Path:
-    # The XDG spec has a relative value ignored, as if unset.
-    value = Path(os.environ.get(variable, ""))
-    return value if value.is_absolute() else Path.home() / fallback
+    return session_terms.xdg_home(os.environ, variable, fallback, home=Path.home())
 
 
 @app.command(name="serve")
