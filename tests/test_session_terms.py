@@ -739,6 +739,19 @@ def test_credential_shaped_tokens_are_not_terms() -> None:
     assert extract_terms(text) == ["xai-stt", "task-notification-producer-x"]
 
 
+def test_a_path_holding_a_credential_contributes_nothing() -> None:
+    # AWS's documented example secret access key: its slashes made it read as a path.
+    text = (
+        "use wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY and src/AKIAIOSFODNN7EXAMPLE/run.py "
+        "or ~/keys/aB3dE5gH7jK9mN1pQ3sT5/run.py"
+    )
+
+    assert extract_terms(text + " but src/pkg/sprocket_io.py stays") == [
+        "sprocket_io.py",
+        "src/pkg/sprocket_io.py",
+    ]
+
+
 def test_log_failure_never_raises(tmp_path: Path) -> None:
     log_failure(tmp_path, NOW, "file \udcff.json unreadable")
 

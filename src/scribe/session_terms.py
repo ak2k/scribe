@@ -148,12 +148,18 @@ def state_dir(environ: Mapping[str, str], *, home: Path) -> Path:
     return base / "scribe"
 
 
-def _credential_shaped(term: str) -> bool:
-    if _KEY_PREFIX.search(term):
-        return True
+def _opaque(term: str) -> bool:
     return bool(_OPAQUE.fullmatch(term)) and all(
         any(test(char) for char in term) for test in (str.isupper, str.islower, str.isdigit)
     )
+
+
+def _credential_shaped(term: str) -> bool:
+    if _KEY_PREFIX.search(term):
+        return True
+    # Base64 key material holds "/" and "+", so a secret can pass for a path.
+    joined = term.replace("/", "").replace("+", "")
+    return _opaque(joined) or any(_opaque(segment) for segment in term.split("/"))
 
 
 def _admissible(term: str) -> bool:
@@ -184,6 +190,8 @@ def extract_terms(text: str) -> list[str]:
         if "://" in token or token.lower().startswith("www."):
             continue
         if "/" in token:
+            if _credential_shaped(token):
+                continue
             base = token.rstrip("/").rsplit("/", 1)[-1]
             # A capitalized basename such as "Makefile" needs no other identifier
             # shape; a lowercase one such as "null" or "status" is an ordinary word.
