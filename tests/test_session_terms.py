@@ -343,7 +343,7 @@ def _store(sessions: Path, record: SessionRecord) -> Path:
 
 def test_each_session_block_is_newest_first_and_capped(tmp_path: Path) -> None:
     sessions = tmp_path / "terms" / "sessions"
-    _store(sessions, _record("old", NOW - timedelta(minutes=31), ["stale_term"]))
+    _store(sessions, _record("old", NOW - timedelta(hours=24, minutes=1), ["stale_term"]))
     _store(sessions, _record("mid", NOW - timedelta(minutes=10), ["mid_a", "shared_x"]))
     _store(
         sessions,
@@ -450,7 +450,7 @@ def test_each_session_block_says_when_that_session_leaves_the_window(tmp_path: P
     sessions = tmp_path / "terms" / "sessions"
     _store(sessions, _record("older", NOW - timedelta(minutes=10), ["older_term"]))
     _store(sessions, _record("newer", NOW - timedelta(minutes=1), ["newer_term"]))
-    _store(sessions, _record("gone", NOW - timedelta(minutes=31), ["gone_term"]))
+    _store(sessions, _record("gone", NOW - timedelta(hours=24, minutes=1), ["gone_term"]))
 
     write_merged(tmp_path / "terms", now=NOW)
 
@@ -535,14 +535,40 @@ def test_blank_lines_and_other_comments_are_skipped() -> None:
     assert block.terms == ("a_term", "b_term")
 
 
-def test_window_alone_drops_a_31_minute_old_session(tmp_path: Path) -> None:
+def test_the_reach_alone_drops_a_session_ranked_24_h_and_a_minute_ago(tmp_path: Path) -> None:
     sessions = tmp_path / "terms" / "sessions"
-    _store(sessions, _record("old", NOW - timedelta(minutes=31), ["stale_term"]))
+    _store(sessions, _record("old", NOW - timedelta(hours=24, minutes=1), ["stale_term"]))
     _store(sessions, _record("new", NOW - timedelta(minutes=1), ["fresh_term"]))
 
     write_merged(tmp_path / "terms", now=NOW)
 
     assert _current(tmp_path / "terms") == ["fresh_term"]
+
+
+def test_a_session_ranked_31_minutes_ago_keeps_its_block_with_its_own_past_expiry(
+    tmp_path: Path,
+) -> None:
+    sessions = tmp_path / "terms" / "sessions"
+    _store(sessions, _record("expired", NOW - timedelta(minutes=31), ["expired_term"]))
+    _store(sessions, _record("new", NOW - timedelta(minutes=1), ["fresh_term"]))
+
+    write_merged(tmp_path / "terms", now=NOW)
+
+    new, expired = _blocks(tmp_path / "terms")
+    assert (new.session_id, expired.session_id) == ("new", "expired")
+    assert expired.expires == NOW - timedelta(minutes=1)
+    assert expired.terms == ("expired_term",)
+
+
+def test_a_session_file_updated_within_24_h_is_parsed(tmp_path: Path) -> None:
+    sessions = tmp_path / "terms" / "sessions"
+    path = _store(sessions, _record("day_old", NOW - timedelta(hours=23), ["day_term"]))
+    old = (NOW - timedelta(hours=23)).timestamp()
+    os.utime(path, (old, old))
+
+    write_merged(tmp_path / "terms", now=NOW)
+
+    assert _current(tmp_path / "terms") == ["day_term"]
 
 
 def test_no_merged_line_reads_as_an_alias_or_a_comment(tmp_path: Path) -> None:
@@ -637,9 +663,9 @@ def test_a_delayed_hook_from_another_session_does_not_restore_expired_terms(
         )
 
     hook("a", NOW, NOW, "see alpha_term")
-    expired = NOW + timedelta(minutes=30, seconds=1)
+    expired = NOW + timedelta(hours=24, seconds=1)
     hook("c", expired, expired, "see charlie_term")
-    # Taken before c's hook, processed after it: a's session has left the window by then.
+    # Taken before c's hook, processed after it: a's session is out of reach by then.
     hook("b", expired - timedelta(seconds=2), expired + timedelta(seconds=1), "see bravo_term")
 
     assert "alpha_term" not in _current(tmp_path / "terms")
@@ -859,7 +885,7 @@ def test_a_stale_session_file_is_not_parsed(tmp_path: Path) -> None:
     fresh_claim = _store(sessions, _record("stale", NOW, ["claims_fresh"]))
     broken = sessions / "broken.json"
     broken.write_text("{")
-    old = (NOW - timedelta(minutes=31)).timestamp()
+    old = (NOW - timedelta(hours=24, minutes=1)).timestamp()
     for path in (fresh_claim, broken):
         os.utime(path, (old, old))
 

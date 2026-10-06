@@ -114,14 +114,16 @@ pass them to xAI as keyterms. It writes under `$XDG_STATE_HOME/scribe`, else
 - `terms/sessions/<session_id>.json`: one session's terms, with counts;
   deleted after 7 days.
 - `terms/current.txt`: one block per interactive session you prompted or
-  started in the last 30 minutes, most recent first. A block opens with the
+  started in the last 24 hours, most recent first. A block opens with the
   comment `# session <id> ranked <UTC time> expires <UTC time> {"cwd": ...,
-  "titles": [...]}` (when you last prompted or started it, when it leaves the
-  window, its directory, and its 5 latest titles, `/rename` titles before
+  "titles": [...]}` (when you last prompted or started it, 30 minutes after
+  that, its directory, and its 5 latest titles, `/rename` titles before
   automatic ones), then up to 60 of its terms, one per line, best first. The
   cap is per block, so the file as a whole can hold more terms than xAI
   accepts; `scribe serve` reads it block by block. Nothing rewrites the file
-  until the next hook event, so its reader drops a block once it expires. A
+  until the next hook event, so its reader drops a block once it expires;
+  only the block of the session you are dictating into still counts after
+  its expiry (see `scribe serve` below). A
   session contributes only once its transcript shows it is interactive, so a
   new session's terms join from its first prompt rather than from its start,
   and headless (`claude -p`) sessions are left out. A Stop event

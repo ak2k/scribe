@@ -2180,7 +2180,7 @@ def terms_hook() -> None:
     """Run as a Claude Code hook: read its JSON on stdin, keep the session's terms.
 
     Writes under $XDG_STATE_HOME/scribe (else ~/.local/state/scribe): the
-    session's terms in terms/sessions/, the terms of the last 30 minutes'
+    session's terms in terms/sessions/, the terms of the last 24 hours'
     sessions, one block each, in terms/current.txt, and, on UserPromptSubmit,
     the prompt in prompts.jsonl. Prints nothing and exits 0 whatever happens, since a
     UserPromptSubmit hook's stdout becomes model context; failures go to

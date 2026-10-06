@@ -517,10 +517,10 @@ def _mergeable(term: str) -> bool:
 def write_merged(terms_dir: Path, *, now: datetime) -> None:
     """Rewrite `current.txt` from the recently active sessions; drop week-old records.
 
-    One block per interactive session in the window, newest rank time first: a
-    header `# session <id> ranked <time> expires <time> {"cwd": ..., "titles": [...]}`,
-    the expiry being when the session leaves the window, then up to `MERGED_CAP`
-    of its terms, best first.
+    One block per interactive session ranked within `REACH`, newest rank time
+    first: a header `# session <id> ranked <time> expires <time> {"cwd": ...,
+    "titles": [...]}`, the expiry being when the session leaves the window,
+    which may be past, then up to `MERGED_CAP` of its terms, best first.
     """
     sessions = terms_dir / "sessions"
     records: list[SessionRecord] = []
@@ -532,8 +532,8 @@ def write_merged(terms_dir: Path, *, now: datetime) -> None:
         if modified < (now - RETENTION).timestamp():
             path.unlink(missing_ok=True)
         # A record is written when it is updated, after its rank time, so an old
-        # file cannot be in the window and need not be parsed.
-        elif path.suffix == ".json" and modified >= (now - WINDOW).timestamp():
+        # file cannot be within reach and need not be parsed.
+        elif path.suffix == ".json" and modified >= (now - REACH).timestamp():
             try:
                 records.append(SessionRecord.model_validate_json(path.read_bytes()))
             except ValidationError as exc:
@@ -543,7 +543,7 @@ def write_merged(terms_dir: Path, *, now: datetime) -> None:
             (record.ranked, record)
             for record in records
             if record.ranked is not None
-            and record.ranked >= now - WINDOW
+            and record.ranked >= now - REACH
             # Unknown is not interactive: a headless worker's first events can
             # come before its transcript, and later ones may never run.
             and record.entrypoint == _INTERACTIVE
