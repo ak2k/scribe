@@ -165,14 +165,12 @@ def state_dir(environ: Mapping[str, str], *, home: Path) -> Path:
     return xdg_home(environ, "XDG_STATE_HOME", ".local/state", home=home) / "scribe"
 
 
-def _block_time(text: str) -> datetime:
+def _block_time(text: str) -> datetime | None:
     try:
         when = datetime.fromisoformat(text)
-    except ValueError as exc:
-        raise InputValidationError(f"{text!r} is not an ISO time") from exc
-    if when.tzinfo is None:
-        raise InputValidationError(f"{text!r} names no time zone")
-    return when
+    except ValueError:
+        return None
+    return when if when.tzinfo is not None else None
 
 
 def parse_blocks(text: str) -> list[SessionBlock]:
@@ -180,7 +178,8 @@ def parse_blocks(text: str) -> list[SessionBlock]:
 
     Raises:
         InputValidationError: a `# session` line is malformed, or a term comes
-            before any header, as in a file an older hook wrote.
+            before any header, as in a file an older hook wrote. The message
+            quotes nothing from the text.
 
     """
     blocks: list[SessionBlock] = []
@@ -188,9 +187,11 @@ def parse_blocks(text: str) -> list[SessionBlock]:
         line = raw.strip()
         if line.startswith("# session "):
             header = _BLOCK_HEADER.fullmatch(line)
-            if header is None or re.fullmatch(_SESSION_ID, header["id"]) is None:
+            ranked = expires = None
+            if header is not None and re.fullmatch(_SESSION_ID, header["id"]) is not None:
+                ranked, expires = _block_time(header["ranked"]), _block_time(header["expires"])
+            if header is None or ranked is None or expires is None:
                 raise InputValidationError(f"line {number}: malformed session header")
-            ranked, expires = _block_time(header["ranked"]), _block_time(header["expires"])
             blocks.append(SessionBlock(header["id"], ranked, expires, ()))
         elif line and not line.startswith("#"):
             if not blocks:
