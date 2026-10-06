@@ -506,8 +506,9 @@ _HEAD = "# session s ranked 2026-10-05T12:00:00+00:00 expires 2026-10-05T12:30:0
     [
         "# expires 2026-10-05T12:00:00+00:00\nold_term\n",
         "plain_term\n",
-        "# session s ranked 2026-10-05T12:00:00 expires 2026-10-05T12:30:00+00:00\n",
-        "# session s ranked 2026-10-05T12:00:00+00:00 expires soon\n",
+        "# session s ranked 2026-10-05T12:00:00 expires 2026-10-05T12:30:00+00:00"
+        ' {"cwd": "/w", "titles": []}\n',
+        '# session s ranked 2026-10-05T12:00:00+00:00 expires soon {"cwd": "/w", "titles": []}\n',
         "# session s/../x ranked 2026-10-05T12:00:00+00:00 expires 2026-10-05T12:30:00+00:00"
         ' {"cwd": "/w", "titles": []}\n',
         _HEAD + "\n",
