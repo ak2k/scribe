@@ -27,11 +27,12 @@ from scribe.vocab import TermsFile
 from tests.xai_fixtures import xai_payload
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Iterator, Sequence
+    from collections.abc import AsyncIterator, Callable, Iterator, Sequence
     from pathlib import Path
 
     from starlette.types import ASGIApp, Message
 
+    from scribe.session_terms import SessionBlock
     from scribe.xai_stt import XaiStt
 
 KEY = "xai-test-key-never-logged"
@@ -368,6 +369,66 @@ async def test_the_poller_runs_from_startup_until_shutdown(tmp_path: Path) -> No
     calls = len(ssh.calls)
     await anyio.sleep(0.1)
     assert len(ssh.calls) == calls
+
+
+class _Crashing(Focus):
+    """A focus poller whose every refresh raises."""
+
+    def __init__(self) -> None:
+        super().__init__(Ssh("back\n"), interval=0.01)
+        self.raised = 0
+        self.twice = threading.Event()
+
+    @override
+    def refresh(
+        self, clock: Callable[[], datetime], recent: Callable[[datetime], Sequence[SessionBlock]]
+    ) -> None:
+        self.raised += 1
+        if self.raised == 2:
+            self.twice.set()
+        raise KeyError(FOCUS_SECRETS[0])
+
+
+async def test_a_poller_that_raises_fails_no_dictation_and_stops_no_other_poller(
+    tmp_path: Path,
+) -> None:
+    ssh = Ssh(_session_file(("s", NOW, ["polled_term"])))
+    focus = _Crashing()
+    sessions = SessionTerms([remote_source("box-a", runner=ssh, interval=0.01)], focus=focus)
+    app = create_app(
+        dictation_client(KEY, transport=httpx.MockTransport(Xai())),
+        _terms(tmp_path),
+        session_terms=sessions,
+        keep=None,
+        flags={},
+    )
+    sent: list[Message] = []
+    posted: list[int] = []
+
+    async def receive() -> Message:
+        if not sent:
+            return {"type": "lifespan.startup"}
+        assert await anyio.to_thread.run_sync(focus.twice.wait, 2)
+        ssh.polled.clear()
+        assert await anyio.to_thread.run_sync(ssh.polled.wait, 2)
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://127.0.0.1:8765"
+        ) as client:
+            posted.append((await _post(client)).status_code)
+        return {"type": "lifespan.shutdown"}
+
+    async def send(message: Message) -> None:
+        sent.append(message)
+
+    with anyio.fail_after(5):
+        await app({"type": "lifespan", "asgi": {"version": "3.0"}, "state": {}}, receive, send)
+
+    assert posted == [200]
+    assert [message["type"] for message in sent] == [
+        "lifespan.startup.complete",
+        "lifespan.shutdown.complete",
+    ]
 
 
 async def test_a_voiceink_upload_gets_xais_words_joined_by_single_spaces(tmp_path: Path) -> None:

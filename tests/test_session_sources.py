@@ -7,7 +7,7 @@ import sys
 import threading
 import time
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, override
 
 import anyio
 import anyio.from_thread
@@ -36,7 +36,7 @@ from scribe.vocab import Alias, Vocab, deliver
 from scribe.xai_stt import MAX_KEYTERMS
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Sequence
     from pathlib import Path
 
 NOW = datetime(2026, 10, 5, 12, 0, tzinfo=UTC)
@@ -677,6 +677,39 @@ def test_a_focus_hit_puts_that_sessions_terms_first_and_says_so() -> None:
     assert focus == FocusUse("hit", 2)
 
 
+def test_a_request_reads_the_local_file_once_so_a_newer_read_cannot_double_the_focus(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    old = _titled("mine", NOW - timedelta(minutes=5), ["mine_a"], "My tab")
+    new = _titled("mine", NOW - timedelta(seconds=1), ["mine_a", "mine_b"], "My tab")
+    other = _titled("other", NOW - timedelta(minutes=2), ["other_a"], "Other tab")
+    reads = iter([format_block(old) + format_block(other)])
+    local = Source(
+        LOCAL_NAME, lambda: next(reads, format_block(new) + format_block(other)), interval=1.0
+    )
+    local.refresh(lambda: NOW)
+    # The poller swaps in the newer file after every read the request makes.
+    reads_of_local: list[tuple[str, Callable[[datetime], object]]] = [
+        ("live", local.live),
+        ("recent", local.recent),
+        ("live_and_recent", local.live_and_recent),
+    ]
+    for name, read in reads_of_local:
+
+        def read_then_swap(now: datetime, read: Callable[[datetime], object] = read) -> object:
+            blocks = read(now)
+            local.refresh(lambda: NOW)
+            return blocks
+
+        monkeypatch.setattr(local, name, read_then_swap)
+    sessions = SessionTerms([local], clock=lambda: NOW, focus=_focused_on("My tab"))
+
+    vocab, _, focus = sessions.vocab(Vocab((), ()))
+
+    assert vocab.terms == ("mine_a", "other_a")
+    assert focus == FocusUse("hit", 1)
+
+
 def test_an_untitled_tab_leaves_the_turns_as_they_were() -> None:
     untitled = SessionBlock(
         "mine", NOW - timedelta(minutes=5), NOW + timedelta(minutes=25), ("mine_a",), "/w", ()
@@ -783,6 +816,53 @@ async def test_the_focus_poller_takes_its_own_token_and_stops_at_shutdown() -> N
     await anyio.sleep(0.05)
     assert not asked.is_set()
     assert sessions.focus_health() == {"state": "away", "age_seconds": 0}
+
+
+class _Raising(Focus):
+    """A focus poller whose refresh raises each error in turn, then succeeds."""
+
+    def __init__(self, *errors: Exception) -> None:
+        super().__init__(Runner("back\n"), interval=0.01)
+        self.errors = list(errors)
+        self.recovered = threading.Event()
+
+    @override
+    def refresh(
+        self, clock: Callable[[], datetime], recent: Callable[[datetime], Sequence[SessionBlock]]
+    ) -> None:
+        if self.errors:
+            raise self.errors.pop(0)
+        self.recovered.set()
+
+
+@pytest.mark.anyio
+async def test_a_poller_that_raises_logs_the_type_once_per_change_and_keeps_polling() -> None:
+    quoted = "a title from the tab"
+    focus = _Raising(KeyError(quoted), KeyError(quoted), ValueError(quoted))
+    polled = threading.Event()
+
+    def fetch() -> str:
+        polled.set()
+        return format_block(_block("s", NOW, ["t"]))
+
+    sessions = SessionTerms(
+        [Source(LOCAL_NAME, fetch, interval=0.01)], clock=lambda: NOW, focus=focus
+    )
+    with capture_logs() as logs:
+        async with anyio.create_task_group() as group:
+            group.start_soon(sessions.poll)
+            assert await anyio.to_thread.run_sync(focus.recovered.wait, 2)
+            polled.clear()
+            assert await anyio.to_thread.run_sync(polled.wait, 2)
+            group.cancel_scope.cancel()
+
+    assert [(entry["event"], entry.get("error")) for entry in logs] == [
+        ("serve.poller_failed", "KeyError"),
+        ("serve.poller_failed", "ValueError"),
+        ("serve.poller_restored", None),
+    ]
+    assert {entry["poller"] for entry in logs} == {"ghostty"}
+    assert quoted not in repr(logs)
 
 
 @given(
