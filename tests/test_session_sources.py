@@ -429,7 +429,7 @@ async def test_shutdown_does_not_wait_for_a_fetch_in_flight() -> None:
 
 @pytest.mark.anyio
 async def test_fetches_in_flight_never_hold_a_requests_worker_thread() -> None:
-    hosts = anyio.to_thread.current_default_thread_limiter().total_tokens
+    hosts = int(anyio.to_thread.current_default_thread_limiter().total_tokens)
     lock, release, all_started = threading.Lock(), threading.Event(), anyio.Event()
     started = 0
 
