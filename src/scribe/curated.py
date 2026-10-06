@@ -20,7 +20,7 @@ from scribe.schema import FiniteFloat
 from scribe.writers import hms
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
     from pathlib import Path
 
     from scribe.cleanup import CleanupRequest
@@ -124,6 +124,8 @@ def render_curated(
     kept: Sequence[tuple[Turn, str]],
     ranges: Sequence[tuple[float, float]],
     front: str | None = None,
+    *,
+    by_speaker: Mapping[str, Sequence[tuple[float, float]]] | None = None,
 ) -> str:
     """Render the reading copy of a cleaned transcript.
 
@@ -135,6 +137,8 @@ def render_curated(
             speech in.
         front: Text to open the copy with, copied as written and ruled off
             from the turns.
+        by_speaker: Spans that replace `ranges` for the turns of each
+            speaker label named, as a merged transcript's mic track has.
 
     Returns:
         One `**Label | HH:MM:SS**` block per kept turn, its note if it
@@ -144,7 +148,7 @@ def render_curated(
     """
     blocks = [
         f"**{turn_label(request, turn)} | {hms(math.floor(turn.start))}**\n"
-        f"{_note(turn, ranges)}{text}"
+        f"{_note(turn, (by_speaker or {}).get(turn.speaker, ranges))}{text}"
         for turn, text in kept
     ]
     body = "\n\n".join(blocks) + "\n"

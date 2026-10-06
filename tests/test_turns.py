@@ -8,7 +8,7 @@ import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
-from scribe.schema import Word
+from scribe.schema import Source, Track, Word
 from scribe.turns import build_turns, turns_from_speakers, word_speakers
 
 Spec = tuple[int | None, float, float]
@@ -453,3 +453,65 @@ def test_build_turns_is_word_speakers_then_turns_from_speakers(
     assert turns_from_speakers(words, speakers) == build_turns(
         words, min_turn_words=min_turn_words, snap_words=snap_words
     )
+
+
+def _tracked(*runs: tuple[int | None, int, str], seconds: float = 0.3) -> list[Word]:
+    """Words `seconds` apart from (speaker, track, "words of one raw run") triples."""
+    said = [(speaker, track, text) for speaker, track, line in runs for text in line.split()]
+    return [
+        Word(text=text, start=at * seconds, end=(at + 0.8) * seconds, speaker=speaker, track=track)
+        for at, (speaker, track, text) in enumerate(said)
+    ]
+
+
+TRACKS = [
+    Track(
+        role="mic", label="Alice", source=Source(kind="audio", ref="mic.wav"), transcript_sha256="a"
+    ),
+    Track(role="app", source=Source(kind="audio", ref="app.wav"), transcript_sha256="b"),
+]
+
+
+def test_an_operator_word_inside_a_remote_sentence_keeps_its_own_speaker() -> None:
+    words = _tracked((3, 1, "so the plan"), (9, 0, "Yeah."), (3, 1, "is set."))
+
+    assert word_speakers(words) == [3, 3, 3, 9, 3, 3]
+
+
+@given(
+    said=st.lists(
+        st.tuples(
+            st.sampled_from([None, 0, 1, 2]),
+            st.sampled_from([0, 1]),
+            st.sampled_from(["", ".", ","]),
+            st.floats(min_value=0.05, max_value=2.0),
+        ),
+        max_size=40,
+    ),
+)
+def test_each_track_settles_as_if_alone(said: list[tuple[int | None, int, str, float]]) -> None:
+    words = [
+        Word(
+            text=f"w{at}{mark}", start=at * 0.5, end=at * 0.5 + length, speaker=speaker, track=track
+        )
+        for at, (speaker, track, mark, length) in enumerate(said)
+    ]
+
+    settled = word_speakers(words)
+
+    for track in (0, 1):
+        held = [at for at, word in enumerate(words) if word.track == track]
+        assert [settled[at] for at in held] == word_speakers([words[at] for at in held])
+
+
+def test_tracks_label_the_mic_by_name_and_rank_app_speakers_alone() -> None:
+    words = _tracked((9, 0, "Hello there."), (5, 1, "Hi."), (None, 1, "uh"), (2, 1, "Morning."))
+
+    turns = turns_from_speakers(words, [word.speaker for word in words], tracks=TRACKS)
+
+    assert [(turn.speaker, turn.text) for turn in turns] == [
+        ("Alice", "Hello there."),
+        ("Speaker 1", "Hi."),
+        ("Speaker ?", "uh"),
+        ("Speaker 2", "Morning."),
+    ]

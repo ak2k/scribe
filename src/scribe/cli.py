@@ -6,6 +6,7 @@ import dataclasses
 import errno
 import hashlib
 import json
+import math
 import os
 import stat
 import sys
@@ -22,7 +23,7 @@ import typer
 from pydantic import ValidationError
 
 from scribe import attribution, ensemble, gemini_stt, third_ear
-from scribe.attendees import name_speakers, parse_attendees
+from scribe.attendees import looks_like_label, name_speakers, parse_attendees
 from scribe.claude_cli import DEFAULT_MAX_BUDGET_USD, ClaudeCliBackend
 from scribe.cleanup import (
     CLEANUP_PROMPT_VERSION,
@@ -74,6 +75,17 @@ from scribe.speakers import (
     needs_relabeling,
     relabel,
 )
+from scribe.tracks import (
+    APP_FILL,
+    BLEED_RULE,
+    DEFAULT_ME,
+    MAX_SKEW_S,
+    MIC,
+    MIC_FILL,
+    TrackFile,
+    count_runs,
+    merge_tracks,
+)
 from scribe.turns import (
     DEFAULT_MIN_TURN_SECONDS,
     DEFAULT_MIN_TURN_WORDS,
@@ -108,6 +120,7 @@ if TYPE_CHECKING:
     from scribe.pick import Picking, Side
     from scribe.schema import Word
     from scribe.speakers import Relabeling
+    from scribe.tracks import Merged
 
 # Enough of a stderr line to act on without pasting a whole transcript into it.
 _MISSING_SHOWN = 10
@@ -869,6 +882,10 @@ def turns(
     except AppError as exc:
         _fail(exc)
 
+    llm_speakers, audio_speakers, listed = _passes(
+        transcript, input_path, llm=llm_speakers, audio=audio_speakers, attendees=listed
+    )
+
     words = transcript.words
     speakers = word_speakers(
         words,
@@ -928,7 +945,10 @@ def turns(
         transcript
         if not words
         else transcript.model_copy(
-            update={"engine": engine, "turns": turns_from_speakers(words, speakers, names)}
+            update={
+                "engine": engine,
+                "turns": turns_from_speakers(words, speakers, names, tracks=transcript.tracks),
+            }
         )
     )
 
@@ -938,6 +958,29 @@ def turns(
         _write_turn_artifacts(plan, directory, formats, built, relabeled, naming)
     if relabeled is not None:
         _finish_speakers(*relabeled, words=len(words), printed=plan is None)
+
+
+def _passes(
+    transcript: Transcript, input_path: Path, *, llm: bool, audio: bool, attendees: tuple[str, ...]
+) -> tuple[bool, bool, tuple[str, ...]]:
+    """The speaker passes to run, and the attendees: none of them on a merged transcript.
+
+    Neither pass keeps a merged transcript's tracks apart yet; each one asked
+    for and skipped is one stderr line.
+    """
+    if transcript.tracks is None:
+        return llm, audio, attendees
+    if llm:
+        named = "; --attendees names nobody" if attendees else ""
+        _warn(
+            f"speaker pass skipped: {input_path} merges two tracks, and the pass "
+            f"does not keep them apart yet{named}"
+        )
+    if audio:
+        _warn(
+            f"audio naming skipped: {input_path} merges two tracks, and naming needs one recording"
+        )
+    return False, False, ()
 
 
 def _check_attendees(attendees: str | None, *, llm_speakers: bool) -> tuple[str, ...]:
@@ -1109,6 +1152,32 @@ def _finish_speakers(
         raise typer.Exit(_EXIT_NO_CHUNK)
 
 
+def _one_track(transcript: Transcript, described: str) -> Transcript:
+    """Refuse a merged transcript, whose tracks only `scribe turns` keeps apart."""
+    if transcript.tracks is not None:
+        raise InputValidationError(
+            f"{described} merges two tracks, which only `scribe turns` keeps apart"
+        )
+    return transcript
+
+
+def _noted(
+    transcript: Transcript, path: Path
+) -> tuple[list[tuple[float, float]], dict[str, list[tuple[float, float]]]]:
+    """The spans the reading copy notes recovered speech in, and any speaker's own.
+
+    A merged transcript keeps each track's apart: the mic track's label takes
+    the mic's spans, and every other turn the app's.
+    """
+    if transcript.tracks is None:
+        return fill_ranges(transcript.engine, path), {}
+    mic = fill_ranges(transcript.engine, path, key=MIC_FILL)
+    labels = [track.label for track in transcript.tracks if track.role == "mic"]
+    return fill_ranges(transcript.engine, path, key=APP_FILL), {
+        label: mic for label in labels if label is not None
+    }
+
+
 def _turns_input(path: Path) -> Transcript:
     """Load a transcript and insist its turns are filled."""
     transcript = Transcript.load(path)
@@ -1260,7 +1329,7 @@ def cleanup(
         front_text = None if front is None else read_front(front)
         # Only the reading copy reads the fill record, so a malformed one fails
         # only a run that writes it.
-        ranges = [] if curated is None else fill_ranges(transcript.engine, input_path)
+        ranges, by_speaker = ([], {}) if curated is None else _noted(transcript, input_path)
         destination = _clean_destination(input_path, out)
         # Planned before a backend call is paid for. The input transcript is a
         # paid transcription's output and nothing else holds a copy.
@@ -1298,7 +1367,10 @@ def cleanup(
         # Rendered from the kept turns, not from the markdown: a turn's text
         # can hold blank lines, so the markdown does not split back into turns.
         if curated is not None:
-            _write_text(plan["--curated"], render_curated(request, result.kept, ranges, front_text))
+            _write_text(
+                plan["--curated"],
+                render_curated(request, result.kept, ranges, front_text, by_speaker=by_speaker),
+            )
     except AppError as exc:
         _fail(exc)
 
@@ -1369,7 +1441,7 @@ def schema() -> None:
 
 def _voter(path: Path, role: str, *, ordered: bool) -> Transcript:
     """Load one of `vote`'s inputs, insisting on words, in start order if `ordered`."""
-    transcript = Transcript.load(path)
+    transcript = _one_track(Transcript.load(path), f"{role} {path}")
     words = transcript.words
     if not words:
         raise InputValidationError(f"{role} {path} has no words")
@@ -1438,6 +1510,107 @@ def vote(
     typer.echo(str(plan["--out"]))
 
 
+def _track_file(path: Path, role: str) -> TrackFile:
+    """Load one of `merge`'s inputs, insisting on words and on one track, and hash it."""
+    # One read, so the hash is of the bytes parsed even if the file is replaced.
+    try:
+        raw = path.read_bytes()
+    except OSError as exc:
+        raise InputValidationError(f"cannot read transcript {path}: {exc}") from exc
+    transcript = Transcript.parse(raw, path)
+    if not transcript.words:
+        raise InputValidationError(f"{role} {path} has no words")
+    if transcript.tracks is not None:
+        raise InputValidationError(f"{role} {path} merges two tracks already")
+    return TrackFile(transcript, path, hashlib.sha256(raw).hexdigest())
+
+
+@app.command()
+def merge(
+    mic_path: Path = typer.Argument(
+        ..., metavar="MIC", help="Transcript of the operator's microphone."
+    ),
+    app_path: Path = typer.Argument(..., metavar="APP", help="Transcript of the call app's audio."),
+    out: Path | None = typer.Option(
+        None,
+        "--out",
+        help="Where to write the result. Default: MIC's name ending .merged.json, beside it.",
+    ),
+    me: str = typer.Option(DEFAULT_ME, "--me", help="The label of the operator's turns."),
+    offset: float = typer.Option(
+        0.0, "--offset", metavar="SECONDS", help="How much later MIC runs than APP."
+    ),
+) -> None:
+    """Merge the two sides of a call, each transcribed on its own, into one transcript.
+
+    Every APP word is kept as it is. Every MIC word is kept under the label
+    --me, unless it is the far side leaking into the microphone: a MIC word
+    goes when an APP word of the same text, not already answering for
+    another, starts within 0.25 s of it once --offset is taken off (rule
+    bleed-1). The offset is never measured from the words: stems recorded
+    together sit well inside 0.25 s, so the default 0 fits them, and stems
+    from elsewhere need their offset given. Nothing is retimed. The result
+    keeps each input's fill ranges that still hold its words, apart, for
+    `cleanup --curated`, but not their pick records: each input's own
+    disputes list stays the place to read those.
+
+    stdout is the path written; stderr is one summary line, naming the offset
+    applied. Exit 2, before anything is written: an --offset that is not a
+    finite number; a --me that reads like a speaker label; an input that is
+    unreadable, not a transcript, wordless, merged already or without a
+    duration; MIC and APP holding one transcript; durations more than 2 s
+    apart; or an --out that cannot be written. Run `scribe turns` on the result next.
+    """
+    try:
+        if not math.isfinite(offset):
+            raise InputValidationError(f"--offset {offset} is not a finite number of seconds")
+        # The app side's speakers are labeled "Speaker N", or "Speaker ?" where unattributed;
+        # cleanup's fidelity check reads a label with spaces, `*` and `:` stripped.
+        if looks_like_label(me.strip(" \t*:")):
+            raise InputValidationError(f"--me {me!r} looks like a speaker label")
+        mic_file, app_file = _track_file(mic_path, "MIC"), _track_file(app_path, "APP")
+        # A transcript merged with its own copy would lose every keyed mic word as bleed.
+        if mic_file.sha256 == app_file.sha256:
+            raise InputValidationError(f"MIC {mic_path} and APP {app_path} are one transcript")
+        mic_s, app_s = mic_file.transcript.duration, app_file.transcript.duration
+        # The last word's end is no stand-in: either side can fall silent long before the call ends.
+        if mic_s is None or app_s is None:
+            role, path = ("MIC", mic_path) if mic_s is None else ("APP", app_path)
+            raise InputValidationError(
+                f"{role} {path} records no duration, so it cannot be shown to be a side of one call"
+            )
+        if abs(mic_s - app_s) > MAX_SKEW_S:
+            raise InputValidationError(
+                f"MIC {mic_path} lasts {mic_s:.1f} s and APP {app_path} {app_s:.1f} s, "
+                f"more than {MAX_SKEW_S} s apart: not two sides of one call"
+            )
+        destination = sibling(mic_path, ".merged.json") if out is None else out
+        plan = plan_outputs({"--out": destination}, {"MIC": mic_path, "APP": app_path})
+        merged = merge_tracks(mic_file, app_file, me=me, offset=offset)
+        try:
+            merged.transcript.dump(plan["--out"])
+        except (OSError, ValueError) as exc:
+            raise InputValidationError(
+                f"cannot write transcript to {plan['--out']}: {exc}"
+            ) from exc
+    except AppError as exc:
+        _fail(exc)
+
+    _report_merge(merged)
+    typer.echo(str(plan["--out"]))
+
+
+def _report_merge(merged: Merged) -> None:
+    words = merged.transcript.words
+    kept = sum(word.track == MIC for word in words)
+    runs = "/".join(str(count) for count in count_runs(merged.dropped))
+    _warn(
+        f"merged {len(words) - kept} app words and {kept} of {kept + len(merged.dropped)} mic "
+        f"words; {len(merged.dropped)} mic words dropped as {BLEED_RULE} copies, by run length "
+        f"1/2/3+: {runs}; offset {merged.offset:+.3f} s, from --offset"
+    )
+
+
 def _report_fill(fill: Fill) -> None:
     for run in fill.retimed:
         _warn(moved(run))
@@ -1487,11 +1660,11 @@ def fill_command(
     filled words "Speaker ?" when the others have speakers.
     """
     try:
-        transcript = Transcript.load(transcript_path)
+        transcript = _one_track(Transcript.load(transcript_path), f"TRANSCRIPT {transcript_path}")
         # Its turns would go stale with no words left to rebuild them from.
         if transcript.turns and not transcript.words:
             raise InputValidationError(f"{transcript_path} has turns but no words to fill between")
-        reference = Transcript.load(reference_path)
+        reference = _one_track(Transcript.load(reference_path), f"REFERENCE {reference_path}")
         destination = sibling(transcript_path, ".filled.json") if out is None else out
         plan = plan_outputs(
             {"--out": destination}, {"TRANSCRIPT": transcript_path, "REFERENCE": reference_path}
@@ -1819,7 +1992,7 @@ def disputes_command(
     try:
         if audio is not None and not clips:
             raise InputValidationError("--audio is read only by --clips")
-        transcript = Transcript.load(transcript_path)
+        transcript = _one_track(Transcript.load(transcript_path), f"TRANSCRIPT {transcript_path}")
         found = find_disputes(transcript, transcript_path)
         destination = sibling(transcript_path, ".disputes.md") if out is None else out
         inputs = {"TRANSCRIPT": transcript_path}
@@ -1929,7 +2102,7 @@ def gemini(
     # stdout carries only the output path; unconfigured, structlog prints there.
     configure()
     try:
-        anchor = Transcript.load(anchor_path)
+        anchor = _one_track(Transcript.load(anchor_path), f"the --anchor transcript {anchor_path}")
         api_key = gemini_stt.resolve_api_key()
         destination = audio_path.with_name(f"{audio_path.stem}.gemini.json") if out is None else out
         plan = plan_outputs(
@@ -1979,7 +2152,7 @@ def gaps(
     Needs ffmpeg on PATH. Writes no file and sends nothing over the network.
     """
     try:
-        transcript = Transcript.load(transcript_path)
+        transcript = _one_track(Transcript.load(transcript_path), f"TRANSCRIPT {transcript_path}")
         # Before ffmpeg opens it: reading a FIFO or a character device blocks.
         check_input(audio_path, sys.maxsize)
         found = check_gaps(transcript, audio_path)
