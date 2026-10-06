@@ -38,6 +38,7 @@ if TYPE_CHECKING:
 
 runner = CliRunner()
 NOW = datetime(2026, 10, 5, 12, 0, tzinfo=UTC)
+_HUMAN = {"kind": "human"}
 
 _RECORDS: list[dict[str, object]] = [
     {
@@ -45,7 +46,13 @@ _RECORDS: list[dict[str, object]] = [
         "timestamp": "2026-10-05T11:00:00Z",
         "entrypoint": "cli",
         "gitBranch": "feature/old-branch",
+        "origin": {"kind": "human"},
         "message": {"role": "user", "content": "rename widget_factory in GadgetPanel"},
+    },
+    {
+        "type": "user",
+        "timestamp": "2026-10-05T11:00:00.500Z",
+        "message": {"role": "user", "content": "a peer session sent unlabeled_term"},
     },
     {
         "type": "user",
@@ -171,6 +178,7 @@ def test_hook_reads_each_part_type_it_should_and_skips_the_rest(tmp_path: Path) 
         "I'll",
         "--fix-only",
         "notified_term",
+        "unlabeled_term",
     ):
         assert unwanted not in terms
     # The prompt is the newest source, so its term leads the session.
@@ -392,8 +400,13 @@ def test_records_older_than_a_week_are_deleted(tmp_path: Path) -> None:
 def test_shape_drift_and_a_corrupt_record_are_logged_not_fatal(tmp_path: Path) -> None:
     state = tmp_path / "state"
     records: list[dict[str, object]] = [
-        {"type": "user", "message": {"content": 7}},
-        {"type": "user", "entrypoint": "cli", "message": {"content": "keep shaped_term"}},
+        {"type": "user", "origin": _HUMAN, "message": {"content": 7}},
+        {
+            "type": "user",
+            "entrypoint": "cli",
+            "origin": _HUMAN,
+            "message": {"content": "keep shaped_term"},
+        },
     ]
     transcript = _transcript(tmp_path, records)
     with transcript.open("a") as handle:
@@ -574,6 +587,7 @@ def test_terms_carry_over_when_a_big_tool_result_fills_the_tail(tmp_path: Path) 
         {
             "type": "user",
             "timestamp": "2026-10-05T11:50:00Z",
+            "origin": _HUMAN,
             "message": {"content": "fix kept_term"},
         },
     ]
@@ -805,8 +819,18 @@ def test_two_character_tokens_are_dropped() -> None:
 
 def test_last_seen_is_the_latest_sighting(tmp_path: Path) -> None:
     records: list[dict[str, object]] = [
-        {"type": "user", "timestamp": "2026-10-05T11:00:00Z", "message": {"content": "twice_term"}},
-        {"type": "user", "timestamp": "2026-10-05T11:30:00Z", "message": {"content": "twice_term"}},
+        {
+            "type": "user",
+            "timestamp": "2026-10-05T11:00:00Z",
+            "origin": _HUMAN,
+            "message": {"content": "twice_term"},
+        },
+        {
+            "type": "user",
+            "timestamp": "2026-10-05T11:30:00Z",
+            "origin": _HUMAN,
+            "message": {"content": "twice_term"},
+        },
     ]
     _event(tmp_path, "s1", "SessionStart", transcript=_transcript(tmp_path, records))
 

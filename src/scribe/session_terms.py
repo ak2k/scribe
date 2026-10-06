@@ -231,8 +231,9 @@ def _strings(value: JsonValue) -> Iterator[str]:
 def _record_texts(record: _Record) -> list[str]:
     if record.type not in {"user", "assistant"} or record.is_meta:
         return []
-    # Task notifications and peer messages arrive as user records too.
-    if record.type == "user" and record.origin is not None and record.origin.kind != "human":
+    # The operator's prompts carry origin kind "human"; task notifications carry
+    # another kind, and peer sessions' messages carry no origin at all.
+    if record.type == "user" and (record.origin is None or record.origin.kind != "human"):
         return []
     content = _Message.model_validate(record.message).content
     if isinstance(content, str):
