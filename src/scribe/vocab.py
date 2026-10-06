@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import re
+import unicodedata
 from dataclasses import dataclass
+from itertools import pairwise
 from typing import TYPE_CHECKING, Literal
 
 import structlog
@@ -11,13 +14,17 @@ from scribe.errors import InputValidationError
 from scribe.xai_stt import check_keyterms
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Callable, Mapping, Sequence
     from pathlib import Path
 
     from structlog.stdlib import BoundLogger
 
 # The most words one alias or snap can rewrite at once.
 MAX_RUN_WORDS = 4
+# Shorter keys spell ordinary words ("c", "us", "it") too often to be snapped to.
+MIN_SNAP_KEY = 3
+# `#` after whitespace, not inside a term: "C#" is a term, "herdr # mine" a comment.
+_COMMENT = re.compile(r"(?:^|\s)#.*")
 
 
 @dataclass(frozen=True)
@@ -52,6 +59,8 @@ def _logger() -> BoundLogger:
 def parse_terms(text: str, *, where: str) -> Vocab:
     """Parse a terms file: one term per line, `#` comments, `heard => written` aliases.
 
+    A comment is a `#` that starts a line or follows whitespace, to the line's end.
+
     Args:
         text: The file's contents.
         where: How errors name the file.
@@ -67,8 +76,8 @@ def parse_terms(text: str, *, where: str) -> Vocab:
     terms: list[str] = []
     aliases: list[Alias] = []
     for number, raw in enumerate(text.splitlines(), start=1):
-        line = raw.strip()
-        if not line or line.startswith("#"):
+        line = _COMMENT.sub("", raw).strip()
+        if not line:
             continue
         try:
             if "=>" in line:
@@ -105,7 +114,11 @@ def deliver(words: Sequence[str], vocab: Vocab) -> tuple[list[str], list[Edit]]:
         The delivered words and every edit made, in order.
 
     """
-    aliased, alias_edits = _rewrite(words, "alias", lambda run: _alias(run, vocab.aliases))
+    heard: dict[str, list[tuple[str, str, Alias]]] = {}
+    for alias in vocab.aliases:
+        lead, core, trail = _edges(alias.heard)
+        heard.setdefault(core.lower(), []).append((lead, trail, alias))
+    aliased, alias_edits = _rewrite(words, "alias", lambda run: _alias(run, heard))
     snapped, snap_edits = snap(aliased, vocab.terms)
     return snapped, alias_edits + snap_edits
 
@@ -113,9 +126,9 @@ def deliver(words: Sequence[str], vocab: Vocab) -> tuple[list[str], list[Edit]]:
 def snap(words: Sequence[str], terms: Sequence[str]) -> tuple[list[str], list[Edit]]:
     """Respell each run of 1-4 words whose letters and digits spell an identifier term.
 
-    A plain-word term is never a target, so ordinary speech is never re-cased
-    or re-spaced; and a run is only ever replaced by a term with its exact
-    letters and digits.
+    Only a term ordinary speech cannot spell is a target (see `_target`), and a
+    run is only ever replaced by a term with its exact letters and digits, and
+    only when the term holds, in order, the punctuation inside the run.
 
     Returns:
         The snapped words and the edits made, in order.
@@ -123,32 +136,61 @@ def snap(words: Sequence[str], terms: Sequence[str]) -> tuple[list[str], list[Ed
     """
     targets: dict[str, str] = {}
     for term in terms:
-        if _key(term) and not _plain(term):
+        if _target(term):
             targets.setdefault(_key(term), term)
 
     def respell(run: str) -> str | None:
         term = targets.get(_key(run))
-        return None if term is None else _wrap(run, term, term)
+        # Punctuation the term lacks is a boundary the speaker made: "my voice. Ink".
+        if term is None or not _in_order(_inner_punctuation(run), _inner_punctuation(term)):
+            return None
+        return _wrap(run, term, term)
 
     return _rewrite(words, "snap", respell)
 
 
+def _spelled(char: str) -> bool:
+    """True for a letter, a digit, or a combining mark: what a word is spelled with."""
+    return char.isalnum() or unicodedata.category(char).startswith("M")
+
+
 def _key(text: str) -> str:
-    return "".join(char for char in text.lower() if char.isalnum())
+    # NFC, and marks kept, so "café" never keys like "cafe", nor "İ" like "i".
+    return "".join(char for char in unicodedata.normalize("NFC", text).lower() if _spelled(char))
 
 
-def _plain(term: str) -> bool:
-    """True for a dictionary-shaped word: all lowercase, or one capital then lowercase."""
-    rest = term[1:]
-    return term.isalpha() and (term.islower() or (term[0].isupper() and rest.islower()))
+def _target(term: str) -> bool:
+    """True for a term shaped like an identifier, which ordinary speech does not spell.
+
+    Its core (edge punctuation aside) holds a digit, a capital right after a
+    lowercase letter, or punctuation; it has a letter; and its key is at least
+    `MIN_SNAP_KEY` long. "TODO", "c++", ".NET", "pull request" and "2.0" are not.
+    """
+    _, core, _ = _edges(term)
+    joint = (
+        any(char.isdigit() for char in core)
+        or any(left.islower() and right.isupper() for left, right in pairwise(core))
+        or bool(_inner_punctuation(term))
+    )
+    return joint and any(char.isalpha() for char in core) and len(_key(term)) >= MIN_SNAP_KEY
+
+
+def _inner_punctuation(text: str) -> list[str]:
+    _, core, _ = _edges(text)
+    return [char for char in core if not _spelled(char) and not char.isspace()]
+
+
+def _in_order(needle: Sequence[str], haystack: Sequence[str]) -> bool:
+    rest = iter(haystack)
+    return all(char in rest for char in needle)
 
 
 def _edges(text: str) -> tuple[str, str, str]:
     """Split `text` into leading punctuation, a core, and trailing punctuation."""
-    alnum = [index for index, char in enumerate(text) if char.isalnum()]
-    if not alnum:
+    spelled = [index for index, char in enumerate(text) if _spelled(char)]
+    if not spelled:
         return text, "", ""
-    return text[: alnum[0]], text[alnum[0] : alnum[-1] + 1], text[alnum[-1] + 1 :]
+    return text[: spelled[0]], text[spelled[0] : spelled[-1] + 1], text[spelled[-1] + 1 :]
 
 
 def _wrap(run: str, matched: str, replacement: str) -> str:
@@ -162,15 +204,11 @@ def _wrap(run: str, matched: str, replacement: str) -> str:
     return lead + replacement + trail
 
 
-def _alias(run: str, aliases: Sequence[Alias]) -> str | None:
+def _alias(run: str, heard: Mapping[str, Sequence[tuple[str, str, Alias]]]) -> str | None:
+    """Rewrite `run` by the first alias heard as it, keyed by lowercased core."""
     lead, core, trail = _edges(run)
-    for alias in aliases:
-        heard_lead, heard_core, heard_trail = _edges(alias.heard)
-        if (
-            core.lower() == heard_core.lower()
-            and lead.endswith(heard_lead)
-            and trail.startswith(heard_trail)
-        ):
+    for heard_lead, heard_trail, alias in heard.get(core.lower(), ()):
+        if lead.endswith(heard_lead) and trail.startswith(heard_trail):
             return _wrap(run, alias.heard, alias.written)
     return None
 
