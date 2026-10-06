@@ -170,7 +170,8 @@ class SessionBlock:
 class _About(BaseModel):
     """What a block header says of its session beyond its times."""
 
-    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+    # DIVERGE: hosts upgrade at different times; an added header field must not black out a source
+    model_config = ConfigDict(extra="ignore", frozen=True)
 
     cwd: str
     titles: list[str]

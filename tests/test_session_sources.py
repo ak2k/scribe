@@ -218,6 +218,15 @@ def test_a_failing_host_keeps_its_last_good_blocks_and_logs_each_change_once() -
     assert "garbage_line" not in repr(logs)
 
 
+def test_a_header_field_this_serve_does_not_know_still_yields_the_terms() -> None:
+    head = _header("s1", NOW).replace('"titles"', '"focus": "x", "titles"')
+    source = remote_source("box-a", runner=Runner(head + "newer_term\n"))
+
+    source.refresh(lambda: NOW)
+
+    assert source.live(NOW) == (_block("s1", NOW, ["newer_term"]),)
+
+
 def test_a_source_never_fetched_contributes_nothing_and_says_never() -> None:
     source = remote_source("box-a", runner=Runner(ExternalServiceError("timed out")))
     sessions = SessionTerms([source], clock=lambda: NOW)
