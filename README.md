@@ -120,7 +120,9 @@ pass them to xAI as keyterms. It writes under `$XDG_STATE_HOME/scribe`, else
   that, its directory, and its 5 latest titles, `/rename` titles before
   automatic ones), then up to 60 of its terms, one per line, best first. The
   cap is per block, so the file as a whole can hold more terms than xAI
-  accepts; `scribe serve` reads it block by block. Nothing rewrites the file
+  accepts; `scribe serve` reads it block by block. The file stays within
+  1 MiB, what serve reads from another host: a block that would pass it is
+  left out. Nothing rewrites the file
   until the next hook event, so its reader drops a block once it expires;
   only the block of the session you are dictating into still counts after
   its expiry (see `scribe serve` below). A
@@ -221,17 +223,19 @@ to xAI's 100 keyterms; the file's terms always go first. `--no-session-terms`
 sends none. `GET /health` shows each source's live sessions, terms and the age
 of its last read.
 
-On macOS, serve also asks Ghostty every 3 s, in the background, which tab is
-focused. When it shows a Claude Code session on this machine, found by the
-tab's title (an untitled session is never picked), that session's terms come
-right after the file's, up to 24 hours after its last prompt. No query runs
-while no session here was prompted in the last 24 hours. The first query
-brings up macOS's one-time Automation prompt asking to let the program running
-serve control Ghostty; until it is allowed, the log shows
+On macOS, each dictation also asks Ghostty which tab is focused, waiting at most
+0.25 s for the answer. When it shows a Claude Code session on this machine,
+that session's terms come right after the file's, up to 24 hours after its last
+prompt. The session is picked only when it alone holds the tab's title, now or
+as an earlier title, and works in the tab's directory; an untitled tab, a title
+two sessions share, or a slow or failed query picks none. No query runs while
+no session here was prompted in the last 24 hours. The first query brings up
+macOS's one-time Automation prompt asking to let the program running serve
+control Ghostty; until it is allowed, the log shows
 `serve.focus_failed error=-1743`. `--no-focus` turns this off.
 Each request's log line and `result.json` say whether focus found a session
-and how many terms it gave, never which; `GET /health` shows the poller's
-state.
+and how many terms it gave, never which; `GET /health` shows the last query's
+outcome.
 
 Each dictation (the audio, xAI's reply and `result.json`) is kept under
 `--keep`, default `~/.local/state/scribe/serve`, newest 1000; `--no-keep`
