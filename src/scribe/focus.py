@@ -10,6 +10,7 @@ from __future__ import annotations
 import itertools
 import re
 import subprocess
+import threading
 import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
@@ -23,7 +24,7 @@ from scribe.errors import AppError, InputValidationError
 from scribe.session_sources import run_program
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Sequence
 
     from structlog.stdlib import BoundLogger
 
@@ -154,6 +155,34 @@ def _spelling(cwd: str) -> str:
     return unicodedata.normalize("NFC", _resolved(cwd)).casefold()
 
 
+class _Worker:
+    """One query's thread, holding focus's only permit until it finishes or never starts."""
+
+    def __init__(self, permit: threading.Lock) -> None:
+        self._permit = permit
+        self._guard = threading.Lock()
+        self._state: Literal["waiting", "running", "withdrawn"] = "waiting"
+
+    def run(
+        self, ask: Callable[[Sequence[SessionBlock]], _Match | None], recent: Sequence[SessionBlock]
+    ) -> _Match | None:
+        with self._guard:
+            if self._state == "withdrawn":
+                return None
+            self._state = "running"
+        try:
+            return ask(recent)
+        finally:
+            self._permit.release()
+
+    def withdraw(self) -> None:
+        """Free the permit if the thread has not started, as it then never will release it."""
+        with self._guard:
+            if self._state == "waiting":
+                self._state = "withdrawn"
+                self._permit.release()
+
+
 class Focus:
     """The focused Ghostty tab, asked for by each request."""
 
@@ -165,6 +194,9 @@ class Focus:
         self._runner = runner
         self._state: Literal["never", "front", "away", "error", "slow"] = "never"
         self._failure: str | None = None
+        # A query past the cap is abandoned, not stopped, and a stalled mount can hold its
+        # thread for good; one permit keeps that to one thread, however many requests come.
+        self._permit = threading.Lock()
 
     def _ask(self, recent: Sequence[SessionBlock]) -> _Match | None:
         tab = parse_answer(self._runner(ARGV, QUERY_TIMEOUT_SECONDS))
@@ -172,13 +204,23 @@ class Focus:
         return None if tab is None else match(tab, recent)
 
     async def _query(self, recent: Sequence[SessionBlock]) -> _Match | str | None:
-        """The match, None when Ghostty is not in front, or the cause of a failure."""
+        """The match, None when Ghostty is not in front, or the cause of a failure.
+
+        A request that finds the last query still running is "slow" at once, as that
+        query's answer did not come within its own cap either.
+        """
+        if not self._permit.acquire(blocking=False):
+            return "slow"
+        worker = _Worker(self._permit)
         with anyio.move_on_after(self.cap):
             try:
-                # Abandoned at the cap: the query's own timeout ends it soon after.
-                return await anyio.to_thread.run_sync(self._ask, recent, abandon_on_cancel=True)
+                return await anyio.to_thread.run_sync(
+                    worker.run, self._ask, recent, abandon_on_cancel=True
+                )
             except Exception as exc:  # noqa: BLE001  # no query may fail a dictation; the code is the cause
                 return _cause(exc)
+            finally:
+                worker.withdraw()
         return "slow"
 
     async def pick(self, recent: Sequence[SessionBlock]) -> tuple[Verdict, SessionBlock | None]:

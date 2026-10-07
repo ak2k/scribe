@@ -8,7 +8,7 @@ import threading
 import time
 import unicodedata
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NoReturn
 
 import anyio
 import pytest
@@ -412,6 +412,87 @@ def test_a_directory_lookup_hanging_past_the_cap_is_slow_and_never_blocks_the_lo
     assert max(gaps) < QUERY_CAP_SECONDS
     assert took < QUERY_CAP_SECONDS + 1
     assert verdict == "slow"
+
+
+def test_requests_timing_out_on_a_stalled_lookup_hold_one_worker_between_them(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stuck = "/stuck-mount/proj"
+    real = os.path.realpath
+    release = threading.Event()
+    stalled_calls: list[str] = []
+
+    def stalled(path: str | os.PathLike[str], **options: bool) -> str:
+        if os.fspath(path).startswith(stuck) and not release.is_set():
+            stalled_calls.append(os.fspath(path))
+            release.wait(10)
+        return real(path, **options)
+
+    monkeypatch.setattr(os.path, "realpath", stalled)
+    osascript = Osascript(_front(TITLE, stuck))
+    focus = Focus(osascript)
+    mine = _block("mine", cwd=stuck)
+    try:
+        for _ in range(10):
+            started = time.monotonic()
+            assert _pick(focus, [mine]) == ("slow", None)
+            assert time.monotonic() - started < QUERY_CAP_SECONDS + 1
+        assert len(stalled_calls) == 1
+        assert len(osascript.calls) == 1
+    finally:
+        release.set()
+
+    deadline = time.monotonic() + 5
+    while (verdict := _pick(focus, [mine])) == ("slow", None) and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert verdict == ("hit", mine)
+    assert len(osascript.calls) == 2
+
+
+def test_a_burst_of_requests_starts_one_query_and_the_rest_get_no_focus_at_once() -> None:
+    release = threading.Event()
+    calls: list[float] = []
+
+    def hung(_argv: Sequence[str], _timeout: float) -> str:
+        calls.append(time.monotonic())
+        release.wait(10)
+        return _front()
+
+    focus = Focus(hung)
+    took: list[tuple[Verdict, float]] = []
+
+    async def burst() -> None:
+        async def one() -> None:
+            started = time.monotonic()
+            verdict, _ = await focus.pick([_block("s")])
+            took.append((verdict, time.monotonic() - started))
+
+        async with anyio.create_task_group() as group:
+            for _ in range(10):
+                group.start_soon(one)
+
+    try:
+        anyio.run(burst)
+    finally:
+        release.set()
+    assert len(calls) == 1
+    assert [verdict for verdict, _ in took] == ["slow"] * 10
+    # One request waits out the cap on the query it started; the others never wait.
+    assert sorted(seconds for _, seconds in took)[-2] < QUERY_CAP_SECONDS
+
+
+def test_a_worker_that_never_starts_frees_focus_for_the_next_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def no_thread(*_args: object, **_kwargs: object) -> NoReturn:
+        raise RuntimeError("can't start new thread")
+
+    focus = Focus(Osascript(_front()), cap=ROOMY)
+    with monkeypatch.context() as patched:
+        patched.setattr(anyio.to_thread, "run_sync", no_thread)
+        assert _pick(focus, [_block("s")]) == ("error", None)
+
+    assert _pick(focus, [_block("s")])[0] == "hit"
 
 
 def test_before_any_request_the_state_is_never() -> None:
