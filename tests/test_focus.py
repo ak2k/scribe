@@ -180,6 +180,13 @@ def test_an_untitled_tab_is_a_miss_even_when_one_block_has_its_cwd() -> None:
 # A titled tab: blocks ranked within 24 h, by current title, then by an earlier one.
 
 
+def test_a_tab_lagging_a_retitle_is_ambiguous_when_the_earlier_title_shares_its_cwd() -> None:
+    renamed = _block("a", titles=("Fix billing", "Fix auth"), cwd="/proj-a")
+    other = _block("b", titles=("Fix auth",), cwd="/proj-b")
+
+    assert match(Tab("Fix auth", "/proj-a"), [renamed, other]) == ("ambiguous", None)
+
+
 def test_a_titled_tab_hits_a_block_past_its_expiry_by_title() -> None:
     old = _block("old", ago=timedelta(hours=23), cwd="/elsewhere")
 

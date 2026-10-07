@@ -110,9 +110,13 @@ def match(tab: Tab, blocks: Sequence[SessionBlock]) -> tuple[Verdict, SessionBlo
     # so a new session's directory would find a sibling's block instead of its own.
     if key in {"", UNTITLED_KEY}:
         return "miss", None
-    found = [b for b in blocks if b.titles and title_key(b.titles[0]) == key] or [
-        b for b in blocks if any(title_key(title) == key for title in b.titles[1:])
-    ]
+    current = [b for b in blocks if b.titles and title_key(b.titles[0]) == key]
+    earlier = [b for b in blocks if any(title_key(title) == key for title in b.titles[1:])]
+    # A tab's title can lag its session's re-title, so a session elsewhere holding that
+    # title now is no surer than one in the tab's directory that held it before.
+    if len(current) == 1 and current[0].cwd != tab.cwd and any(b.cwd == tab.cwd for b in earlier):
+        return "ambiguous", None
+    found = current or earlier
     if len(found) > 1:
         found = [b for b in found if b.cwd == tab.cwd] or found
     if not found:
