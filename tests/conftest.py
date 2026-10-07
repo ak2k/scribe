@@ -91,5 +91,5 @@ def no_real_focus(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
 
     monkeypatch.setattr("scribe.focus.run_program", refuse)
     yield
-    # The poller turns any error into a log line, so the refusal alone could pass unseen.
+    # A request turns any query error into a verdict, so the refusal alone could pass unseen.
     assert not reached, "reached the real focus query; inject a runner"

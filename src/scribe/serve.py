@@ -318,7 +318,7 @@ class _Server:
             return parsed
         fields, audio = parsed
         static = self.terms.current()
-        vocab, session_counts, focus = self.sessions.vocab(static)
+        vocab, session_counts, focus = await self.sessions.vocab(static)
         workdir = Path(await anyio.to_thread.run_sync(tempfile.mkdtemp))
         dictated: _Dictation | None = None
         try:

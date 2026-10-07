@@ -22,7 +22,7 @@ from uvicorn.protocols.http.h11_impl import H11Protocol
 
 from scribe.focus import Focus
 from scribe.serve import ENDPOINT, create_app, dictation_client, run
-from scribe.session_sources import SessionTerms, local_source, remote_source
+from scribe.session_sources import SessionTerms, Source, local_source, remote_source
 from scribe.vocab import TermsFile
 from tests.xai_fixtures import xai_payload
 
@@ -32,7 +32,6 @@ if TYPE_CHECKING:
 
     from starlette.types import ASGIApp, Message
 
-    from scribe.session_terms import SessionBlock
     from scribe.xai_stt import XaiStt
 
 KEY = "xai-test-key-never-logged"
@@ -300,9 +299,7 @@ def _focused_sessions(tmp_path: Path) -> SessionTerms:
     source = local_source(local)
     source.refresh(lambda: NOW)
     answer = f"front\n\u2733 Secret tab title\n{tab_cwd}\n"
-    focus = Focus(lambda _argv, _timeout: answer)
-    focus.refresh(lambda: NOW, source.recent)
-    return SessionTerms([source], clock=lambda: NOW, focus=focus)
+    return SessionTerms([source], clock=lambda: NOW, focus=Focus(lambda _argv, _timeout: answer))
 
 
 async def test_a_focus_hit_leads_the_keyterms_and_is_recorded_by_verdict_and_count(
@@ -324,15 +321,40 @@ async def test_a_focus_hit_leads_the_keyterms_and_is_recorded_by_verdict_and_cou
     result = _json(kept / "result.json")
     assert result["focus"] == {"verdict": "hit", "terms": 2}
     assert result["session_terms"] == {"local file": 3}
-    assert cast("dict[str, object]", health.json())["focus"] == {
-        "state": "front",
-        "age_seconds": 0,
-    }
+    assert cast("dict[str, object]", health.json())["focus"] == {"state": "front"}
     written = (kept / "result.json").read_text(encoding="utf-8")
     for secret in (*FOCUS_SECRETS, str(tmp_path / "tab-cwd")):
         assert secret not in written
         assert secret not in health.text
         assert secret not in repr(logs)
+
+
+async def test_a_focus_query_hanging_past_its_cap_still_answers_the_dictation(
+    tmp_path: Path,
+) -> None:
+    release = threading.Event()
+
+    def hung(_argv: Sequence[str], _timeout: float) -> str:
+        release.wait(3)
+        return "back\n"
+
+    sessions = _focused_sessions(tmp_path)
+    focus = sessions.focus = Focus(hung)
+    try:
+        with capture_logs() as logs:
+            async with _client(Xai(), tmp_path, sessions=sessions) as client:
+                started = time.monotonic()
+                response = await _post(client)
+                elapsed = time.monotonic() - started
+    finally:
+        release.set()
+
+    assert response.status_code == 200
+    assert elapsed < focus.cap + 1
+    (line,) = [entry for entry in logs if entry["event"] == "serve.request"]
+    assert (line["focus"], line["focus_terms"]) == ("slow", 0)
+    (kept,) = _kept(tmp_path)
+    assert _json(kept / "result.json")["focus"] == {"verdict": "slow", "terms": 0}
 
 
 async def test_the_poller_runs_from_startup_until_shutdown(tmp_path: Path) -> None:
@@ -371,18 +393,16 @@ async def test_the_poller_runs_from_startup_until_shutdown(tmp_path: Path) -> No
     assert len(ssh.calls) == calls
 
 
-class _Crashing(Focus):
-    """A focus poller whose every refresh raises."""
+class _Crashing(Source):
+    """A source whose every refresh raises."""
 
     def __init__(self) -> None:
-        super().__init__(Ssh("back\n"), interval=0.01)
+        super().__init__("box-crash", lambda: None, interval=0.01)
         self.raised = 0
         self.twice = threading.Event()
 
     @override
-    def refresh(
-        self, clock: Callable[[], datetime], recent: Callable[[datetime], Sequence[SessionBlock]]
-    ) -> None:
+    def refresh(self, clock: Callable[[], datetime]) -> None:
         self.raised += 1
         if self.raised == 2:
             self.twice.set()
@@ -393,8 +413,8 @@ async def test_a_poller_that_raises_fails_no_dictation_and_stops_no_other_poller
     tmp_path: Path,
 ) -> None:
     ssh = Ssh(_session_file(("s", NOW, ["polled_term"])))
-    focus = _Crashing()
-    sessions = SessionTerms([remote_source("box-a", runner=ssh, interval=0.01)], focus=focus)
+    crashing = _Crashing()
+    sessions = SessionTerms([remote_source("box-a", runner=ssh, interval=0.01), crashing])
     app = create_app(
         dictation_client(KEY, transport=httpx.MockTransport(Xai())),
         _terms(tmp_path),
@@ -408,7 +428,7 @@ async def test_a_poller_that_raises_fails_no_dictation_and_stops_no_other_poller
     async def receive() -> Message:
         if not sent:
             return {"type": "lifespan.startup"}
-        assert await anyio.to_thread.run_sync(focus.twice.wait, 2)
+        assert await anyio.to_thread.run_sync(crashing.twice.wait, 2)
         ssh.polled.clear()
         assert await anyio.to_thread.run_sync(ssh.polled.wait, 2)
         transport = httpx.ASGITransport(app=app)

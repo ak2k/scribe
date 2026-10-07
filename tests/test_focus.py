@@ -1,11 +1,14 @@
-"""The focused Ghostty tab: queried off the request path, matched to one local session block."""
+"""The focused Ghostty tab: asked for by each request, matched to one local session block."""
 
 from __future__ import annotations
 
 import subprocess
+import threading
+import time
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
+import anyio
 import pytest
 from hypothesis import given
 from hypothesis import strategies as st
@@ -14,11 +17,11 @@ from structlog.testing import capture_logs
 from scribe.errors import ExternalServiceError, InputValidationError
 from scribe.focus import (
     ARGV,
-    POLL_SECONDS,
+    QUERY_CAP_SECONDS,
     QUERY_TIMEOUT_SECONDS,
-    STALE_AFTER,
     Focus,
     Tab,
+    Verdict,
     match,
     parse_answer,
     title_key,
@@ -66,17 +69,20 @@ def _front(title: str = TITLE, cwd: str = "/w") -> str:
     return f"front\n{title}\n{cwd}\n"
 
 
-def _sampled(answer: str | Exception, *, at: datetime = NOW) -> Focus:
+def _pick(focus: Focus, blocks: Sequence[SessionBlock]) -> tuple[Verdict, SessionBlock | None]:
+    return anyio.run(focus.pick, blocks)
+
+
+def _asked(answer: str | Exception) -> Focus:
     focus = Focus(Osascript(answer))
-    focus.refresh(lambda: at, lambda _now: [_block("s")])
+    _pick(focus, [_block("s")])
     return focus
 
 
 def test_the_query_runs_osascript_by_absolute_path_with_a_2_s_timeout() -> None:
     osascript = Osascript(_front())
-    focus = Focus(osascript)
 
-    focus.refresh(lambda: NOW, lambda _now: [_block("s")])
+    _pick(Focus(osascript), [_block("s")])
 
     assert osascript.calls == [(list(ARGV), QUERY_TIMEOUT_SECONDS)]
     assert ARGV[:2] == ("/usr/bin/osascript", "-e")
@@ -85,9 +91,8 @@ def test_the_query_runs_osascript_by_absolute_path_with_a_2_s_timeout() -> None:
     assert "linefeed" in ARGV[2]
 
 
-def test_the_tab_is_polled_every_3_s_so_a_sample_is_read_before_it_goes_stale() -> None:
-    assert Focus(Osascript(_front())).interval == 3.0
-    assert STALE_AFTER.total_seconds() > POLL_SECONDS + QUERY_TIMEOUT_SECONDS
+def test_a_request_waits_at_most_a_quarter_second_for_the_answer() -> None:
+    assert Focus(Osascript(_front())).cap == QUERY_CAP_SECONDS == 0.25
 
 
 @pytest.mark.parametrize(
@@ -148,12 +153,8 @@ _LINE = st.text(st.characters(exclude_characters="\n"))
 
 
 @given(st.one_of(st.text(), st.builds(_front, _LINE, _LINE)))
-def test_any_query_output_leaves_the_poll_with_a_verdict(text: str) -> None:
-    focus = Focus(Osascript(text))
-
-    focus.refresh(lambda: NOW, lambda _now: [_block("s")])
-
-    assert focus.pick([_block("s")], NOW)[0] in {
+def test_any_query_output_is_a_verdict(text: str) -> None:
+    assert _pick(Focus(Osascript(text)), [_block("s")])[0] in {
         "error",
         "away",
         "miss",
@@ -176,9 +177,7 @@ def test_an_untitled_tab_is_a_miss_even_when_one_block_has_its_cwd() -> None:
     blocks = [_block("mine", titles=()), _block("named", titles=("Claude Code",)), _block("titled")]
     focus = Focus(Osascript(_front("\u2733 Claude Code", "/w")))
 
-    focus.refresh(lambda: NOW, lambda _now: blocks)
-
-    assert focus.pick(blocks, NOW) == ("miss", None)
+    assert _pick(focus, blocks) == ("miss", None)
 
 
 # A titled tab: the one block, ranked within 24 h, holding its title now or before, in its cwd.
@@ -307,44 +306,60 @@ def test_a_tab_cwd_that_cannot_be_resolved_is_matched_as_reported(tmp_path: Path
     assert match(Tab(TITLE, looped), [mine]) == ("hit", mine)
 
 
-# The poller's sample, as a request reads it.
+# The query, as each request runs it.
 
 
 def test_no_local_block_within_24_h_runs_no_query_and_is_a_miss() -> None:
     osascript = Osascript(AssertionError("osascript ran with no local block"))
     focus = Focus(osascript)
 
-    focus.refresh(lambda: NOW, lambda _now: [])
-
+    assert _pick(focus, []) == ("miss", None)
     assert osascript.calls == []
-    assert focus.pick([], NOW) == ("miss", None)
-    assert focus.health(NOW) == {"state": "idle", "age_seconds": None}
+    assert focus.health() == {"state": "never"}
 
 
-def test_a_sample_is_stale_after_6_s() -> None:
-    focus = _sampled(_front())
-    mine = _block("s")
+def test_each_request_asks_for_the_tab_it_is_dictated_into() -> None:
+    first, second = _block("first", titles=("First tab",)), _block("second", titles=("Second",))
+    osascript = Osascript(_front("First tab"), _front("Second"))
+    focus = Focus(osascript)
 
-    assert focus.pick([mine], NOW + timedelta(seconds=6)) == ("hit", mine)
-    assert focus.pick([mine], NOW + timedelta(seconds=6, microseconds=1)) == ("stale", None)
+    assert _pick(focus, [first, second]) == ("hit", first)
+    assert _pick(focus, [first, second]) == ("hit", second)
+    assert len(osascript.calls) == 2
 
 
-def test_before_any_sample_a_request_is_stale() -> None:
-    focus = Focus(Osascript(AssertionError("a request ran the query")))
+def test_a_query_hanging_past_the_cap_is_slow_and_focuses_nothing() -> None:
+    release = threading.Event()
 
-    assert focus.pick([_block("s")], NOW) == ("stale", None)
-    assert focus.health(NOW) == {"state": "never", "age_seconds": None}
+    def hung(_argv: Sequence[str], _timeout: float) -> str:
+        release.wait(3)
+        return _front()
+
+    focus = Focus(hung)
+    started = time.monotonic()
+    try:
+        with capture_logs() as logs:
+            assert _pick(focus, [_block("s")]) == ("slow", None)
+    finally:
+        release.set()
+    assert time.monotonic() - started < QUERY_CAP_SECONDS + 0.5
+    assert logs == [{"event": "serve.focus_failed", "error": "slow", "log_level": "warning"}]
+    assert focus.health() == {"state": "slow"}
+
+
+def test_before_any_request_the_state_is_never() -> None:
+    assert Focus(Osascript(_front())).health() == {"state": "never"}
 
 
 def test_ghostty_away_is_away() -> None:
-    focus = _sampled("back\n")
+    focus = _asked("back\n")
 
-    assert focus.pick([_block("s")], NOW) == ("away", None)
-    assert focus.health(NOW + timedelta(seconds=2)) == {"state": "away", "age_seconds": 2}
+    assert _pick(focus, [_block("s")]) == ("away", None)
+    assert focus.health() == {"state": "away"}
 
 
-def test_a_front_sample_shows_front_in_health() -> None:
-    assert _sampled(_front()).health(NOW) == {"state": "front", "age_seconds": 0}
+def test_a_front_answer_shows_front_in_health() -> None:
+    assert _asked(_front()).health() == {"state": "front"}
 
 
 def _failure(message: str, cause: BaseException | None = None) -> ExternalServiceError:
@@ -369,18 +384,17 @@ def test_a_failed_query_logs_only_its_cause_and_is_an_error(error: Exception, ca
     focus = Focus(Osascript(error))
 
     with capture_logs() as logs:
-        focus.refresh(lambda: NOW, lambda _now: [_block("s")])
+        assert _pick(focus, [_block("s")]) == ("error", None)
 
     assert logs == [{"event": "serve.focus_failed", "error": cause, "log_level": "warning"}]
-    assert focus.pick([_block("s")], NOW) == ("error", None)
-    assert focus.health(NOW)["state"] == "error"
+    assert focus.health() == {"state": "error"}
 
 
 def test_an_unparseable_answer_is_an_error_naming_no_title() -> None:
     focus = Focus(Osascript(f"front\n{TITLE}\nline\n/w\n"))
 
     with capture_logs() as logs:
-        focus.refresh(lambda: NOW, lambda _now: [_block("s")])
+        _pick(focus, [_block("s")])
 
     assert logs == [{"event": "serve.focus_failed", "error": "unparseable", "log_level": "warning"}]
 
@@ -392,7 +406,7 @@ def test_failures_log_once_per_cause_and_recovery_once() -> None:
 
     with capture_logs() as logs:
         for _ in range(6):
-            focus.refresh(lambda: NOW, lambda _now: [_block("s")])
+            _pick(focus, [_block("s")])
 
     assert [(entry["event"], entry.get("error")) for entry in logs] == [
         ("serve.focus_failed", "-1743"),

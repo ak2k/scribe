@@ -11,7 +11,6 @@ import subprocess
 import unicodedata
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from functools import partial
 from typing import TYPE_CHECKING
 
 import anyio
@@ -152,14 +151,13 @@ class Source:
         """The blocks of the last good read that have not expired by `now`."""
         return _live(self._good, now)
 
-    def recent(self, now: datetime) -> tuple[SessionBlock, ...]:
-        """The blocks of the last good read ranked within `REACH` of `now`, expired or not."""
-        return _recent(self._good, now)
-
     def live_and_recent(
         self, now: datetime
     ) -> tuple[tuple[SessionBlock, ...], tuple[SessionBlock, ...]]:
-        """`live` and `recent` from the same read, though the poller swaps in a newer one."""
+        """`live`, and the blocks ranked within `REACH` of `now`, expired or not.
+
+        Both come from one read, though the poller may swap in a newer one meanwhile.
+        """
         good = self._good
         return _live(good, now), _recent(good, now)
 
@@ -307,10 +305,7 @@ class SessionTerms:
         self._clock = clock
         self._local = next((source for source in self.sources if source.name == LOCAL_NAME), None)
 
-    def _recent_local(self, now: datetime) -> tuple[SessionBlock, ...]:
-        return () if self._local is None else self._local.recent(now)
-
-    def vocab(self, static: Vocab) -> tuple[Vocab, dict[str, int], FocusUse]:
+    async def vocab(self, static: Vocab) -> tuple[Vocab, dict[str, int], FocusUse]:
         """The static vocabulary with the session terms merged in, per-source counts, and focus."""
         now = self._clock()
         # One read per source: the focused block and the turns must come from the same file.
@@ -320,7 +315,7 @@ class SessionTerms:
         if self.focus is not None:
             # A remote tab shows the herdr title and this Mac's cwd, so only local blocks qualify.
             recent = next((r for source, (_, r) in reads if source is self._local), ())
-            verdict, block = self.focus.pick(recent, now)
+            verdict, block = await self.focus.pick(recent)
             focused = None if block is None else (LOCAL_NAME, block)
         live = [(source.name, blocks) for source, (blocks, _) in reads]
         merged = merge(static.terms, live, focused)
@@ -331,47 +326,36 @@ class SessionTerms:
         )
 
     async def poll(self) -> None:
-        """Refresh each source, and the focused tab, on its interval until cancelled."""
-        pollers = [
-            (source.name, partial(source.refresh, self._clock), source.interval)
-            for source in self.sources
-        ]
-        if self.focus is not None:
-            refresh = partial(self.focus.refresh, self._clock, self._recent_local)
-            pollers.append((self.focus.name, refresh, self.focus.interval))
-        if not pollers:
+        """Refresh each source on its interval until cancelled."""
+        if not self.sources:
             return
         # Off AnyIO's default limiter, which dictations share, so hung fetches can
-        # never stall one; a thread per poller so a hung host delays no other.
-        limiter = anyio.CapacityLimiter(len(pollers))
+        # never stall one; a thread per source so a hung host delays no other source.
+        limiter = anyio.CapacityLimiter(len(self.sources))
         async with anyio.create_task_group() as group:
-            for name, refresh, interval in pollers:
-                group.start_soon(self._poll, name, refresh, interval, limiter)
+            for source in self.sources:
+                group.start_soon(self._poll, source, limiter)
 
-    async def _poll(
-        self,
-        name: str,
-        refresh: Callable[[], None],
-        interval: float,
-        limiter: anyio.CapacityLimiter,
-    ) -> None:
+    async def _poll(self, source: Source, limiter: anyio.CapacityLimiter) -> None:
         failure: str | None = None
         while True:
             try:
                 # Abandoned on shutdown: the fetch's own timeout ends it soon after.
-                await anyio.to_thread.run_sync(refresh, abandon_on_cancel=True, limiter=limiter)
+                await anyio.to_thread.run_sync(
+                    source.refresh, self._clock, abandon_on_cancel=True, limiter=limiter
+                )
             # Escaping here would end the lifespan, its other pollers and the xAI client;
             # the type alone is logged, as the text can quote a title or a path.
             except Exception as exc:  # noqa: BLE001  # no poll may fail a dictation
                 cause = type(exc).__name__
                 if cause != failure:
-                    _logger().warning("serve.poller_failed", poller=name, error=cause)
+                    _logger().warning("serve.poller_failed", poller=source.name, error=cause)
                 failure = cause
             else:
                 if failure is not None:
-                    _logger().info("serve.poller_restored", poller=name)
+                    _logger().info("serve.poller_restored", poller=source.name)
                 failure = None
-            await anyio.sleep(interval)
+            await anyio.sleep(source.interval)
 
     def health(self) -> list[dict[str, object]]:
         """Per source: live blocks and terms, and the age of its last good read."""
@@ -379,5 +363,5 @@ class SessionTerms:
         return [source.health(now) for source in self.sources]
 
     def focus_health(self) -> dict[str, object] | None:
-        """The focused tab poller's state and sample age, or None when focus is off."""
-        return None if self.focus is None else self.focus.health(self._clock())
+        """The last focus query's outcome, or None when focus is off."""
+        return None if self.focus is None else self.focus.health()

@@ -1,4 +1,4 @@
-"""The focused Ghostty tab for `scribe serve`: polled off the request path, matched to a session.
+"""The focused Ghostty tab for `scribe serve`: asked for by each request, matched to a session.
 
 A dictation goes to the frontmost app; when that is a Ghostty tab running Claude
 Code, the tab's title and directory single out that session's block in the
@@ -12,22 +12,22 @@ import re
 import subprocess
 import unicodedata
 from dataclasses import dataclass
-from datetime import timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
+import anyio
+import anyio.to_thread
 import structlog
 
 from scribe.errors import AppError, InputValidationError
 from scribe.session_sources import run_program
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
-    from datetime import datetime
+    from collections.abc import Sequence
 
     from structlog.stdlib import BoundLogger
 
-    from scribe.session_sources import Clock, Runner
+    from scribe.session_sources import Runner
     from scribe.session_terms import SessionBlock
 
 # Fields are joined by linefeeds: a tab character can occur in a title.
@@ -45,15 +45,15 @@ tell application id "com.mitchellh.ghostty"
 end tell"""
 # By absolute path, so the Automation grant belongs to the system osascript.
 ARGV = ("/usr/bin/osascript", "-e", SCRIPT)
-POLL_SECONDS = 3.0
 QUERY_TIMEOUT_SECONDS = 2.0
-# Two polls missed; a request then sends the unfocused merge rather than an old tab's.
-STALE_AFTER = timedelta(seconds=6)
+# How long a request waits for the answer: a warm query takes about 60 ms, and a
+# dictation is better sent unfocused than late.
+QUERY_CAP_SECONDS = 0.25
 # Claude Code's terminal title before a session has one, as `title_key` reduces it.
 UNTITLED_KEY = "claude code"
 _CODE = re.compile(r"\((-\d{1,6})\)\s*$")
 
-Verdict = Literal["off", "stale", "error", "away", "miss", "ambiguous", "elsewhere", "hit"]
+Verdict = Literal["off", "slow", "error", "away", "miss", "ambiguous", "elsewhere", "hit"]
 
 
 def _logger() -> BoundLogger:
@@ -150,73 +150,60 @@ def _same_directory(session: str, tab: str) -> bool:
     return bool(tab) and _resolved(session).casefold() == _resolved(tab).casefold()
 
 
-@dataclass(frozen=True)
-class _Sample:
-    tab: Tab | None
-    at: datetime
-
-
 class Focus:
-    """The focused Ghostty tab, sampled by a background poller and read by each request."""
+    """The focused Ghostty tab, asked for by each request."""
 
     name = "ghostty"
 
-    def __init__(self, runner: Runner, *, interval: float = POLL_SECONDS) -> None:
-        """Hold a query run with `runner` every `interval` seconds."""
-        self.interval = interval
+    def __init__(self, runner: Runner, *, cap: float = QUERY_CAP_SECONDS) -> None:
+        """Hold a query run with `runner`, which a request waits on for at most `cap` seconds."""
+        self.cap = cap
         self._runner = runner
-        self._sample: _Sample | None = None
-        self._state: Literal["never", "idle", "error", "sampled"] = "never"
+        self._state: Literal["never", "front", "away", "error", "slow"] = "never"
         self._failure: str | None = None
 
-    def refresh(self, clock: Clock, recent: Callable[[datetime], Sequence[SessionBlock]]) -> None:
-        """Sample the tab, unless no local block is recent enough for a sample to matter."""
-        if not recent(clock()):
-            self._state = "idle"
-            return
-        try:
-            tab = parse_answer(self._runner(ARGV, QUERY_TIMEOUT_SECONDS))
-        except Exception as exc:  # noqa: BLE001  # a poll never stops the server; the code is the cause
-            cause = _cause(exc)
-            if cause != self._failure:
-                _logger().warning("serve.focus_failed", error=cause)
-            self._failure = cause
-            self._state = "error"
-            return
+    def _ask(self) -> Tab | None:
+        return parse_answer(self._runner(ARGV, QUERY_TIMEOUT_SECONDS))
+
+    async def _query(self) -> Tab | str | None:
+        """The tab, None when Ghostty is not in front, or the cause of a failure."""
+        with anyio.move_on_after(self.cap):
+            try:
+                # Abandoned at the cap: the query's own timeout ends it soon after.
+                return await anyio.to_thread.run_sync(self._ask, abandon_on_cancel=True)
+            except Exception as exc:  # noqa: BLE001  # no query may fail a dictation; the code is the cause
+                return _cause(exc)
+        return "slow"
+
+    async def pick(self, recent: Sequence[SessionBlock]) -> tuple[Verdict, SessionBlock | None]:
+        """The focused block among `recent`, the local blocks ranked within 24 h.
+
+        Ghostty is asked now, so a tab chosen just before the dictation counts and
+        no earlier tab's session can be put first.
+        """
+        if not recent:
+            return "miss", None
+        answer = await self._query()
+        if isinstance(answer, str):
+            if answer != self._failure:
+                _logger().warning("serve.focus_failed", error=answer)
+            self._failure = answer
+            self._state = "slow" if answer == "slow" else "error"
+            return ("slow" if answer == "slow" else "error"), None
         if self._failure is not None:
             _logger().info("serve.focus_restored")
             self._failure = None
-        self._sample = _Sample(tab, clock())
-        self._state = "sampled"
-
-    def pick(
-        self, recent: Sequence[SessionBlock], now: datetime
-    ) -> tuple[Verdict, SessionBlock | None]:
-        """The focused block among `recent`, the local blocks ranked within 24 h; never queries."""
-        sample, state = self._sample, self._state
-        if not recent:
-            return "miss", None
-        if state == "error":
-            return "error", None
-        if sample is None or now - sample.at > STALE_AFTER:
-            return "stale", None
-        if sample.tab is None:
+        if answer is None:
+            self._state = "away"
             return "away", None
-        return match(sample.tab, recent)
+        self._state = "front"
+        return match(answer, recent)
 
-    def health(self, now: datetime) -> dict[str, object]:
-        """The last poll's outcome and the sample's age; nothing from the tab."""
-        sample, state = self._sample, self._state
-        if state == "sampled" and sample is not None:
-            shown = "away" if sample.tab is None else "front"
-        else:
-            shown = state
-        return {
-            "state": shown,
-            "age_seconds": None if sample is None else round((now - sample.at).total_seconds()),
-        }
+    def health(self) -> dict[str, object]:
+        """The last query's outcome; nothing from the tab."""
+        return {"state": self._state}
 
 
 def ghostty_focus() -> Focus:
-    """The focused-tab poller, querying Ghostty with osascript."""
+    """The focused-tab query, asking Ghostty with osascript."""
     return Focus(run_program)

@@ -217,7 +217,7 @@ def test_no_session_terms_reads_no_source(served_apps: list[ASGIApp], tmp_path: 
 
 @pytest.fixture
 def factory(monkeypatch: pytest.MonkeyPatch) -> list[Focus]:
-    """Record each focus poller the CLI builds; each answers that Ghostty is not in front."""
+    """Record each focus query the CLI builds; each answers that Ghostty is not in front."""
     made: list[Focus] = []
 
     def build() -> Focus:
@@ -241,7 +241,7 @@ def test_on_macos_focus_is_on_by_default(
     assert result.exit_code == 0, result.output
     assert len(factory) == 1
     (served,) = served_apps
-    assert _dictate_and_check_health(served)["focus"] == {"state": "never", "age_seconds": None}
+    assert _dictate_and_check_health(served)["focus"] == {"state": "never"}
     record = _kept_record(tmp_path)
     assert cast("dict[str, object]", record["flags"])["focus"] == "ghostty"
     assert record["focus"] == {"verdict": "miss", "terms": 0}

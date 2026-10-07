@@ -63,6 +63,10 @@ def _block(session: str, ranked: datetime, terms: Sequence[str]) -> SessionBlock
     )
 
 
+def _vocab(sessions: SessionTerms, static: Vocab) -> tuple[Vocab, dict[str, int], FocusUse]:
+    return anyio.run(sessions.vocab, static)
+
+
 class Runner:
     """A fake ssh: answers from a queue, recording each call."""
 
@@ -183,7 +187,7 @@ def test_an_expired_block_contributes_nothing_while_its_sibling_does() -> None:
     source = remote_source("box-a", runner=Runner(gone + here))
     source.refresh(lambda: NOW)
 
-    vocab, counts, _ = SessionTerms([source], clock=lambda: NOW).vocab(Vocab((), ()))
+    vocab, counts, _ = _vocab(SessionTerms([source], clock=lambda: NOW), Vocab((), ()))
 
     assert vocab.terms == ("here_t",)
     assert counts == {"box-a": 1}
@@ -421,13 +425,13 @@ def test_a_blocks_expiry_ages_it_out_even_while_its_host_is_down() -> None:
     source.refresh(lambda: NOW)
     static = Vocab(terms=("herdr",), aliases=(Alias("her der", "herdr"),))
 
-    vocab, counts, _ = sessions.vocab(static)
+    vocab, counts, _ = _vocab(sessions, static)
     assert vocab == Vocab(terms=("herdr", "kept_term"), aliases=static.aliases)
     assert counts == {"box-a": 1}
 
     gone = SessionTerms([source], clock=lambda: NOW + timedelta(minutes=30))
     source.refresh(lambda: NOW + timedelta(minutes=30))
-    assert gone.vocab(static) == (static, {"box-a": 0}, FocusUse("off", 0))
+    assert _vocab(gone, static) == (static, {"box-a": 0}, FocusUse("off", 0))
 
 
 def test_health_counts_live_blocks_and_terms_and_the_fetch_age() -> None:
@@ -460,7 +464,7 @@ async def test_the_poller_refreshes_every_source_until_cancelled() -> None:
         assert await anyio.to_thread.run_sync(runner.polled_twice.wait, 2)
         group.cancel_scope.cancel()
 
-    assert sessions.vocab(Vocab((), ()))[0].terms == ("polled_term",)
+    assert (await sessions.vocab(Vocab((), ())))[0].terms == ("polled_term",)
     calls = len(runner.calls)
     await anyio.sleep(0.05)
     assert len(runner.calls) == calls
@@ -597,9 +601,7 @@ def _titled(session: str, ranked: datetime, terms: Sequence[str], title: str) ->
 
 
 def _focused_on(title: str) -> Focus:
-    focus = Focus(Runner(f"front\n{title}\n/w\n"))
-    focus.refresh(lambda: NOW, lambda _now: [_block("any", NOW, [])])
-    return focus
+    return Focus(Runner(f"front\n{title}\n/w\n"))
 
 
 def _local(*blocks: SessionBlock) -> Source:
@@ -661,8 +663,7 @@ def test_recent_keeps_blocks_past_expiry_for_24_h() -> None:
     live = _block("live", NOW, ["l"])
     source = _local(live, expired, too_old)
 
-    assert source.recent(NOW) == (live, expired)
-    assert source.live(NOW) == (live,)
+    assert source.live_and_recent(NOW) == ((live,), (live, expired))
 
 
 def test_a_focus_hit_puts_that_sessions_terms_first_and_says_so() -> None:
@@ -670,7 +671,7 @@ def test_a_focus_hit_puts_that_sessions_terms_first_and_says_so() -> None:
     other = _titled("other", NOW - timedelta(minutes=1), ["other_a"], "Other tab")
     sessions = SessionTerms([_local(other, mine)], clock=lambda: NOW, focus=_focused_on("My tab"))
 
-    vocab, counts, focus = sessions.vocab(Vocab(("static_t",), ()))
+    vocab, counts, focus = _vocab(sessions, Vocab(("static_t",), ()))
 
     assert vocab.terms == ("static_t", "mine_a", "mine_b", "other_a")
     assert counts == {LOCAL_NAME: 3}
@@ -691,7 +692,6 @@ def test_a_request_reads_the_local_file_once_so_a_newer_read_cannot_double_the_f
     # The poller swaps in the newer file after every read the request makes.
     reads_of_local: list[tuple[str, Callable[[datetime], object]]] = [
         ("live", local.live),
-        ("recent", local.recent),
         ("live_and_recent", local.live_and_recent),
     ]
     for name, read in reads_of_local:
@@ -704,7 +704,7 @@ def test_a_request_reads_the_local_file_once_so_a_newer_read_cannot_double_the_f
         monkeypatch.setattr(local, name, read_then_swap)
     sessions = SessionTerms([local], clock=lambda: NOW, focus=_focused_on("My tab"))
 
-    vocab, _, focus = sessions.vocab(Vocab((), ()))
+    vocab, _, focus = _vocab(sessions, Vocab((), ()))
 
     assert vocab.terms == ("mine_a", "other_a")
     assert focus == FocusUse("hit", 1)
@@ -719,7 +719,7 @@ def test_an_untitled_tab_leaves_the_turns_as_they_were() -> None:
         [_local(newer, untitled)], clock=lambda: NOW, focus=_focused_on("Claude Code")
     )
 
-    vocab, _, focus = sessions.vocab(Vocab((), ()))
+    vocab, _, focus = _vocab(sessions, Vocab((), ()))
 
     assert focus == FocusUse("miss", 0)
     assert vocab.terms == ("newer_a", "mine_a")
@@ -733,7 +733,7 @@ def test_a_remote_block_holding_the_tabs_title_is_never_focused() -> None:
     local = _local(_titled("l", NOW - timedelta(minutes=2), ["local_t"], "Other tab"))
     sessions = SessionTerms([local, remote], clock=lambda: NOW, focus=_focused_on("My tab"))
 
-    vocab, _, focus = sessions.vocab(Vocab((), ()))
+    vocab, _, focus = _vocab(sessions, Vocab((), ()))
 
     assert focus == FocusUse("miss", 0)
     assert vocab.terms == ("remote_t", "local_t")
@@ -745,91 +745,43 @@ def test_without_a_recent_local_block_a_request_is_a_miss_that_never_queries() -
     remote.refresh(lambda: NOW)
     sessions = SessionTerms([remote], clock=lambda: NOW, focus=Focus(runner))
 
-    vocab, _, focus = sessions.vocab(Vocab((), ()))
+    vocab, _, focus = _vocab(sessions, Vocab((), ()))
 
     assert focus == FocusUse("miss", 0)
     assert vocab.terms == ("remote_t",)
     assert runner.calls == []
 
 
-def test_a_request_never_reaches_the_focus_query() -> None:
-    runner = Runner(AssertionError("osascript ran during a request"))
-    sessions = SessionTerms(
-        [_local(_block("s", NOW, ["t"]))], clock=lambda: NOW, focus=Focus(runner)
-    )
+def test_a_tab_chosen_just_before_a_dictation_leads_it_and_the_previous_tab_does_not() -> None:
+    before = _titled("before", NOW - timedelta(minutes=1), ["before_t"], "Before tab")
+    chosen = _titled("chosen", NOW - timedelta(hours=2), ["chosen_t"], "Chosen tab")
+    osascript = Runner("front\nBefore tab\n/w\n", "front\nChosen tab\n/w\n")
+    sessions = SessionTerms([_local(before, chosen)], clock=lambda: NOW, focus=Focus(osascript))
+    assert _vocab(sessions, Vocab((), ()))[2] == FocusUse("hit", 1)
 
-    assert sessions.vocab(Vocab((), ()))[2] == FocusUse("stale", 0)
-    assert runner.calls == []
+    vocab, _, focus = _vocab(sessions, Vocab((), ()))
+
+    assert focus == FocusUse("hit", 1)
+    assert vocab.terms == ("chosen_t", "before_t")
 
 
 def test_focus_off_is_reported_as_off() -> None:
     sessions = SessionTerms([_local(_block("s", NOW, ["t"]))], clock=lambda: NOW)
 
-    assert sessions.vocab(Vocab((), ()))[2] == FocusUse("off", 0)
+    assert _vocab(sessions, Vocab((), ()))[2] == FocusUse("off", 0)
     assert sessions.focus_health() is None
 
 
-@pytest.mark.anyio
-async def test_the_focus_poller_takes_its_own_token_and_stops_at_shutdown() -> None:
-    remote_started, local_started = threading.Event(), threading.Event()
-    release = threading.Event()
-
-    def hung(_argv: Sequence[str], _timeout: float) -> str:
-        remote_started.set()
-        release.wait(5)
-        return ""
-
-    reads = iter([format_block(_block("s", NOW, ["t"]))])
-
-    def hung_local() -> str:
-        # The first read gives focus a recent block to query for; every later one hangs.
-        text = next(reads, None)
-        if text is None:
-            local_started.set()
-            release.wait(5)
-            return ""
-        return text
-
-    asked = threading.Event()
-
-    def osascript(_argv: Sequence[str], _timeout: float) -> str:
-        asked.set()
-        return "back\n"
-
-    local = Source(LOCAL_NAME, hung_local, interval=0.01)
-    local.refresh(lambda: NOW)
-    sessions = SessionTerms(
-        [local, remote_source("box-a", runner=hung)],
-        clock=lambda: NOW,
-        focus=Focus(osascript, interval=0.01),
-    )
-    try:
-        async with anyio.create_task_group() as group:
-            group.start_soon(sessions.poll)
-            assert await anyio.to_thread.run_sync(remote_started.wait, 2)
-            assert await anyio.to_thread.run_sync(local_started.wait, 2)
-            assert await anyio.to_thread.run_sync(asked.wait, 2)
-            group.cancel_scope.cancel()
-    finally:
-        release.set()
-    asked.clear()
-    await anyio.sleep(0.05)
-    assert not asked.is_set()
-    assert sessions.focus_health() == {"state": "away", "age_seconds": 0}
-
-
-class _Raising(Focus):
-    """A focus poller whose refresh raises each error in turn, then succeeds."""
+class _Raising(Source):
+    """A source whose refresh raises each error in turn, then succeeds."""
 
     def __init__(self, *errors: Exception) -> None:
-        super().__init__(Runner("back\n"), interval=0.01)
+        super().__init__("box-r", lambda: None, interval=0.01)
         self.errors = list(errors)
         self.recovered = threading.Event()
 
     @override
-    def refresh(
-        self, clock: Callable[[], datetime], recent: Callable[[datetime], Sequence[SessionBlock]]
-    ) -> None:
+    def refresh(self, clock: Callable[[], datetime]) -> None:
         if self.errors:
             raise self.errors.pop(0)
         self.recovered.set()
@@ -838,20 +790,18 @@ class _Raising(Focus):
 @pytest.mark.anyio
 async def test_a_poller_that_raises_logs_the_type_once_per_change_and_keeps_polling() -> None:
     quoted = "a title from the tab"
-    focus = _Raising(KeyError(quoted), KeyError(quoted), ValueError(quoted))
+    raising = _Raising(KeyError(quoted), KeyError(quoted), ValueError(quoted))
     polled = threading.Event()
 
     def fetch() -> str:
         polled.set()
         return format_block(_block("s", NOW, ["t"]))
 
-    sessions = SessionTerms(
-        [Source(LOCAL_NAME, fetch, interval=0.01)], clock=lambda: NOW, focus=focus
-    )
+    sessions = SessionTerms([Source(LOCAL_NAME, fetch, interval=0.01), raising], clock=lambda: NOW)
     with capture_logs() as logs:
         async with anyio.create_task_group() as group:
             group.start_soon(sessions.poll)
-            assert await anyio.to_thread.run_sync(focus.recovered.wait, 2)
+            assert await anyio.to_thread.run_sync(raising.recovered.wait, 2)
             polled.clear()
             assert await anyio.to_thread.run_sync(polled.wait, 2)
             group.cancel_scope.cancel()
@@ -861,7 +811,7 @@ async def test_a_poller_that_raises_logs_the_type_once_per_change_and_keeps_poll
         ("serve.poller_failed", "ValueError"),
         ("serve.poller_restored", None),
     ]
-    assert {entry["poller"] for entry in logs} == {"ghostty"}
+    assert {entry["poller"] for entry in logs} == {"box-r"}
     assert quoted not in repr(logs)
 
 
@@ -892,7 +842,7 @@ def test_a_focused_vocab_never_holds_an_expired_unfocused_blocks_term(
         [_local(*made)], clock=lambda: NOW, focus=_focused_on(focused.titles[0])
     )
 
-    vocab, _, focus = sessions.vocab(Vocab(tuple(static), ()))
+    vocab, _, focus = _vocab(sessions, Vocab(tuple(static), ()))
 
     admissible = [t for t in dict.fromkeys(focused.terms) if t not in _BAD_TERMS]
     lead = [t for t in admissible if t not in static][: MAX_KEYTERMS - len(static)]
