@@ -1,9 +1,8 @@
 """The focused Ghostty tab for `scribe serve`: polled off the request path, matched to a session.
 
 A dictation goes to the frontmost app; when that is a Ghostty tab running Claude
-Code, the tab's title, and its directory when two sessions share a title,
-single out that session's block in the local hook file, whose terms then lead
-the keyterms.
+Code, the tab's title and directory single out that session's block in the
+local hook file, whose terms then lead the keyterms.
 """
 
 from __future__ import annotations
@@ -54,7 +53,7 @@ STALE_AFTER = timedelta(seconds=6)
 UNTITLED_KEY = "claude code"
 _CODE = re.compile(r"\((-\d{1,6})\)\s*$")
 
-Verdict = Literal["off", "stale", "error", "away", "miss", "ambiguous", "hit"]
+Verdict = Literal["off", "stale", "error", "away", "miss", "ambiguous", "elsewhere", "hit"]
 
 
 def _logger() -> BoundLogger:
@@ -104,25 +103,25 @@ def parse_answer(text: str) -> Tab | None:
 
 
 def match(tab: Tab, blocks: Sequence[SessionBlock]) -> tuple[Verdict, SessionBlock | None]:
-    """Pick the block of the session `tab` shows, among local blocks ranked within 24 h."""
+    """Pick the block of the session `tab` shows, among local blocks ranked within 24 h.
+
+    A block is picked only when it alone holds the tab's title, now or among its
+    earlier titles, and its session works in the tab's directory: a tab's title can
+    lag its session's re-title, so whichever session holds that title now is no
+    surer a pick than the one that held it before.
+    """
     key = title_key(tab.title)
     # An untitled tab picks nothing: a session gets its block only at its first prompt,
     # so a new session's directory would find a sibling's block instead of its own.
     if key in {"", UNTITLED_KEY}:
         return "miss", None
-    current = [b for b in blocks if b.titles and title_key(b.titles[0]) == key]
-    earlier = [b for b in blocks if any(title_key(title) == key for title in b.titles[1:])]
-    # A tab's title can lag its session's re-title, so a session elsewhere holding that
-    # title now is no surer than one in the tab's directory that held it before.
-    if len(current) == 1 and current[0].cwd != tab.cwd and any(b.cwd == tab.cwd for b in earlier):
-        return "ambiguous", None
-    found = current or earlier
-    if len(found) > 1:
-        found = [b for b in found if b.cwd == tab.cwd] or found
+    found = [b for b in blocks if any(title_key(title) == key for title in b.titles)]
     if not found:
         return "miss", None
     if len(found) > 1:
         return "ambiguous", None
+    if not _same_directory(found[0].cwd, tab.cwd):
+        return "elsewhere", None
     return "hit", found[0]
 
 
@@ -137,12 +136,18 @@ def _cause(exc: Exception) -> str:
 
 
 def _resolved(cwd: str) -> str:
-    # A tab reports the logical $PWD, a session its physical directory.
     try:
         return str(Path(cwd).resolve()) if cwd else ""
     # A loop raises RuntimeError, a NUL byte ValueError.
     except (OSError, RuntimeError, ValueError):
         return cwd
+
+
+def _same_directory(session: str, tab: str) -> bool:
+    # A tab reports the logical $PWD, a session its physical directory. Resolving keeps
+    # the spelling it was given and a macOS volume ignores case, so the two can differ
+    # in case alone.
+    return bool(tab) and _resolved(session).casefold() == _resolved(tab).casefold()
 
 
 @dataclass(frozen=True)
@@ -181,7 +186,7 @@ class Focus:
         if self._failure is not None:
             _logger().info("serve.focus_restored")
             self._failure = None
-        self._sample = _Sample(None if tab is None else Tab(tab.title, _resolved(tab.cwd)), clock())
+        self._sample = _Sample(tab, clock())
         self._state = "sampled"
 
     def pick(

@@ -293,7 +293,7 @@ def _focused_sessions(tmp_path: Path) -> SessionTerms:
     local.write_text(
         f"# session secret-session ranked {ranked.isoformat()}"
         f" expires {(ranked + timedelta(minutes=30)).isoformat()}"
-        ' {"cwd": "/secret/cwd", "titles": ["Secret tab title"]}\nsecret_term\nfocus_two\n'
+        f' {{"cwd": "{tab_cwd}", "titles": ["Secret tab title"]}}\nsecret_term\nfocus_two\n'
         + _session_file(("other-s", NOW - timedelta(minutes=1), ["other_t"])),
         encoding="utf-8",
     )

@@ -153,16 +153,20 @@ def test_any_query_output_leaves_the_poll_with_a_verdict(text: str) -> None:
 
     focus.refresh(lambda: NOW, lambda _now: [_block("s")])
 
-    assert focus.pick([_block("s")], NOW)[0] in {"error", "away", "miss", "hit", "ambiguous"}
+    assert focus.pick([_block("s")], NOW)[0] in {
+        "error",
+        "away",
+        "miss",
+        "hit",
+        "ambiguous",
+        "elsewhere",
+    }
 
 
 def test_a_tab_cwd_holding_a_nul_is_matched_as_reported() -> None:
-    mine, twin = _block("mine", cwd="/w\x00x"), _block("twin")
-    focus = Focus(Osascript(_front(TITLE, "/w\x00x")))
+    mine = _block("mine", cwd="/w\x00x")
 
-    focus.refresh(lambda: NOW, lambda _now: [mine, twin])
-
-    assert focus.pick([mine, twin], NOW) == ("hit", mine)
+    assert match(Tab(TITLE, "/w\x00x"), [mine, _block("other", titles=("x",))]) == ("hit", mine)
 
 
 # An untitled tab picks nothing: a new session has no block yet, so its directory finds a sibling's.
@@ -177,7 +181,7 @@ def test_an_untitled_tab_is_a_miss_even_when_one_block_has_its_cwd() -> None:
     assert focus.pick(blocks, NOW) == ("miss", None)
 
 
-# A titled tab: blocks ranked within 24 h, by current title, then by an earlier one.
+# A titled tab: the one block, ranked within 24 h, holding its title now or before, in its cwd.
 
 
 def test_a_tab_lagging_a_retitle_is_ambiguous_when_the_earlier_title_shares_its_cwd() -> None:
@@ -187,8 +191,41 @@ def test_a_tab_lagging_a_retitle_is_ambiguous_when_the_earlier_title_shares_its_
     assert match(Tab("Fix auth", "/proj-a"), [renamed, other]) == ("ambiguous", None)
 
 
+def test_a_lagging_tab_without_a_cwd_never_hits_the_session_now_holding_its_title() -> None:
+    renamed = _block("a", titles=("Fix billing", "Fix auth"), cwd="/proj-a")
+    other = _block("b", titles=("Fix auth",), cwd="/proj-b")
+
+    assert match(Tab("Fix auth", ""), [renamed, other])[1] is None
+
+
+def test_a_tab_lagging_a_retitle_is_ambiguous_when_both_sessions_share_its_cwd() -> None:
+    renamed = _block("a", titles=("Fix billing", "Fix auth"), cwd="/proj")
+    sibling = _block("b", titles=("Fix auth",), cwd="/proj")
+
+    assert match(Tab("Fix auth", "/proj"), [renamed, sibling]) == ("ambiguous", None)
+
+
+def test_a_tab_cwd_differing_in_case_still_finds_the_earlier_holder() -> None:
+    renamed = _block("a", titles=("Fix billing", "Fix auth"), cwd="/Users/someone/proj")
+    other = _block("b", titles=("Fix auth",), cwd="/elsewhere")
+
+    assert match(Tab("Fix auth", "/USERS/someone/proj"), [renamed, other]) == ("ambiguous", None)
+
+
+def test_the_one_holder_is_hit_from_a_tab_cwd_differing_in_case() -> None:
+    mine = _block("mine", cwd="/Users/someone/Proj")
+
+    assert match(Tab(TITLE, "/USERS/someone/proj"), [mine]) == ("hit", mine)
+
+
+def test_the_one_holder_in_another_cwd_is_not_hit() -> None:
+    there = _block("there", cwd="/elsewhere")
+
+    assert match(Tab(TITLE, "/w"), [there, _block("other", titles=("x",))]) == ("elsewhere", None)
+
+
 def test_a_titled_tab_hits_a_block_past_its_expiry_by_title() -> None:
-    old = _block("old", ago=timedelta(hours=23), cwd="/elsewhere")
+    old = _block("old", ago=timedelta(hours=23))
 
     assert match(Tab(f"\u2733 {TITLE}", "/w"), [old, _block("other", titles=("x",))]) == (
         "hit",
@@ -196,14 +233,7 @@ def test_a_titled_tab_hits_a_block_past_its_expiry_by_title() -> None:
     )
 
 
-def test_a_current_title_beats_an_earlier_one() -> None:
-    current = _block("current")
-    renamed = _block("renamed", titles=("Newer name", TITLE))
-
-    assert match(Tab(TITLE, "/w"), [renamed, current]) == ("hit", current)
-
-
-def test_an_earlier_title_hits_when_no_current_title_matches() -> None:
+def test_an_earlier_title_hits_when_no_other_block_holds_it() -> None:
     renamed = _block("renamed", titles=("Newer name", TITLE))
 
     assert match(Tab(TITLE, "/w"), [renamed, _block("other", titles=("x",))]) == (
@@ -212,12 +242,38 @@ def test_an_earlier_title_hits_when_no_current_title_matches() -> None:
     )
 
 
-def test_two_title_matches_are_split_by_the_tab_cwd_or_ambiguous() -> None:
+def test_two_title_holders_are_ambiguous_whatever_their_cwds() -> None:
     here, there = _block("here"), _block("there", cwd="/v")
+    renamed = _block("renamed", titles=("Newer name", TITLE))
 
-    assert match(Tab(TITLE, "/w"), [here, there]) == ("hit", here)
-    assert match(Tab(TITLE, "/u"), [here, there]) == ("ambiguous", None)
+    assert match(Tab(TITLE, "/w"), [here, there]) == ("ambiguous", None)
     assert match(Tab(TITLE, "/w"), [here, _block("twin")]) == ("ambiguous", None)
+    assert match(Tab(TITLE, "/w"), [renamed, here]) == ("ambiguous", None)
+
+
+_TITLES = st.sampled_from(["Fix auth", "\u2733 Fix auth", "Fix billing", "Claude Code", ""])
+_CWDS = st.sampled_from(["/proj", "/PROJ", "/other", ""])
+
+
+@given(
+    tab=st.builds(Tab, _TITLES, _CWDS),
+    held=st.lists(st.tuples(st.lists(_TITLES, max_size=3), _CWDS), max_size=4),
+)
+def test_a_hit_is_the_only_block_holding_the_title_and_shares_the_tabs_cwd(
+    tab: Tab, held: list[tuple[list[str], str]]
+) -> None:
+    blocks = [_block(f"s{n}", titles=titles, cwd=cwd) for n, (titles, cwd) in enumerate(held)]
+
+    verdict, block = match(tab, blocks)
+
+    if verdict == "hit":
+        assert block is not None
+        holders = [b for b in blocks if title_key(tab.title) in map(title_key, b.titles)]
+        assert holders == [block]
+        assert tab.cwd
+        assert block.cwd.casefold() == tab.cwd.casefold()
+    else:
+        assert block is None
 
 
 def test_a_titled_tab_never_falls_back_to_the_cwd() -> None:
@@ -237,24 +293,18 @@ def test_a_symlinked_tab_cwd_is_resolved_before_matching(tmp_path: Path) -> None
     real = tmp_path / "real"
     real.mkdir()
     (tmp_path / "link").symlink_to(real)
-    mine, twin = _block("mine", cwd=str(real)), _block("twin")
-    focus = Focus(Osascript(_front(TITLE, str(tmp_path / "link"))))
+    mine = _block("mine", cwd=str(real))
 
-    focus.refresh(lambda: NOW, lambda _now: [mine, twin])
-
-    assert focus.pick([mine, twin], NOW) == ("hit", mine)
+    assert match(Tab(TITLE, str(tmp_path / "link")), [mine]) == ("hit", mine)
 
 
 def test_a_tab_cwd_that_cannot_be_resolved_is_matched_as_reported(tmp_path: Path) -> None:
     (tmp_path / "a").symlink_to(tmp_path / "b")
     (tmp_path / "b").symlink_to(tmp_path / "a")
     looped = str(tmp_path / "a")
-    mine, twin = _block("mine", cwd=looped), _block("twin")
-    focus = Focus(Osascript(_front(TITLE, looped)))
+    mine = _block("mine", cwd=looped)
 
-    focus.refresh(lambda: NOW, lambda _now: [mine, twin])
-
-    assert focus.pick([mine, twin], NOW) == ("hit", mine)
+    assert match(Tab(TITLE, looped), [mine]) == ("hit", mine)
 
 
 # The poller's sample, as a request reads it.
