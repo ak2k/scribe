@@ -511,11 +511,12 @@ def test_a_burst_of_requests_starts_one_query_and_the_rest_get_no_focus_at_once(
     assert sorted(seconds for _, seconds in took)[-2] < QUERY_CAP_SECONDS
 
 
+@pytest.mark.parametrize("error", [RuntimeError("can't start new thread"), MemoryError()])
 def test_a_query_thread_that_cannot_start_frees_focus_for_the_next_request(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, error: Exception
 ) -> None:
     def no_thread(*_args: object, **_kwargs: object) -> NoReturn:
-        raise RuntimeError("can't start new thread")
+        raise error
 
     focus = Focus(Osascript(_front()), cap=ROOMY)
     with monkeypatch.context() as patched:

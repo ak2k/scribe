@@ -204,7 +204,7 @@ class Focus:
         # worker, while a started thread always runs `run` and so frees the permit.
         try:
             threading.Thread(target=run, name="focus query", daemon=True).start()
-        except RuntimeError as exc:
+        except Exception as exc:  # noqa: BLE001  # a thread that never starts never frees the permit
             self._permit.release()
             return _cause(exc)
         with anyio.move_on_after(self.cap):
