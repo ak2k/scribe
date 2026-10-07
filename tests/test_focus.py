@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import queue
 import subprocess
 import threading
 import time
@@ -449,6 +450,35 @@ def test_requests_timing_out_on_a_stalled_lookup_hold_one_worker_between_them(
     assert len(osascript.calls) == 2
 
 
+def test_requests_capped_before_their_query_is_picked_up_leave_no_thread_behind(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A queue-fed worker taking the query only after the cap: AnyIO's pool then skips
+    # the cancelled job and never takes that worker back.
+    pickup = queue.Queue[object].get
+
+    def late(self: queue.Queue[object], block: bool = True, timeout: float | None = None) -> object:
+        item = pickup(self, block, timeout)
+        if item is not None:
+            time.sleep(QUERY_CAP_SECONDS + 0.1)
+        return item
+
+    monkeypatch.setattr(queue.Queue, "get", late)
+    focus = Focus(Osascript(_front()))
+    left: list[int] = []
+
+    async def requests() -> None:
+        before = threading.active_count()
+        for _ in range(3):
+            await focus.pick([_block("s")])
+        # Time for each finished query's thread to exit.
+        await anyio.sleep(1)
+        left.append(threading.active_count() - before)
+
+    anyio.run(requests)
+    assert left == [0]
+
+
 def test_a_burst_of_requests_starts_one_query_and_the_rest_get_no_focus_at_once() -> None:
     release = threading.Event()
     calls: list[float] = []
@@ -481,7 +511,7 @@ def test_a_burst_of_requests_starts_one_query_and_the_rest_get_no_focus_at_once(
     assert sorted(seconds for _, seconds in took)[-2] < QUERY_CAP_SECONDS
 
 
-def test_a_worker_that_never_starts_frees_focus_for_the_next_request(
+def test_a_query_thread_that_cannot_start_frees_focus_for_the_next_request(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     def no_thread(*_args: object, **_kwargs: object) -> NoReturn:
@@ -489,7 +519,7 @@ def test_a_worker_that_never_starts_frees_focus_for_the_next_request(
 
     focus = Focus(Osascript(_front()), cap=ROOMY)
     with monkeypatch.context() as patched:
-        patched.setattr(anyio.to_thread, "run_sync", no_thread)
+        patched.setattr(threading.Thread, "start", no_thread)
         assert _pick(focus, [_block("s")]) == ("error", None)
 
     assert _pick(focus, [_block("s")])[0] == "hit"

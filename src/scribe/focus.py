@@ -12,19 +12,21 @@ import re
 import subprocess
 import threading
 import unicodedata
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 import anyio
-import anyio.to_thread
+import anyio.from_thread
+import anyio.lowlevel
 import structlog
 
 from scribe.errors import AppError, InputValidationError
 from scribe.session_sources import run_program
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Sequence
 
     from structlog.stdlib import BoundLogger
 
@@ -155,34 +157,6 @@ def _spelling(cwd: str) -> str:
     return unicodedata.normalize("NFC", _resolved(cwd)).casefold()
 
 
-class _Worker:
-    """One query's thread, holding focus's only permit until it finishes or never starts."""
-
-    def __init__(self, permit: threading.Lock) -> None:
-        self._permit = permit
-        self._guard = threading.Lock()
-        self._state: Literal["waiting", "running", "withdrawn"] = "waiting"
-
-    def run(
-        self, ask: Callable[[Sequence[SessionBlock]], _Match | None], recent: Sequence[SessionBlock]
-    ) -> _Match | None:
-        with self._guard:
-            if self._state == "withdrawn":
-                return None
-            self._state = "running"
-        try:
-            return ask(recent)
-        finally:
-            self._permit.release()
-
-    def withdraw(self) -> None:
-        """Free the permit if the thread has not started, as it then never will release it."""
-        with self._guard:
-            if self._state == "waiting":
-                self._state = "withdrawn"
-                self._permit.release()
-
-
 class Focus:
     """The focused Ghostty tab, asked for by each request."""
 
@@ -211,16 +185,31 @@ class Focus:
         """
         if not self._permit.acquire(blocking=False):
             return "slow"
-        worker = _Worker(self._permit)
-        with anyio.move_on_after(self.cap):
+        token = anyio.lowlevel.current_token()
+        done = anyio.Event()
+        answer: list[_Match | str | None] = []
+
+        def run() -> None:
             try:
-                return await anyio.to_thread.run_sync(
-                    worker.run, self._ask, recent, abandon_on_cancel=True
-                )
+                answer.append(self._ask(recent))
             except Exception as exc:  # noqa: BLE001  # no query may fail a dictation; the code is the cause
-                return _cause(exc)
+                answer.append(_cause(exc))
             finally:
-                worker.withdraw()
+                self._permit.release()
+            # A request past the cap no longer waits, and its loop may have closed.
+            with suppress(RuntimeError):
+                anyio.from_thread.run_sync(done.set, token=token)
+
+        # Not AnyIO's pool: a pooled job cancelled before a worker takes it strands that
+        # worker, while a started thread always runs `run` and so frees the permit.
+        try:
+            threading.Thread(target=run, name="focus query", daemon=True).start()
+        except RuntimeError as exc:
+            self._permit.release()
+            return _cause(exc)
+        with anyio.move_on_after(self.cap):
+            await done.wait()
+            return answer[0]
         return "slow"
 
     async def pick(self, recent: Sequence[SessionBlock]) -> tuple[Verdict, SessionBlock | None]:
