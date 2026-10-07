@@ -41,6 +41,8 @@ if TYPE_CHECKING:
 
 NOW = datetime(2026, 10, 5, 12, 0, tzinfo=UTC)
 SSH_FILE = ".local/state/scribe/terms/current.txt"
+# A fake answers at once, yet a loaded machine can run its thread later than the real cap.
+ROOMY = 30.0
 
 
 def _header(session: str, ranked: datetime, expires: datetime | None = None) -> str:
@@ -601,7 +603,7 @@ def _titled(session: str, ranked: datetime, terms: Sequence[str], title: str) ->
 
 
 def _focused_on(title: str) -> Focus:
-    return Focus(Runner(f"front\n{title}\n/w\n"))
+    return Focus(Runner(f"front\n{title}\n/w\n"), cap=ROOMY)
 
 
 def _local(*blocks: SessionBlock) -> Source:
@@ -743,7 +745,7 @@ def test_without_a_recent_local_block_a_request_is_a_miss_that_never_queries() -
     runner = Runner(AssertionError("osascript ran during a request"))
     remote = remote_source("box-a", runner=Runner(_file(("r", NOW, ["remote_t"]))))
     remote.refresh(lambda: NOW)
-    sessions = SessionTerms([remote], clock=lambda: NOW, focus=Focus(runner))
+    sessions = SessionTerms([remote], clock=lambda: NOW, focus=Focus(runner, cap=ROOMY))
 
     vocab, _, focus = _vocab(sessions, Vocab((), ()))
 
@@ -756,7 +758,9 @@ def test_a_tab_chosen_just_before_a_dictation_leads_it_and_the_previous_tab_does
     before = _titled("before", NOW - timedelta(minutes=1), ["before_t"], "Before tab")
     chosen = _titled("chosen", NOW - timedelta(hours=2), ["chosen_t"], "Chosen tab")
     osascript = Runner("front\nBefore tab\n/w\n", "front\nChosen tab\n/w\n")
-    sessions = SessionTerms([_local(before, chosen)], clock=lambda: NOW, focus=Focus(osascript))
+    sessions = SessionTerms(
+        [_local(before, chosen)], clock=lambda: NOW, focus=Focus(osascript, cap=ROOMY)
+    )
     assert _vocab(sessions, Vocab((), ()))[2] == FocusUse("hit", 1)
 
     vocab, _, focus = _vocab(sessions, Vocab((), ()))

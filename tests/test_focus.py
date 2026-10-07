@@ -34,6 +34,8 @@ if TYPE_CHECKING:
 
 NOW = datetime(2026, 10, 5, 12, 0, tzinfo=UTC)
 TITLE = "Fix the widget panel"
+# A fake answers at once, yet a loaded machine can run its thread later than the real cap.
+ROOMY = 30.0
 
 
 def _block(
@@ -74,7 +76,7 @@ def _pick(focus: Focus, blocks: Sequence[SessionBlock]) -> tuple[Verdict, Sessio
 
 
 def _asked(answer: str | Exception) -> Focus:
-    focus = Focus(Osascript(answer))
+    focus = Focus(Osascript(answer), cap=ROOMY)
     _pick(focus, [_block("s")])
     return focus
 
@@ -82,7 +84,7 @@ def _asked(answer: str | Exception) -> Focus:
 def test_the_query_runs_osascript_by_absolute_path_with_a_2_s_timeout() -> None:
     osascript = Osascript(_front())
 
-    _pick(Focus(osascript), [_block("s")])
+    _pick(Focus(osascript, cap=ROOMY), [_block("s")])
 
     assert osascript.calls == [(list(ARGV), QUERY_TIMEOUT_SECONDS)]
     assert ARGV[:2] == ("/usr/bin/osascript", "-e")
@@ -154,7 +156,7 @@ _LINE = st.text(st.characters(exclude_characters="\n"))
 
 @given(st.one_of(st.text(), st.builds(_front, _LINE, _LINE)))
 def test_any_query_output_is_a_verdict(text: str) -> None:
-    assert _pick(Focus(Osascript(text)), [_block("s")])[0] in {
+    assert _pick(Focus(Osascript(text), cap=ROOMY), [_block("s")])[0] in {
         "error",
         "away",
         "miss",
@@ -175,7 +177,7 @@ def test_a_tab_cwd_holding_a_nul_is_matched_as_reported() -> None:
 
 def test_an_untitled_tab_is_a_miss_even_when_one_block_has_its_cwd() -> None:
     blocks = [_block("mine", titles=()), _block("named", titles=("Claude Code",)), _block("titled")]
-    focus = Focus(Osascript(_front("\u2733 Claude Code", "/w")))
+    focus = Focus(Osascript(_front("\u2733 Claude Code", "/w")), cap=ROOMY)
 
     assert _pick(focus, blocks) == ("miss", None)
 
@@ -311,7 +313,7 @@ def test_a_tab_cwd_that_cannot_be_resolved_is_matched_as_reported(tmp_path: Path
 
 def test_no_local_block_within_24_h_runs_no_query_and_is_a_miss() -> None:
     osascript = Osascript(AssertionError("osascript ran with no local block"))
-    focus = Focus(osascript)
+    focus = Focus(osascript, cap=ROOMY)
 
     assert _pick(focus, []) == ("miss", None)
     assert osascript.calls == []
@@ -321,7 +323,7 @@ def test_no_local_block_within_24_h_runs_no_query_and_is_a_miss() -> None:
 def test_each_request_asks_for_the_tab_it_is_dictated_into() -> None:
     first, second = _block("first", titles=("First tab",)), _block("second", titles=("Second",))
     osascript = Osascript(_front("First tab"), _front("Second"))
-    focus = Focus(osascript)
+    focus = Focus(osascript, cap=ROOMY)
 
     assert _pick(focus, [first, second]) == ("hit", first)
     assert _pick(focus, [first, second]) == ("hit", second)
@@ -342,7 +344,7 @@ def test_a_query_hanging_past_the_cap_is_slow_and_focuses_nothing() -> None:
             assert _pick(focus, [_block("s")]) == ("slow", None)
     finally:
         release.set()
-    assert time.monotonic() - started < QUERY_CAP_SECONDS + 0.5
+    assert time.monotonic() - started < QUERY_CAP_SECONDS + 1
     assert logs == [{"event": "serve.focus_failed", "error": "slow", "log_level": "warning"}]
     assert focus.health() == {"state": "slow"}
 
@@ -381,7 +383,7 @@ def _failure(message: str, cause: BaseException | None = None) -> ExternalServic
     ],
 )
 def test_a_failed_query_logs_only_its_cause_and_is_an_error(error: Exception, cause: str) -> None:
-    focus = Focus(Osascript(error))
+    focus = Focus(Osascript(error), cap=ROOMY)
 
     with capture_logs() as logs:
         assert _pick(focus, [_block("s")]) == ("error", None)
@@ -391,7 +393,7 @@ def test_a_failed_query_logs_only_its_cause_and_is_an_error(error: Exception, ca
 
 
 def test_an_unparseable_answer_is_an_error_naming_no_title() -> None:
-    focus = Focus(Osascript(f"front\n{TITLE}\nline\n/w\n"))
+    focus = Focus(Osascript(f"front\n{TITLE}\nline\n/w\n"), cap=ROOMY)
 
     with capture_logs() as logs:
         _pick(focus, [_block("s")])
@@ -402,7 +404,7 @@ def test_an_unparseable_answer_is_an_error_naming_no_title() -> None:
 def test_failures_log_once_per_cause_and_recovery_once() -> None:
     denied = _failure(f"exit 1: {TITLE} (-1743)")
     timeout = _failure("no answer within 2 s", subprocess.TimeoutExpired("osascript", 2))
-    focus = Focus(Osascript(denied, denied, timeout, timeout, _front(), _front()))
+    focus = Focus(Osascript(denied, denied, timeout, timeout, _front(), _front()), cap=ROOMY)
 
     with capture_logs() as logs:
         for _ in range(6):

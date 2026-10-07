@@ -299,7 +299,9 @@ def _focused_sessions(tmp_path: Path) -> SessionTerms:
     source = local_source(local)
     source.refresh(lambda: NOW)
     answer = f"front\n\u2733 Secret tab title\n{tab_cwd}\n"
-    return SessionTerms([source], clock=lambda: NOW, focus=Focus(lambda _argv, _timeout: answer))
+    # Well past the real cap, which a loaded machine can overrun even with a fake answering at once.
+    focus = Focus(lambda _argv, _timeout: answer, cap=30)
+    return SessionTerms([source], clock=lambda: NOW, focus=focus)
 
 
 async def test_a_focus_hit_leads_the_keyterms_and_is_recorded_by_verdict_and_count(
