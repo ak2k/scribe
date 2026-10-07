@@ -22,7 +22,7 @@ dependencies = [
     "pydantic>=2.12",
     "pydantic-settings>=2.7",
     "structlog>=24",
-    "anyio>=4",
+    "anyio>=4.11",
     "typer>=0.12",
     "stamina>=24.2",
     # DIVERGE: AGENTS.md's stack table names no HTTP server; `scribe serve` needs a
