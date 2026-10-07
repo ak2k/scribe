@@ -18,7 +18,7 @@ import anyio.to_thread
 import structlog
 
 from scribe.errors import AppError, ExternalServiceError, InputValidationError
-from scribe.session_terms import REACH, parse_blocks
+from scribe.session_terms import MAX_FETCH_BYTES, REACH, parse_blocks
 from scribe.vocab import Vocab
 from scribe.xai_stt import MAX_KEYTERMS, check_keyterms
 
@@ -37,8 +37,6 @@ if TYPE_CHECKING:
 LOCAL_POLL_SECONDS = 1.0
 REMOTE_POLL_SECONDS = 3.0
 FETCH_TIMEOUT_SECONDS = 4.0
-# The hook writes about 1 KiB per session; far more is not a hook file.
-MAX_FETCH_BYTES = 2**20
 # Relative to the remote home: the hosts set no XDG_STATE_HOME.
 REMOTE_FILE = ".local/state/scribe/terms/current.txt"
 # Holds a space, so no valid host can share its name.

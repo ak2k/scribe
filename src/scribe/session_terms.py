@@ -40,6 +40,8 @@ WINDOW = timedelta(minutes=30)
 # tab's title find its session, which may be prompted again hours later.
 REACH = timedelta(hours=24)
 RETENTION = timedelta(days=7)
+# The most a remote host reads of `current.txt`, so the hook writes no more.
+MAX_FETCH_BYTES = 2**20
 LOG_LIMIT = 1024 * 1024
 
 # The events that are the operator's own activity, which rank a session.
@@ -520,7 +522,8 @@ def write_merged(terms_dir: Path, *, now: datetime) -> None:
     One block per interactive session ranked within `REACH`, newest rank time
     first: a header `# session <id> ranked <time> expires <time> {"cwd": ...,
     "titles": [...]}`, the expiry being when the session leaves the window,
-    which may be past, then up to `MERGED_CAP` of its terms, best first.
+    which may be past, then up to `MERGED_CAP` of its terms, best first. A
+    block that would take the file past `MAX_FETCH_BYTES` is left out.
     """
     sessions = terms_dir / "sessions"
     records: list[SessionRecord] = []
@@ -552,6 +555,7 @@ def write_merged(terms_dir: Path, *, now: datetime) -> None:
         reverse=True,
     )
     blocks: list[str] = []
+    size = 0
     for ranked, record in live:
         best = sorted(record.terms, key=lambda t: (t.last_seen, t.count), reverse=True)
         # Without a later hook nothing rewrites the file, so each block says when
@@ -564,7 +568,12 @@ def write_merged(terms_dir: Path, *, now: datetime) -> None:
             cwd=record.cwd,
             titles=tuple(dict.fromkeys(record.custom_titles + record.ai_titles))[:MAX_TITLES],
         )
-        blocks.append(format_block(block))
+        text = format_block(block)
+        # Skipped rather than ending the file: an older block may be smaller and still fit.
+        if size + len(text.encode()) > MAX_FETCH_BYTES:
+            continue
+        size += len(text.encode())
+        blocks.append(text)
     terms_dir.mkdir(parents=True, exist_ok=True)
     _replace_atomically(terms_dir / "current.txt", "".join(blocks))
 

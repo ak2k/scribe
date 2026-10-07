@@ -19,6 +19,7 @@ from typer.testing import CliRunner
 from scribe import session_terms
 from scribe.cli import app
 from scribe.errors import InputValidationError
+from scribe.session_sources import MAX_FETCH_BYTES, remote_source
 from scribe.session_terms import (
     LOG_LIMIT,
     MERGED_CAP,
@@ -358,6 +359,32 @@ def test_each_session_block_is_newest_first_and_capped(tmp_path: Path) -> None:
     assert len(new.terms) == MERGED_CAP
     assert (mid.session_id, mid.terms) == ("mid", ("mid_a", "shared_x"))
     check_keyterms(new.terms)
+
+
+def _letters(n: int) -> str:
+    return "".join(string.ascii_letters[int(digit)] for digit in str(n))
+
+
+def test_the_merged_file_stays_within_what_a_remote_host_reads(tmp_path: Path) -> None:
+    sessions = tmp_path / "terms" / "sessions"
+    _store(sessions, _record("fresh", NOW, ["fresh_term"]))
+    # Each block holds 60 terms of 50 characters, so 400 of them pass 1 MiB.
+    for n in range(400):
+        terms = [f"Big{_letters(n)}Term{_letters(i)}".ljust(50, "x") for i in range(MERGED_CAP)]
+        _store(sessions, _record(f"big-{n:03}", NOW - timedelta(hours=2, seconds=n), terms))
+    _store(sessions, _record("small", NOW - timedelta(hours=3), ["small_term"]))
+
+    write_merged(tmp_path / "terms", now=NOW)
+
+    text = (tmp_path / "terms" / "current.txt").read_text()
+    assert len(text.encode()) <= MAX_FETCH_BYTES
+    ids = [block.session_id for block in parse_blocks(text)]
+    assert ids[0] == "fresh"
+    assert ids[-1] == "small"
+    assert len(ids) < 402
+    remote = remote_source("box", runner=lambda _argv, _timeout: text)
+    remote.refresh(lambda: NOW)
+    assert "fresh_term" in {term for block in remote.live(NOW) for term in block.terms}
 
 
 def test_merged_file_ranks_within_a_session_by_last_seen_then_count(tmp_path: Path) -> None:
