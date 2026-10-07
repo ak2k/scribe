@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 import threading
 import time
+import unicodedata
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
@@ -172,7 +174,7 @@ def test_a_tab_cwd_holding_a_nul_is_matched_as_reported() -> None:
     assert match(Tab(TITLE, "/w\x00x"), [mine, _block("other", titles=("x",))]) == ("hit", mine)
 
 
-# An untitled tab picks nothing: a new session has no block yet, so its directory finds a sibling's.
+# An untitled tab picks nothing: Claude Code's default title is no session's own evidence.
 
 
 def test_an_untitled_tab_is_a_miss_even_when_one_block_has_its_cwd() -> None:
@@ -299,6 +301,26 @@ def test_a_symlinked_tab_cwd_is_resolved_before_matching(tmp_path: Path) -> None
     assert match(Tab(TITLE, str(tmp_path / "link")), [mine]) == ("hit", mine)
 
 
+def test_a_symlinked_session_cwd_is_resolved_before_matching(tmp_path: Path) -> None:
+    real = tmp_path / "real"
+    real.mkdir()
+    (tmp_path / "link").symlink_to(real)
+    mine = _block("mine", cwd=str(tmp_path / "link"))
+
+    assert match(Tab(TITLE, str(real)), [mine]) == ("hit", mine)
+
+
+def test_a_tab_cwd_in_another_unicode_form_of_the_same_directory_is_hit(tmp_path: Path) -> None:
+    nfd = tmp_path / unicodedata.normalize("NFD", "Caf\u00e9")
+    nfd.mkdir()
+    nfc = tmp_path / unicodedata.normalize("NFC", "Caf\u00e9")
+    if not nfc.exists() or not nfc.samefile(nfd):
+        pytest.skip("this filesystem keeps the two spellings apart")
+    mine = _block("mine", cwd=str(nfd))
+
+    assert match(Tab(TITLE, str(nfc)), [mine]) == ("hit", mine)
+
+
 def test_a_tab_cwd_that_cannot_be_resolved_is_matched_as_reported(tmp_path: Path) -> None:
     (tmp_path / "a").symlink_to(tmp_path / "b")
     (tmp_path / "b").symlink_to(tmp_path / "a")
@@ -347,6 +369,49 @@ def test_a_query_hanging_past_the_cap_is_slow_and_focuses_nothing() -> None:
     assert time.monotonic() - started < QUERY_CAP_SECONDS + 1
     assert logs == [{"event": "serve.focus_failed", "error": "slow", "log_level": "warning"}]
     assert focus.health() == {"state": "slow"}
+
+
+def test_a_directory_lookup_hanging_past_the_cap_is_slow_and_never_blocks_the_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stuck = "/stuck-mount/proj"
+    real = os.path.realpath
+    release = threading.Event()
+
+    def stalled(path: str | os.PathLike[str], **options: bool) -> str:
+        if os.fspath(path).startswith(stuck):
+            release.wait(1.5)
+        return real(path, **options)
+
+    monkeypatch.setattr(os.path, "realpath", stalled)
+    focus = Focus(lambda _argv, _timeout: _front(TITLE, stuck))
+    gaps: list[float] = []
+    picked: list[tuple[Verdict, float]] = []
+
+    async def dictate() -> None:
+        async def heartbeat() -> None:
+            last = time.monotonic()
+            while True:
+                await anyio.sleep(0.01)
+                gaps.append(time.monotonic() - last)
+                last = time.monotonic()
+
+        async with anyio.create_task_group() as group:
+            group.start_soon(heartbeat)
+            started = time.monotonic()
+            verdict, _ = await focus.pick([_block("mine", cwd=stuck)])
+            picked.append((verdict, time.monotonic() - started))
+            await anyio.sleep(0.05)
+            group.cancel_scope.cancel()
+
+    try:
+        anyio.run(dictate)
+    finally:
+        release.set()
+    ((verdict, took),) = picked
+    assert max(gaps) < QUERY_CAP_SECONDS
+    assert took < QUERY_CAP_SECONDS + 1
+    assert verdict == "slow"
 
 
 def test_before_any_request_the_state_is_never() -> None:

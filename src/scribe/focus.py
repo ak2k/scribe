@@ -54,6 +54,7 @@ UNTITLED_KEY = "claude code"
 _CODE = re.compile(r"\((-\d{1,6})\)\s*$")
 
 Verdict = Literal["off", "slow", "error", "away", "miss", "ambiguous", "elsewhere", "hit"]
+type _Match = tuple[Verdict, SessionBlock | None]
 
 
 def _logger() -> BoundLogger:
@@ -111,8 +112,7 @@ def match(tab: Tab, blocks: Sequence[SessionBlock]) -> tuple[Verdict, SessionBlo
     surer a pick than the one that held it before.
     """
     key = title_key(tab.title)
-    # An untitled tab picks nothing: a session gets its block only at its first prompt,
-    # so a new session's directory would find a sibling's block instead of its own.
+    # An untitled tab picks nothing: Claude Code's default title is no session's own evidence.
     if key in {"", UNTITLED_KEY}:
         return "miss", None
     found = [b for b in blocks if any(title_key(title) == key for title in b.titles)]
@@ -145,9 +145,13 @@ def _resolved(cwd: str) -> str:
 
 def _same_directory(session: str, tab: str) -> bool:
     # A tab reports the logical $PWD, a session its physical directory. Resolving keeps
-    # the spelling it was given and a macOS volume ignores case, so the two can differ
-    # in case alone.
-    return bool(tab) and _resolved(session).casefold() == _resolved(tab).casefold()
+    # the spelling it was given, and a macOS volume ignores case and Unicode form, so
+    # the two can differ in those alone.
+    return bool(tab) and _spelling(session) == _spelling(tab)
+
+
+def _spelling(cwd: str) -> str:
+    return unicodedata.normalize("NFC", _resolved(cwd)).casefold()
 
 
 class Focus:
@@ -162,15 +166,17 @@ class Focus:
         self._state: Literal["never", "front", "away", "error", "slow"] = "never"
         self._failure: str | None = None
 
-    def _ask(self) -> Tab | None:
-        return parse_answer(self._runner(ARGV, QUERY_TIMEOUT_SECONDS))
+    def _ask(self, recent: Sequence[SessionBlock]) -> _Match | None:
+        tab = parse_answer(self._runner(ARGV, QUERY_TIMEOUT_SECONDS))
+        # Matched here, under the cap: resolving a directory can hang on a stalled mount.
+        return None if tab is None else match(tab, recent)
 
-    async def _query(self) -> Tab | str | None:
-        """The tab, None when Ghostty is not in front, or the cause of a failure."""
+    async def _query(self, recent: Sequence[SessionBlock]) -> _Match | str | None:
+        """The match, None when Ghostty is not in front, or the cause of a failure."""
         with anyio.move_on_after(self.cap):
             try:
                 # Abandoned at the cap: the query's own timeout ends it soon after.
-                return await anyio.to_thread.run_sync(self._ask, abandon_on_cancel=True)
+                return await anyio.to_thread.run_sync(self._ask, recent, abandon_on_cancel=True)
             except Exception as exc:  # noqa: BLE001  # no query may fail a dictation; the code is the cause
                 return _cause(exc)
         return "slow"
@@ -183,7 +189,7 @@ class Focus:
         """
         if not recent:
             return "miss", None
-        answer = await self._query()
+        answer = await self._query(recent)
         if isinstance(answer, str):
             if answer != self._failure:
                 _logger().warning("serve.focus_failed", error=answer)
@@ -197,7 +203,7 @@ class Focus:
             self._state = "away"
             return "away", None
         self._state = "front"
-        return match(answer, recent)
+        return answer
 
     def health(self) -> dict[str, object]:
         """The last query's outcome; nothing from the tab."""
