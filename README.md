@@ -232,7 +232,8 @@ two sessions share, or a slow or failed query picks none. No query runs while
 no session here was prompted in the last 24 hours. The first query brings up
 macOS's one-time Automation prompt asking to let the program running serve
 control Ghostty; until it is allowed, the log shows
-`serve.focus_failed error=-1743`. `--no-focus` turns this off.
+`serve.focus_failed error=slow` while the prompt waits for an answer, or
+`error=-1743` once it is denied. `--no-focus` turns this off.
 Each request's log line and `result.json` say whether focus found a session
 and how many terms it gave, never which; `GET /health` shows the last query's
 outcome.
