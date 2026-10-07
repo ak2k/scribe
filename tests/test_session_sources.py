@@ -7,7 +7,7 @@ import sys
 import threading
 import time
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, override
 
 import anyio
 import anyio.from_thread
@@ -18,25 +18,31 @@ from hypothesis import strategies as st
 from structlog.testing import capture_logs
 
 from scribe.errors import ExternalServiceError, InputValidationError
+from scribe.focus import Focus
 from scribe.session_sources import (
     FETCH_TIMEOUT_SECONDS,
+    LOCAL_NAME,
+    FocusUse,
     SessionTerms,
+    Source,
     check_host,
     local_source,
     merge,
     remote_source,
     run_program,
 )
-from scribe.session_terms import SessionBlock
+from scribe.session_terms import SessionBlock, format_block
 from scribe.vocab import Alias, Vocab, deliver
 from scribe.xai_stt import MAX_KEYTERMS
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Sequence
     from pathlib import Path
 
 NOW = datetime(2026, 10, 5, 12, 0, tzinfo=UTC)
 SSH_FILE = ".local/state/scribe/terms/current.txt"
+# A fake answers at once, yet a loaded machine can run its thread later than the real cap.
+ROOMY = 30.0
 
 
 def _header(session: str, ranked: datetime, expires: datetime | None = None) -> str:
@@ -57,6 +63,10 @@ def _block(session: str, ranked: datetime, terms: Sequence[str]) -> SessionBlock
     return SessionBlock(
         session, ranked, ranked + timedelta(minutes=30), tuple(terms), cwd="/w", titles=("A tab",)
     )
+
+
+def _vocab(sessions: SessionTerms, static: Vocab) -> tuple[Vocab, dict[str, int], FocusUse]:
+    return anyio.run(sessions.vocab, static)
 
 
 class Runner:
@@ -179,7 +189,7 @@ def test_an_expired_block_contributes_nothing_while_its_sibling_does() -> None:
     source = remote_source("box-a", runner=Runner(gone + here))
     source.refresh(lambda: NOW)
 
-    vocab, counts = SessionTerms([source], clock=lambda: NOW).vocab(Vocab((), ()))
+    vocab, counts, _ = _vocab(SessionTerms([source], clock=lambda: NOW), Vocab((), ()))
 
     assert vocab.terms == ("here_t",)
     assert counts == {"box-a": 1}
@@ -204,23 +214,36 @@ _BAD_TERMS = ("x" * 51, " ")
         min_size=2,
         max_size=6,
     ),
+    focused=st.one_of(
+        st.none(),
+        st.lists(st.one_of(_TERM, st.sampled_from(_BAD_TERMS)), min_size=1, max_size=70),
+    ),
 )
-def test_merge_properties(static: list[str], blocks: list[tuple[str, int, list[str]]]) -> None:
+def test_merge_properties(
+    static: list[str], blocks: list[tuple[str, int, list[str]]], focused: list[str] | None
+) -> None:
     sources: dict[str, list[SessionBlock]] = {}
     for name, ranked, terms in blocks:
         sources.setdefault(name, []).append(_block("s", NOW - timedelta(minutes=ranked), terms))
     offered = set(static) | {t for _, _, terms in blocks for t in terms if t not in _BAD_TERMS}
+    mine = None if focused is None else _block("mine", NOW - timedelta(hours=2), focused)
+    if focused is not None:
+        offered |= {t for t in focused if t not in _BAD_TERMS}
     if len(offered) > MAX_KEYTERMS:
         event("the cut falls while two or more blocks take turns")
 
-    merged = merge(static, list(sources.items()))
+    merged = merge(static, list(sources.items()), None if mine is None else ("local", mine))
 
     assert len(merged.terms) == len(set(merged.terms))
     assert len(merged.terms) == min(len(offered), MAX_KEYTERMS)
     assert merged.terms[: len(static)] == tuple(static)
+    lead = [t for t in dict.fromkeys(focused or []) if t not in _BAD_TERMS and t not in static]
+    lead = lead[: MAX_KEYTERMS - len(static)]
+    assert merged.terms[len(static) : len(static) + len(lead)] == tuple(lead)
+    assert merged.focused == len(lead)
     assert set(merged.terms) <= offered
     assert sum(merged.counts.values()) == len(merged.terms) - len(static)
-    assert set(merged.counts) == set(sources)
+    assert set(merged.counts) == set(sources) | ({"local"} if mine is not None else set())
 
 
 def test_a_remote_source_runs_ssh_with_a_short_connect_timeout() -> None:
@@ -404,13 +427,13 @@ def test_a_blocks_expiry_ages_it_out_even_while_its_host_is_down() -> None:
     source.refresh(lambda: NOW)
     static = Vocab(terms=("herdr",), aliases=(Alias("her der", "herdr"),))
 
-    vocab, counts = sessions.vocab(static)
+    vocab, counts, _ = _vocab(sessions, static)
     assert vocab == Vocab(terms=("herdr", "kept_term"), aliases=static.aliases)
     assert counts == {"box-a": 1}
 
     gone = SessionTerms([source], clock=lambda: NOW + timedelta(minutes=30))
     source.refresh(lambda: NOW + timedelta(minutes=30))
-    assert gone.vocab(static) == (static, {"box-a": 0})
+    assert _vocab(gone, static) == (static, {"box-a": 0}, FocusUse("off", 0))
 
 
 def test_health_counts_live_blocks_and_terms_and_the_fetch_age() -> None:
@@ -443,7 +466,7 @@ async def test_the_poller_refreshes_every_source_until_cancelled() -> None:
         assert await anyio.to_thread.run_sync(runner.polled_twice.wait, 2)
         group.cancel_scope.cancel()
 
-    assert sessions.vocab(Vocab((), ()))[0].terms == ("polled_term",)
+    assert (await sessions.vocab(Vocab((), ())))[0].terms == ("polled_term",)
     calls = len(runner.calls)
     await anyio.sleep(0.05)
     assert len(runner.calls) == calls
@@ -571,3 +594,264 @@ def test_the_runner_refuses_output_that_is_not_utf8() -> None:
 def test_the_runner_names_a_program_that_is_not_there(tmp_path: Path) -> None:
     with pytest.raises(ExternalServiceError, match="cannot run"):
         run_program([str(tmp_path / "no-such-program")], 5)
+
+
+def _titled(session: str, ranked: datetime, terms: Sequence[str], title: str) -> SessionBlock:
+    return SessionBlock(
+        session, ranked, ranked + timedelta(minutes=30), tuple(terms), cwd="/w", titles=(title,)
+    )
+
+
+def _focused_on(title: str) -> Focus:
+    return Focus(Runner(f"front\n{title}\n/w\n"), cap=ROOMY)
+
+
+def _local(*blocks: SessionBlock) -> Source:
+    text = "".join(format_block(block) for block in blocks)
+    source = Source(LOCAL_NAME, lambda: text, interval=1.0)
+    source.refresh(lambda: NOW)
+    return source
+
+
+def test_the_focused_block_follows_the_static_terms_whole_then_the_others_take_turns() -> None:
+    focused = _block("mine", NOW - timedelta(minutes=10), ["herdr", "f_one", "x" * 51, "f_two"])
+    sources = [
+        ("local", [focused, _block("old", NOW - timedelta(minutes=20), ["old_a", "f_one"])]),
+        ("box-a", [_block("new", NOW - timedelta(minutes=1), ["new_a", "new_b"])]),
+    ]
+
+    merged = merge(["herdr"], sources, focused=("local", focused))
+
+    assert merged.terms == ("herdr", "f_one", "f_two", "new_a", "new_b", "old_a")
+    assert merged.counts == {"local": 3, "box-a": 2}
+    assert merged.focused == 2
+
+
+def test_an_expired_focused_block_still_leads() -> None:
+    focused = _block("mine", NOW - timedelta(hours=5), ["f_one"])
+    sources = [("local", [_block("live", NOW, ["live_a"])])]
+
+    merged = merge([], sources, focused=("local", focused))
+
+    assert merged.terms == ("f_one", "live_a")
+    assert merged.counts == {"local": 2}
+
+
+def test_static_plus_focused_terms_are_cut_at_100() -> None:
+    static = [f"static_{n}" for n in range(90)]
+    focused = _block("mine", NOW, [f"focus_{n}" for n in range(20)])
+    sources = [("local", [focused, _block("other", NOW, ["other_a"])])]
+
+    merged = merge(static, sources, focused=("local", focused))
+
+    assert merged.terms == (*static, *(f"focus_{n}" for n in range(10)))
+    assert merged.focused == 10
+    assert merged.counts == {"local": 10}
+
+
+def test_the_focused_sessions_spelling_wins_a_snap() -> None:
+    focused = _block("mine", NOW - timedelta(minutes=20), ["foo_bar"])
+    sources = [("local", [_block("new", NOW, ["fooBar"]), focused])]
+    merged = merge([], sources, focused=("local", focused))
+
+    words, _ = deliver(["foo", "bar"], Vocab(merged.terms, ()))
+
+    assert words == ["foo_bar"]
+
+
+def test_recent_keeps_blocks_past_expiry_for_24_h() -> None:
+    expired = _block("expired", NOW - timedelta(hours=24), ["e"])
+    too_old = _block("old", NOW - timedelta(hours=24, seconds=1), ["o"])
+    live = _block("live", NOW, ["l"])
+    source = _local(live, expired, too_old)
+
+    assert source.live_and_recent(NOW) == ((live,), (live, expired))
+
+
+def test_a_focus_hit_puts_that_sessions_terms_first_and_says_so() -> None:
+    mine = _titled("mine", NOW - timedelta(hours=3), ["mine_a", "mine_b"], "My tab")
+    other = _titled("other", NOW - timedelta(minutes=1), ["other_a"], "Other tab")
+    sessions = SessionTerms([_local(other, mine)], clock=lambda: NOW, focus=_focused_on("My tab"))
+
+    vocab, counts, focus = _vocab(sessions, Vocab(("static_t",), ()))
+
+    assert vocab.terms == ("static_t", "mine_a", "mine_b", "other_a")
+    assert counts == {LOCAL_NAME: 3}
+    assert focus == FocusUse("hit", 2)
+
+
+def test_a_request_reads_the_local_file_once_so_a_newer_read_cannot_double_the_focus(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    old = _titled("mine", NOW - timedelta(minutes=5), ["mine_a"], "My tab")
+    new = _titled("mine", NOW - timedelta(seconds=1), ["mine_a", "mine_b"], "My tab")
+    other = _titled("other", NOW - timedelta(minutes=2), ["other_a"], "Other tab")
+    reads = iter([format_block(old) + format_block(other)])
+    local = Source(
+        LOCAL_NAME, lambda: next(reads, format_block(new) + format_block(other)), interval=1.0
+    )
+    local.refresh(lambda: NOW)
+    # The poller swaps in the newer file after every read the request makes.
+    reads_of_local: list[tuple[str, Callable[[datetime], object]]] = [
+        ("live", local.live),
+        ("live_and_recent", local.live_and_recent),
+    ]
+    for name, read in reads_of_local:
+
+        def read_then_swap(now: datetime, read: Callable[[datetime], object] = read) -> object:
+            blocks = read(now)
+            local.refresh(lambda: NOW)
+            return blocks
+
+        monkeypatch.setattr(local, name, read_then_swap)
+    sessions = SessionTerms([local], clock=lambda: NOW, focus=_focused_on("My tab"))
+
+    vocab, _, focus = _vocab(sessions, Vocab((), ()))
+
+    assert vocab.terms == ("mine_a", "other_a")
+    assert focus == FocusUse("hit", 1)
+
+
+def test_an_untitled_tab_leaves_the_turns_as_they_were() -> None:
+    untitled = SessionBlock(
+        "mine", NOW - timedelta(minutes=5), NOW + timedelta(minutes=25), ("mine_a",), "/w", ()
+    )
+    newer = _titled("newer", NOW - timedelta(minutes=1), ["newer_a"], "Other tab")
+    sessions = SessionTerms(
+        [_local(newer, untitled)], clock=lambda: NOW, focus=_focused_on("Claude Code")
+    )
+
+    vocab, _, focus = _vocab(sessions, Vocab((), ()))
+
+    assert focus == FocusUse("miss", 0)
+    assert vocab.terms == ("newer_a", "mine_a")
+
+
+def test_a_remote_block_holding_the_tabs_title_is_never_focused() -> None:
+    remote = remote_source(
+        "box-a", runner=Runner(format_block(_titled("r", NOW, ["remote_t"], "My tab")))
+    )
+    remote.refresh(lambda: NOW)
+    local = _local(_titled("l", NOW - timedelta(minutes=2), ["local_t"], "Other tab"))
+    sessions = SessionTerms([local, remote], clock=lambda: NOW, focus=_focused_on("My tab"))
+
+    vocab, _, focus = _vocab(sessions, Vocab((), ()))
+
+    assert focus == FocusUse("miss", 0)
+    assert vocab.terms == ("remote_t", "local_t")
+
+
+def test_without_a_recent_local_block_a_request_is_a_miss_that_never_queries() -> None:
+    runner = Runner(AssertionError("osascript ran during a request"))
+    remote = remote_source("box-a", runner=Runner(_file(("r", NOW, ["remote_t"]))))
+    remote.refresh(lambda: NOW)
+    sessions = SessionTerms([remote], clock=lambda: NOW, focus=Focus(runner, cap=ROOMY))
+
+    vocab, _, focus = _vocab(sessions, Vocab((), ()))
+
+    assert focus == FocusUse("miss", 0)
+    assert vocab.terms == ("remote_t",)
+    assert runner.calls == []
+
+
+def test_a_tab_chosen_just_before_a_dictation_leads_it_and_the_previous_tab_does_not() -> None:
+    before = _titled("before", NOW - timedelta(minutes=1), ["before_t"], "Before tab")
+    chosen = _titled("chosen", NOW - timedelta(hours=2), ["chosen_t"], "Chosen tab")
+    osascript = Runner("front\nBefore tab\n/w\n", "front\nChosen tab\n/w\n")
+    sessions = SessionTerms(
+        [_local(before, chosen)], clock=lambda: NOW, focus=Focus(osascript, cap=ROOMY)
+    )
+    assert _vocab(sessions, Vocab((), ()))[2] == FocusUse("hit", 1)
+
+    vocab, _, focus = _vocab(sessions, Vocab((), ()))
+
+    assert focus == FocusUse("hit", 1)
+    assert vocab.terms == ("chosen_t", "before_t")
+
+
+def test_focus_off_is_reported_as_off() -> None:
+    sessions = SessionTerms([_local(_block("s", NOW, ["t"]))], clock=lambda: NOW)
+
+    assert _vocab(sessions, Vocab((), ()))[2] == FocusUse("off", 0)
+    assert sessions.focus_health() is None
+
+
+class _Raising(Source):
+    """A source whose refresh raises each error in turn, then succeeds."""
+
+    def __init__(self, *errors: Exception) -> None:
+        super().__init__("box-r", lambda: None, interval=0.01)
+        self.errors = list(errors)
+        self.recovered = threading.Event()
+
+    @override
+    def refresh(self, clock: Callable[[], datetime]) -> None:
+        if self.errors:
+            raise self.errors.pop(0)
+        self.recovered.set()
+
+
+@pytest.mark.anyio
+async def test_a_poller_that_raises_logs_the_type_once_per_change_and_keeps_polling() -> None:
+    quoted = "a title from the tab"
+    raising = _Raising(KeyError(quoted), KeyError(quoted), ValueError(quoted))
+    polled = threading.Event()
+
+    def fetch() -> str:
+        polled.set()
+        return format_block(_block("s", NOW, ["t"]))
+
+    sessions = SessionTerms([Source(LOCAL_NAME, fetch, interval=0.01), raising], clock=lambda: NOW)
+    with capture_logs() as logs:
+        async with anyio.create_task_group() as group:
+            group.start_soon(sessions.poll)
+            assert await anyio.to_thread.run_sync(raising.recovered.wait, 2)
+            polled.clear()
+            assert await anyio.to_thread.run_sync(polled.wait, 2)
+            group.cancel_scope.cancel()
+
+    assert [(entry["event"], entry.get("error")) for entry in logs] == [
+        ("serve.poller_failed", "KeyError"),
+        ("serve.poller_failed", "ValueError"),
+        ("serve.poller_restored", None),
+    ]
+    assert {entry["poller"] for entry in logs} == {"box-r"}
+    assert quoted not in repr(logs)
+
+
+@given(
+    static=st.one_of(
+        st.lists(_TERM, max_size=10, unique=True),
+        st.lists(_TERM, min_size=90, max_size=MAX_KEYTERMS, unique=True),
+    ),
+    blocks=st.lists(
+        st.tuples(
+            st.integers(min_value=0, max_value=120),
+            st.lists(st.one_of(_TERM, st.sampled_from(_BAD_TERMS)), min_size=1, max_size=40),
+        ),
+        min_size=1,
+        max_size=5,
+    ),
+    chosen=st.integers(min_value=0),
+)
+def test_a_focused_vocab_never_holds_an_expired_unfocused_blocks_term(
+    static: list[str], blocks: list[tuple[int, list[str]]], chosen: int
+) -> None:
+    made = [
+        _titled(f"s{n}", NOW - timedelta(minutes=ago), terms, f"tab {n}")
+        for n, (ago, terms) in enumerate(blocks)
+    ]
+    focused = made[chosen % len(made)]
+    sessions = SessionTerms(
+        [_local(*made)], clock=lambda: NOW, focus=_focused_on(focused.titles[0])
+    )
+
+    vocab, _, focus = _vocab(sessions, Vocab(tuple(static), ()))
+
+    admissible = [t for t in dict.fromkeys(focused.terms) if t not in _BAD_TERMS]
+    lead = [t for t in admissible if t not in static][: MAX_KEYTERMS - len(static)]
+    assert focus == FocusUse("hit", len(lead))
+    assert vocab.terms[: len(static) + len(lead)] == (*static, *lead)
+    allowed = set(static) | set(focused.terms)
+    allowed |= {t for block in made if block.expires > NOW for t in block.terms}
+    assert set(vocab.terms) <= allowed

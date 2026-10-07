@@ -99,6 +99,13 @@ class RequestFields(_Record):
     bytes: int
 
 
+class FocusRecord(_Record):
+    """What the focused tab did for a kept dictation; nothing from the tab itself."""
+
+    verdict: str
+    terms: int
+
+
 class KeepRecord(_Record):
     """`result.json` in a kept dictation's directory."""
 
@@ -109,6 +116,7 @@ class KeepRecord(_Record):
     xai_text: str | None
     terms: list[str]
     session_terms: dict[str, int]
+    focus: FocusRecord
     aliases: list[dict[str, str]]
     edits: list[dict[str, str]]
     latency_ms: dict[str, int]
@@ -288,6 +296,7 @@ class _Server:
                 "status": "ok",
                 "static_terms": len(self.terms.current().terms),
                 "session_terms": self.sessions.health(),
+                "focus": self.sessions.focus_health(),
             }
         )
 
@@ -309,7 +318,7 @@ class _Server:
             return parsed
         fields, audio = parsed
         static = self.terms.current()
-        vocab, session_counts = self.sessions.vocab(static)
+        vocab, session_counts, focus = await self.sessions.vocab(static)
         workdir = Path(await anyio.to_thread.run_sync(tempfile.mkdtemp))
         dictated: _Dictation | None = None
         try:
@@ -339,6 +348,8 @@ class _Server:
             xai_ms=result.xai_ms,
             terms=len(vocab.terms),
             session_terms=sum(session_counts.values()),
+            focus=focus.verdict,
+            focus_terms=focus.terms,
             edits=len(result.edits),
         )
         record = KeepRecord(
@@ -349,6 +360,7 @@ class _Server:
             # On disk a session term would outlive its window, so only the counts are kept.
             terms=list(static.terms),
             session_terms=session_counts,
+            focus=FocusRecord(verdict=focus.verdict, terms=focus.terms),
             aliases=[{"heard": alias.heard, "written": alias.written} for alias in vocab.aliases],
             edits=result.edits,
             latency_ms={"total": total_ms, "xai": result.xai_ms},
@@ -485,6 +497,7 @@ def run(
         "port": port,
         "terms": str(terms.path),
         "session_terms": [source.name for source in session_terms.sources],
+        "focus": None if session_terms.focus is None else session_terms.focus.name,
         "keep": None if keep is None else str(keep),
     }
     shown = f"[{host}]" if ":" in host else host

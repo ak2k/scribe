@@ -36,7 +36,12 @@ MIN_TERM_CHARS = 3
 # A terminal tab can lag a re-title, so a few earlier titles still identify the session.
 MAX_TITLES = 5
 WINDOW = timedelta(minutes=30)
+# How far back `current.txt` reaches: a block past its expiry still lets the focused
+# tab's title find its session, which may be prompted again hours later.
+REACH = timedelta(hours=24)
 RETENTION = timedelta(days=7)
+# The most a remote host reads of `current.txt`, so the hook writes no more.
+MAX_FETCH_BYTES = 2**20
 LOG_LIMIT = 1024 * 1024
 
 # The events that are the operator's own activity, which rank a session.
@@ -514,10 +519,11 @@ def _mergeable(term: str) -> bool:
 def write_merged(terms_dir: Path, *, now: datetime) -> None:
     """Rewrite `current.txt` from the recently active sessions; drop week-old records.
 
-    One block per interactive session in the window, newest rank time first: a
-    header `# session <id> ranked <time> expires <time> {"cwd": ..., "titles": [...]}`,
-    the expiry being when the session leaves the window, then up to `MERGED_CAP`
-    of its terms, best first.
+    One block per interactive session ranked within `REACH`, newest rank time
+    first: a header `# session <id> ranked <time> expires <time> {"cwd": ...,
+    "titles": [...]}`, the expiry being when the session leaves the window,
+    which may be past, then up to `MERGED_CAP` of its terms, best first. A
+    block that would take the file past `MAX_FETCH_BYTES` is left out.
     """
     sessions = terms_dir / "sessions"
     records: list[SessionRecord] = []
@@ -529,8 +535,8 @@ def write_merged(terms_dir: Path, *, now: datetime) -> None:
         if modified < (now - RETENTION).timestamp():
             path.unlink(missing_ok=True)
         # A record is written when it is updated, after its rank time, so an old
-        # file cannot be in the window and need not be parsed.
-        elif path.suffix == ".json" and modified >= (now - WINDOW).timestamp():
+        # file cannot be within reach and need not be parsed.
+        elif path.suffix == ".json" and modified >= (now - REACH).timestamp():
             try:
                 records.append(SessionRecord.model_validate_json(path.read_bytes()))
             except ValidationError as exc:
@@ -540,7 +546,7 @@ def write_merged(terms_dir: Path, *, now: datetime) -> None:
             (record.ranked, record)
             for record in records
             if record.ranked is not None
-            and record.ranked >= now - WINDOW
+            and record.ranked >= now - REACH
             # Unknown is not interactive: a headless worker's first events can
             # come before its transcript, and later ones may never run.
             and record.entrypoint == _INTERACTIVE
@@ -549,6 +555,7 @@ def write_merged(terms_dir: Path, *, now: datetime) -> None:
         reverse=True,
     )
     blocks: list[str] = []
+    size = 0
     for ranked, record in live:
         best = sorted(record.terms, key=lambda t: (t.last_seen, t.count), reverse=True)
         # Without a later hook nothing rewrites the file, so each block says when
@@ -561,7 +568,12 @@ def write_merged(terms_dir: Path, *, now: datetime) -> None:
             cwd=record.cwd,
             titles=tuple(dict.fromkeys(record.custom_titles + record.ai_titles))[:MAX_TITLES],
         )
-        blocks.append(format_block(block))
+        text = format_block(block)
+        # Skipped rather than ending the file: an older block may be smaller and still fit.
+        if size + len(text.encode()) > MAX_FETCH_BYTES:
+            continue
+        size += len(text.encode())
+        blocks.append(text)
     terms_dir.mkdir(parents=True, exist_ok=True)
     _replace_atomically(terms_dir / "current.txt", "".join(blocks))
 

@@ -13,6 +13,7 @@ from typer.testing import CliRunner
 
 from scribe import cli, session_sources
 from scribe.cli import app
+from scribe.focus import Focus
 from scribe.serve import dictation_client
 from tests.xai_fixtures import xai_payload
 
@@ -212,3 +213,71 @@ def test_no_session_terms_reads_no_source(served_apps: list[ASGIApp], tmp_path: 
     (served,) = served_apps
     assert _dictate_and_check_health(served)["session_terms"] == []
     assert cast("dict[str, object]", _kept_record(tmp_path)["flags"])["session_terms"] == []
+
+
+@pytest.fixture
+def factory(monkeypatch: pytest.MonkeyPatch) -> list[Focus]:
+    """Record each focus query the CLI builds; each answers that Ghostty is not in front."""
+    made: list[Focus] = []
+
+    def build() -> Focus:
+        made.append(Focus(lambda _argv, _timeout: "back\n"))
+        return made[-1]
+
+    monkeypatch.setattr("scribe.focus.ghostty_focus", build)
+    return made
+
+
+def test_on_macos_focus_is_on_by_default(
+    served_apps: list[ASGIApp],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    factory: list[Focus],
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+
+    result = runner.invoke(app, ["serve"])
+
+    assert result.exit_code == 0, result.output
+    assert len(factory) == 1
+    (served,) = served_apps
+    assert _dictate_and_check_health(served)["focus"] == {"state": "never"}
+    record = _kept_record(tmp_path)
+    assert cast("dict[str, object]", record["flags"])["focus"] == "ghostty"
+    assert record["focus"] == {"verdict": "miss", "terms": 0}
+
+
+@pytest.mark.parametrize(
+    ("platform", "args"),
+    [
+        ("darwin", ["--no-focus"]),
+        ("darwin", ["--no-session-terms"]),
+        ("linux", []),
+    ],
+)
+def test_focus_is_off_when_disabled_without_session_terms_or_off_macos(
+    served_apps: list[ASGIApp],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    factory: list[Focus],
+    platform: str,
+    args: list[str],
+) -> None:
+    monkeypatch.setattr(sys, "platform", platform)
+
+    result = runner.invoke(app, ["serve", *args])
+
+    assert result.exit_code == 0, result.output
+    assert factory == []
+    (served,) = served_apps
+    assert _dictate_and_check_health(served)["focus"] is None
+    record = _kept_record(tmp_path)
+    assert cast("dict[str, object]", record["flags"])["focus"] is None
+    assert record["focus"] == {"verdict": "off", "terms": 0}
+
+
+def test_help_lists_no_focus() -> None:
+    result = runner.invoke(app, ["serve", "--help"])
+
+    assert result.exit_code == 0
+    assert "--no-focus" in result.output

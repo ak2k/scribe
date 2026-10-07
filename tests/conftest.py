@@ -1,6 +1,6 @@
 """Shared test fixtures."""
 
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from typing import NoReturn
 
 import pytest
@@ -78,3 +78,18 @@ def no_real_server(monkeypatch: pytest.MonkeyPatch) -> None:
         raise AssertionError("reached the real server; swap uvicorn.run out")
 
     monkeypatch.setattr("uvicorn.run", refuse)
+
+
+@pytest.fixture(autouse=True)
+def no_real_focus(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Fail a test that reaches the real focus query, rather than let it run osascript."""
+    reached: list[str] = []
+
+    def refuse(argv: Sequence[str], _timeout: float) -> NoReturn:
+        reached.append(argv[0])
+        raise AssertionError("reached the real focus query; inject a runner")
+
+    monkeypatch.setattr("scribe.focus.run_program", refuse)
+    yield
+    # A request turns any query error into a verdict, so the refusal alone could pass unseen.
+    assert not reached, "reached the real focus query; inject a runner"

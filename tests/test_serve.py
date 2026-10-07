@@ -20,13 +20,14 @@ from structlog.testing import capture_logs
 from uvicorn.lifespan.on import LifespanOn
 from uvicorn.protocols.http.h11_impl import H11Protocol
 
+from scribe.focus import Focus
 from scribe.serve import ENDPOINT, create_app, dictation_client, run
-from scribe.session_sources import SessionTerms, local_source, remote_source
+from scribe.session_sources import SessionTerms, Source, local_source, remote_source
 from scribe.vocab import TermsFile
 from tests.xai_fixtures import xai_payload
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Iterator, Sequence
+    from collections.abc import AsyncIterator, Callable, Iterator, Sequence
     from pathlib import Path
 
     from starlette.types import ASGIApp, Message
@@ -262,6 +263,7 @@ async def test_health_counts_each_source_without_terms_or_session_ids(tmp_path: 
             {"source": "box-b", "blocks": 1, "terms": 1, "age_seconds": 0},
             {"source": "box-c", "blocks": 0, "terms": 0, "age_seconds": None},
         ],
+        "focus": None,
     }
     for secret in ("local_a", "kbx25", "b_term", "a-s", "b-s", "local-s", "A tab", "/w"):
         assert secret not in response.text
@@ -274,8 +276,87 @@ async def test_the_request_log_line_counts_session_terms_and_names_none(tmp_path
 
     (line,) = [entry for entry in logs if entry["event"] == "serve.request"]
     assert line["session_terms"] == 5
+    assert (line["focus"], line["focus_terms"]) == ("off", 0)
     assert "local_a" not in repr(logs)
     assert "A tab" not in repr(logs)
+
+
+FOCUS_SECRETS = ("Secret tab title", "secret tab title", "secret-session", "secret_term", "/secret")
+
+
+def _focused_sessions(tmp_path: Path) -> SessionTerms:
+    tab_cwd = tmp_path / "tab-cwd"
+    tab_cwd.mkdir()
+    local = tmp_path / "current.txt"
+    ranked = NOW - timedelta(hours=2)
+    local.write_text(
+        f"# session secret-session ranked {ranked.isoformat()}"
+        f" expires {(ranked + timedelta(minutes=30)).isoformat()}"
+        f' {{"cwd": "{tab_cwd}", "titles": ["Secret tab title"]}}\nsecret_term\nfocus_two\n'
+        + _session_file(("other-s", NOW - timedelta(minutes=1), ["other_t"])),
+        encoding="utf-8",
+    )
+    source = local_source(local)
+    source.refresh(lambda: NOW)
+    answer = f"front\n\u2733 Secret tab title\n{tab_cwd}\n"
+    # Well past the real cap, which a loaded machine can overrun even with a fake answering at once.
+    focus = Focus(lambda _argv, _timeout: answer, cap=30)
+    return SessionTerms([source], clock=lambda: NOW, focus=focus)
+
+
+async def test_a_focus_hit_leads_the_keyterms_and_is_recorded_by_verdict_and_count(
+    tmp_path: Path,
+) -> None:
+    xai = Xai()
+    sessions = _focused_sessions(tmp_path)
+    with capture_logs() as logs:
+        async with _client(xai, tmp_path, terms="herdr\n", sessions=sessions) as client:
+            await _post(client)
+            health = await client.get("/health")
+
+    keyterms = [body for name, body in _fields(xai.seen[0]) if name == "keyterm"]
+    assert keyterms == [b"herdr", b"secret_term", b"focus_two", b"other_t"]
+    (line,) = [entry for entry in logs if entry["event"] == "serve.request"]
+    assert (line["focus"], line["focus_terms"]) == ("hit", 2)
+    assert line["session_terms"] == 3
+    (kept,) = _kept(tmp_path)
+    result = _json(kept / "result.json")
+    assert result["focus"] == {"verdict": "hit", "terms": 2}
+    assert result["session_terms"] == {"local file": 3}
+    assert cast("dict[str, object]", health.json())["focus"] == {"state": "front"}
+    written = (kept / "result.json").read_text(encoding="utf-8")
+    for secret in (*FOCUS_SECRETS, str(tmp_path / "tab-cwd")):
+        assert secret not in written
+        assert secret not in health.text
+        assert secret not in repr(logs)
+
+
+async def test_a_focus_query_hanging_past_its_cap_still_answers_the_dictation(
+    tmp_path: Path,
+) -> None:
+    release = threading.Event()
+
+    def hung(_argv: Sequence[str], _timeout: float) -> str:
+        release.wait(3)
+        return "back\n"
+
+    sessions = _focused_sessions(tmp_path)
+    focus = sessions.focus = Focus(hung)
+    try:
+        with capture_logs() as logs:
+            async with _client(Xai(), tmp_path, sessions=sessions) as client:
+                started = time.monotonic()
+                response = await _post(client)
+                elapsed = time.monotonic() - started
+    finally:
+        release.set()
+
+    assert response.status_code == 200
+    assert elapsed < focus.cap + 1
+    (line,) = [entry for entry in logs if entry["event"] == "serve.request"]
+    assert (line["focus"], line["focus_terms"]) == ("slow", 0)
+    (kept,) = _kept(tmp_path)
+    assert _json(kept / "result.json")["focus"] == {"verdict": "slow", "terms": 0}
 
 
 async def test_the_poller_runs_from_startup_until_shutdown(tmp_path: Path) -> None:
@@ -312,6 +393,64 @@ async def test_the_poller_runs_from_startup_until_shutdown(tmp_path: Path) -> No
     calls = len(ssh.calls)
     await anyio.sleep(0.1)
     assert len(ssh.calls) == calls
+
+
+class _Crashing(Source):
+    """A source whose every refresh raises."""
+
+    def __init__(self) -> None:
+        super().__init__("box-crash", lambda: None, interval=0.01)
+        self.raised = 0
+        self.twice = threading.Event()
+
+    @override
+    def refresh(self, clock: Callable[[], datetime]) -> None:
+        self.raised += 1
+        if self.raised == 2:
+            self.twice.set()
+        raise KeyError(FOCUS_SECRETS[0])
+
+
+async def test_a_poller_that_raises_fails_no_dictation_and_stops_no_other_poller(
+    tmp_path: Path,
+) -> None:
+    ssh = Ssh(_session_file(("s", NOW, ["polled_term"])))
+    crashing = _Crashing()
+    sessions = SessionTerms([remote_source("box-a", runner=ssh, interval=0.01), crashing])
+    app = create_app(
+        dictation_client(KEY, transport=httpx.MockTransport(Xai())),
+        _terms(tmp_path),
+        session_terms=sessions,
+        keep=None,
+        flags={},
+    )
+    sent: list[Message] = []
+    posted: list[int] = []
+
+    async def receive() -> Message:
+        if not sent:
+            return {"type": "lifespan.startup"}
+        assert await anyio.to_thread.run_sync(crashing.twice.wait, 2)
+        ssh.polled.clear()
+        assert await anyio.to_thread.run_sync(ssh.polled.wait, 2)
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://127.0.0.1:8765"
+        ) as client:
+            posted.append((await _post(client)).status_code)
+        return {"type": "lifespan.shutdown"}
+
+    async def send(message: Message) -> None:
+        sent.append(message)
+
+    with anyio.fail_after(5):
+        await app({"type": "lifespan", "asgi": {"version": "3.0"}, "state": {}}, receive, send)
+
+    assert posted == [200]
+    assert [message["type"] for message in sent] == [
+        "lifespan.startup.complete",
+        "lifespan.shutdown.complete",
+    ]
 
 
 async def test_a_voiceink_upload_gets_xais_words_joined_by_single_spaces(tmp_path: Path) -> None:

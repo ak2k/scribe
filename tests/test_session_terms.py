@@ -19,6 +19,7 @@ from typer.testing import CliRunner
 from scribe import session_terms
 from scribe.cli import app
 from scribe.errors import InputValidationError
+from scribe.session_sources import MAX_FETCH_BYTES, remote_source
 from scribe.session_terms import (
     LOG_LIMIT,
     MERGED_CAP,
@@ -343,7 +344,7 @@ def _store(sessions: Path, record: SessionRecord) -> Path:
 
 def test_each_session_block_is_newest_first_and_capped(tmp_path: Path) -> None:
     sessions = tmp_path / "terms" / "sessions"
-    _store(sessions, _record("old", NOW - timedelta(minutes=31), ["stale_term"]))
+    _store(sessions, _record("old", NOW - timedelta(hours=24, minutes=1), ["stale_term"]))
     _store(sessions, _record("mid", NOW - timedelta(minutes=10), ["mid_a", "shared_x"]))
     _store(
         sessions,
@@ -358,6 +359,32 @@ def test_each_session_block_is_newest_first_and_capped(tmp_path: Path) -> None:
     assert len(new.terms) == MERGED_CAP
     assert (mid.session_id, mid.terms) == ("mid", ("mid_a", "shared_x"))
     check_keyterms(new.terms)
+
+
+def _letters(n: int) -> str:
+    return "".join(string.ascii_letters[int(digit)] for digit in str(n))
+
+
+def test_the_merged_file_stays_within_what_a_remote_host_reads(tmp_path: Path) -> None:
+    sessions = tmp_path / "terms" / "sessions"
+    _store(sessions, _record("fresh", NOW, ["fresh_term"]))
+    # Each block holds 60 terms of 50 characters, so 400 of them pass 1 MiB.
+    for n in range(400):
+        terms = [f"Big{_letters(n)}Term{_letters(i)}".ljust(50, "x") for i in range(MERGED_CAP)]
+        _store(sessions, _record(f"big-{n:03}", NOW - timedelta(hours=2, seconds=n), terms))
+    _store(sessions, _record("small", NOW - timedelta(hours=3), ["small_term"]))
+
+    write_merged(tmp_path / "terms", now=NOW)
+
+    text = (tmp_path / "terms" / "current.txt").read_text()
+    assert len(text.encode()) <= MAX_FETCH_BYTES
+    ids = [block.session_id for block in parse_blocks(text)]
+    assert ids[0] == "fresh"
+    assert ids[-1] == "small"
+    assert len(ids) < 402
+    remote = remote_source("box", runner=lambda _argv, _timeout: text)
+    remote.refresh(lambda: NOW)
+    assert "fresh_term" in {term for block in remote.live(NOW) for term in block.terms}
 
 
 def test_merged_file_ranks_within_a_session_by_last_seen_then_count(tmp_path: Path) -> None:
@@ -450,7 +477,7 @@ def test_each_session_block_says_when_that_session_leaves_the_window(tmp_path: P
     sessions = tmp_path / "terms" / "sessions"
     _store(sessions, _record("older", NOW - timedelta(minutes=10), ["older_term"]))
     _store(sessions, _record("newer", NOW - timedelta(minutes=1), ["newer_term"]))
-    _store(sessions, _record("gone", NOW - timedelta(minutes=31), ["gone_term"]))
+    _store(sessions, _record("gone", NOW - timedelta(hours=24, minutes=1), ["gone_term"]))
 
     write_merged(tmp_path / "terms", now=NOW)
 
@@ -535,14 +562,40 @@ def test_blank_lines_and_other_comments_are_skipped() -> None:
     assert block.terms == ("a_term", "b_term")
 
 
-def test_window_alone_drops_a_31_minute_old_session(tmp_path: Path) -> None:
+def test_the_reach_alone_drops_a_session_ranked_24_h_and_a_minute_ago(tmp_path: Path) -> None:
     sessions = tmp_path / "terms" / "sessions"
-    _store(sessions, _record("old", NOW - timedelta(minutes=31), ["stale_term"]))
+    _store(sessions, _record("old", NOW - timedelta(hours=24, minutes=1), ["stale_term"]))
     _store(sessions, _record("new", NOW - timedelta(minutes=1), ["fresh_term"]))
 
     write_merged(tmp_path / "terms", now=NOW)
 
     assert _current(tmp_path / "terms") == ["fresh_term"]
+
+
+def test_a_session_ranked_31_minutes_ago_keeps_its_block_with_its_own_past_expiry(
+    tmp_path: Path,
+) -> None:
+    sessions = tmp_path / "terms" / "sessions"
+    _store(sessions, _record("expired", NOW - timedelta(minutes=31), ["expired_term"]))
+    _store(sessions, _record("new", NOW - timedelta(minutes=1), ["fresh_term"]))
+
+    write_merged(tmp_path / "terms", now=NOW)
+
+    new, expired = _blocks(tmp_path / "terms")
+    assert (new.session_id, expired.session_id) == ("new", "expired")
+    assert expired.expires == NOW - timedelta(minutes=1)
+    assert expired.terms == ("expired_term",)
+
+
+def test_a_session_file_updated_within_24_h_is_parsed(tmp_path: Path) -> None:
+    sessions = tmp_path / "terms" / "sessions"
+    path = _store(sessions, _record("day_old", NOW - timedelta(hours=23), ["day_term"]))
+    old = (NOW - timedelta(hours=23)).timestamp()
+    os.utime(path, (old, old))
+
+    write_merged(tmp_path / "terms", now=NOW)
+
+    assert _current(tmp_path / "terms") == ["day_term"]
 
 
 def test_no_merged_line_reads_as_an_alias_or_a_comment(tmp_path: Path) -> None:
@@ -637,9 +690,9 @@ def test_a_delayed_hook_from_another_session_does_not_restore_expired_terms(
         )
 
     hook("a", NOW, NOW, "see alpha_term")
-    expired = NOW + timedelta(minutes=30, seconds=1)
+    expired = NOW + timedelta(hours=24, seconds=1)
     hook("c", expired, expired, "see charlie_term")
-    # Taken before c's hook, processed after it: a's session has left the window by then.
+    # Taken before c's hook, processed after it: a's session is out of reach by then.
     hook("b", expired - timedelta(seconds=2), expired + timedelta(seconds=1), "see bravo_term")
 
     assert "alpha_term" not in _current(tmp_path / "terms")
@@ -859,7 +912,7 @@ def test_a_stale_session_file_is_not_parsed(tmp_path: Path) -> None:
     fresh_claim = _store(sessions, _record("stale", NOW, ["claims_fresh"]))
     broken = sessions / "broken.json"
     broken.write_text("{")
-    old = (NOW - timedelta(minutes=31)).timestamp()
+    old = (NOW - timedelta(hours=24, minutes=1)).timestamp()
     for path in (fresh_claim, broken):
         os.utime(path, (old, old))
 
