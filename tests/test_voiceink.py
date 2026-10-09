@@ -50,6 +50,12 @@ def test_words_sort_as_voiceink_sorts_them_ignoring_case_with_numbers_by_value(
     assert Dictionary(store).read() == ("_x", "aardvark", "Beta", "Word2", "Word10", "zeta")
 
 
+def test_of_exact_case_twins_the_lowercase_one_is_kept(store: Path) -> None:
+    closed_store(store, "Zorblatt", "zorblatt")
+
+    assert Dictionary(store).read() == ("zorblatt",)
+
+
 def test_a_word_xai_would_refuse_is_skipped_and_logged_once(store: Path) -> None:
     too_long = "x" * 51
     closed_store(store, "Quindle", too_long, "Zorb\x07latt")
