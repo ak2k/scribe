@@ -2223,6 +2223,15 @@ def serve_command(
     no_focus: bool = typer.Option(
         False, "--no-focus", help="Never ask Ghostty which tab is focused (macOS)."
     ),
+    voiceink_dictionary: Path | None = typer.Option(
+        None,
+        "--voiceink-dictionary",
+        metavar="FILE",
+        help="VoiceInk's Dictionary store. Default: VoiceInk's own, under your home.",
+    ),
+    no_voiceink_dictionary: bool = typer.Option(
+        False, "--no-voiceink-dictionary", help="Send no VoiceInk Dictionary words."
+    ),
 ) -> None:
     """Serve an OpenAI-compatible transcription endpoint for dictation apps.
 
@@ -2236,9 +2245,13 @@ def serve_command(
     `scribe terms hook` here and on each --session-terms-host, which is polled
     over ssh in the background; GET /health shows each source's counts. On
     macOS, the session in the focused Ghostty tab goes first, unless --no-focus.
+
+    The words in VoiceInk's Dictionary, read afresh for each dictation, follow
+    the file's terms and come before any session's. VoiceInk sends them to its
+    built-in providers only, never to a custom model such as this one.
     """
     # Imported here so no other command pays for loading the server stack.
-    from scribe import focus, session_sources  # noqa: PLC0415  # see above
+    from scribe import focus, session_sources, voiceink  # noqa: PLC0415  # see above
     from scribe.serve import is_loopback  # noqa: PLC0415  # see above
     from scribe.serve import run as run_server  # noqa: PLC0415  # see above
 
@@ -2253,6 +2266,10 @@ def serve_command(
         if hosts and no_session_terms:
             raise InputValidationError(
                 "--session-terms-host and --no-session-terms cannot both be given"
+            )
+        if voiceink_dictionary is not None and no_voiceink_dictionary:
+            raise InputValidationError(
+                "--voiceink-dictionary and --no-voiceink-dictionary cannot both be given"
             )
         for name in hosts:
             session_sources.check_host(name)
@@ -2278,6 +2295,9 @@ def serve_command(
         session_terms=session_sources.SessionTerms(
             [] if no_session_terms else sources, focus=watch
         ),
+        dictionary=None
+        if no_voiceink_dictionary
+        else voiceink.Dictionary(voiceink_dictionary or voiceink.default_path(Path.home())),
         keep=None if no_keep else keep or state / "serve",
         host=host,
         port=port,

@@ -213,19 +213,30 @@ means a digit, a capital after a lowercase letter, or punctuation inside it, and
 at least 3 letters and digits; so `TODO`, `c++` and `.bashrc` are sent to xAI but
 never snapped to. Use an alias for those. The file is re-read when it changes.
 
-The terms of your live Claude Code sessions follow the file's, snapped the same
+The words in VoiceInk's Dictionary come next, snapped the same way. VoiceInk
+sends them only to its built-in providers, never to a custom model, so serve
+reads them from VoiceInk's store itself on every dictation, never writing to it
+(`--voiceink-dictionary FILE`, default
+`~/Library/Application Support/com.prakashjoshipax.VoiceInk/dictionary.store`);
+a word added in VoiceInk counts from the next dictation. A word the file already
+holds, in any case, keeps the file's spelling, and the words take only the
+keyterms the file leaves free. A missing store gives none, and
+`--no-voiceink-dictionary` reads none. `GET /health` shows the store's path,
+state and word count; `result.json` records the words sent.
+
+The terms of your live Claude Code sessions follow these, snapped the same
 way: from this machine's `terms/current.txt` (see above) and from each
 `--session-terms-host HOST`, whose file is read over
 `ssh -o BatchMode=yes HOST` every 3 s in the background, so a dictation never
 waits on it. A host that stops answering keeps its last list until each
 session's block expires. Sessions take turns, most recently prompted first, up
-to xAI's 100 keyterms; the file's terms always go first. `--no-session-terms`
-sends none. `GET /health` shows each source's live sessions, terms and the age
-of its last read.
+to xAI's 100 keyterms; the file's terms and the Dictionary's words always go
+first. `--no-session-terms` sends none. `GET /health` shows each source's live
+sessions, terms and the age of its last read.
 
 On macOS, each dictation also asks Ghostty which tab is focused, waiting at most
 0.25 s for the answer. When it shows a Claude Code session on this machine,
-that session's terms come right after the file's, up to 24 hours after its last
+that session's terms come right after those, up to 24 hours after its last
 prompt. The session is picked only when it alone holds the tab's title, now or
 as an earlier title, and works in the tab's directory; an untitled tab, a title
 two sessions share, or a slow or failed query picks none. No query runs while

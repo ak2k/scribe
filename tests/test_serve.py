@@ -7,6 +7,7 @@ import stat
 import tempfile
 import threading
 import time
+from contextlib import closing
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, cast, override
 
@@ -20,10 +21,13 @@ from structlog.testing import capture_logs
 from uvicorn.lifespan.on import LifespanOn
 from uvicorn.protocols.http.h11_impl import H11Protocol
 
+from scribe import voiceink
 from scribe.focus import Focus
-from scribe.serve import ENDPOINT, create_app, dictation_client, run
+from scribe.serve import ENDPOINT, KeepRecord, create_app, dictation_client, run
 from scribe.session_sources import SessionTerms, Source, local_source, remote_source
 from scribe.vocab import TermsFile
+from scribe.voiceink import Dictionary
+from tests.voiceink_fixtures import add_words, closed_store, open_store
 from tests.xai_fixtures import xai_payload
 
 if TYPE_CHECKING:
@@ -88,11 +92,13 @@ def _client(
     max_bytes: int = 25 * 1024 * 1024,
     host: str = "127.0.0.1:8765",
     sessions: SessionTerms = NO_SESSIONS,
+    dictionary: Dictionary | None = None,
 ) -> httpx.AsyncClient:
     app = create_app(
         dictation_client(KEY, transport=httpx.MockTransport(xai)),
         _terms(tmp_path, terms),
         session_terms=sessions,
+        dictionary=dictionary,
         keep=tmp_path / "keep" if keep else None,
         flags={"host": "127.0.0.1", "port": 8765},
         max_bytes=max_bytes,
@@ -264,6 +270,7 @@ async def test_health_counts_each_source_without_terms_or_session_ids(tmp_path: 
             {"source": "box-c", "blocks": 0, "terms": 0, "age_seconds": None},
         ],
         "focus": None,
+        "voiceink_dictionary": None,
     }
     for secret in ("local_a", "kbx25", "b_term", "a-s", "b-s", "local-s", "A tab", "/w"):
         assert secret not in response.text
@@ -1078,6 +1085,7 @@ async def test_a_stalled_upload_does_not_hold_off_shutdown(
         api_key=KEY,
         terms=_terms(tmp_path),
         session_terms=NO_SESSIONS,
+        dictionary=None,
         keep=None,
         host="127.0.0.1",
         port=8765,
@@ -1105,3 +1113,146 @@ async def test_a_stalled_upload_does_not_hold_off_shutdown(
         await server.shutdown()
 
     assert closed == [True]
+
+
+def _keyterms(xai: Xai, index: int = 0) -> list[str]:
+    return [body.decode() for name, body in _fields(xai.seen[index]) if name == "keyterm"]
+
+
+async def test_dictionary_words_follow_the_file_terms_and_never_displace_them(
+    tmp_path: Path,
+) -> None:
+    file_terms = [f"file{n}" for n in range(95)]
+    words = [f"Word{n}" for n in range(10)]
+    dictionary = Dictionary(closed_store(tmp_path / "dictionary.store", *words))
+    xai = Xai()
+    sessions = _sessions(tmp_path, **_two_hosts())
+    with capture_logs() as logs:
+        async with _client(
+            xai,
+            tmp_path,
+            terms="".join(f"{t}\n" for t in file_terms),
+            sessions=sessions,
+            dictionary=dictionary,
+        ) as client:
+            response = await _post(client)
+
+    assert response.status_code == 200
+    sent = _keyterms(xai)
+    assert sent == [*file_terms, "Word0", "Word1", "Word2", "Word3", "Word4"]
+    (line,) = [entry for entry in logs if entry["event"] == "serve.request"]
+    assert line["dictionary_terms"] == 5
+    (kept,) = _kept(tmp_path)
+    result = _json(kept / "result.json")
+    assert result["terms"] == file_terms
+    assert result["dictionary_terms"] == ["Word0", "Word1", "Word2", "Word3", "Word4"]
+
+
+async def test_a_word_added_in_voiceink_is_sent_with_the_next_dictation(tmp_path: Path) -> None:
+    store = tmp_path / "dictionary.store"
+    xai = Xai()
+    with closing(open_store(store, "Zorblatt")) as writer:
+        async with _client(xai, tmp_path, terms="herdr\n", dictionary=Dictionary(store)) as client:
+            await _post(client)
+            add_words(writer, "Quindle")
+            await _post(client)
+
+    assert _keyterms(xai, 0) == ["herdr", "Zorblatt"]
+    assert _keyterms(xai, 1) == ["herdr", "Quindle", "Zorblatt"]
+
+
+async def test_dictionary_words_are_snapped_like_file_terms(tmp_path: Path) -> None:
+    heard = ["open", "quindle", "os"]
+    payload = {
+        "text": " ".join(heard),
+        "duration": 1.0,
+        "words": [{"text": text, "start": n, "end": n + 0.5} for n, text in enumerate(heard)],
+    }
+    dictionary = Dictionary(closed_store(tmp_path / "dictionary.store", "QuindleOS"))
+    async with _client(
+        Xai(httpx.Response(200, json=payload)), tmp_path, dictionary=dictionary
+    ) as client:
+        response = await _post(client)
+
+    assert response.json() == {"text": "open QuindleOS"}
+
+
+async def test_an_unreadable_dictionary_fails_no_dictation(tmp_path: Path) -> None:
+    store = tmp_path / "dictionary.store"
+    store.write_bytes(b"not a database, only some bytes" * 64)
+    xai = Xai()
+    async with _client(xai, tmp_path, terms="herdr\n", dictionary=Dictionary(store)) as client:
+        response = await _post(client)
+        health = await client.get("/health")
+
+    assert response.status_code == 200
+    assert _keyterms(xai) == ["herdr"]
+    assert health.json()["voiceink_dictionary"] == {
+        "path": str(store),
+        "state": "unreadable",
+        "words": 0,
+    }
+
+
+async def test_health_shows_the_dictionary_path_state_and_count_but_no_word(
+    tmp_path: Path,
+) -> None:
+    store = closed_store(tmp_path / "dictionary.store", "Zorblatt", "Quindle")
+    async with _client(Xai(), tmp_path, dictionary=Dictionary(store)) as client:
+        response = await client.get("/health")
+
+    assert response.json()["voiceink_dictionary"] == {
+        "path": str(store),
+        "state": "ok",
+        "words": 2,
+    }
+    assert "Zorblatt" not in response.text
+
+
+def test_a_record_written_before_the_dictionary_still_parses() -> None:
+    record: dict[str, object] = {
+        "received_at": NOW.isoformat(),
+        "request": {
+            "model": None,
+            "language": None,
+            "response_format": None,
+            "filename": None,
+            "content_type": None,
+            "bytes": 0,
+        },
+        "text": None,
+        "xai_text": None,
+        "terms": [],
+        "session_terms": {},
+        "focus": {"verdict": "off", "terms": 0},
+        "aliases": [],
+        "edits": [],
+        "latency_ms": {},
+        "outcome": "ok",
+        "cause": None,
+        "scribe_version": "0",
+        "flags": {},
+    }
+
+    assert KeepRecord.model_validate(record).dictionary_terms == []
+
+
+async def test_no_dictionary_read_runs_on_the_event_loop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    loop_thread = threading.get_ident()
+    seen: list[int] = []
+    select = voiceink._select  # pyright: ignore[reportPrivateUsage]  # spied on, not replaced
+
+    def spy(path: Path) -> list[str]:
+        seen.append(threading.get_ident())
+        return select(path)
+
+    monkeypatch.setattr(voiceink, "_select", spy)
+    store = closed_store(tmp_path / "dictionary.store", "Zorblatt")
+    async with _client(Xai(), tmp_path, dictionary=Dictionary(store)) as client:
+        await _post(client)
+        await client.get("/health")
+
+    assert len(seen) == 2
+    assert loop_thread not in seen
