@@ -231,8 +231,8 @@ way: from this machine's `terms/current.txt` (see above) and from each
 waits on it. A host that stops answering keeps its last list until each
 session's block expires. Sessions take turns, most recently prompted first, up
 to xAI's 100 keyterms; the file's terms and the Dictionary's words always go
-first. `--no-session-terms` sends none. `GET /health` shows each source's live sessions, terms and the age
-of its last read.
+first. `--no-session-terms` sends none. `GET /health` shows each source's live
+sessions, terms and the age of its last read.
 
 On macOS, each dictation also asks Ghostty which tab is focused, waiting at most
 0.25 s for the answer. When it shows a Claude Code session on this machine,
