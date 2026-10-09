@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
+import re
 import sqlite3
 import threading
+import unicodedata
 from contextlib import closing
 from typing import TYPE_CHECKING, Literal
 
 import anyio.to_thread
 import structlog
 
-from scribe.errors import InputValidationError
+from scribe.errors import AppError, InputValidationError
 from scribe.xai_stt import MAX_KEYTERMS, check_keyterms
 
 if TYPE_CHECKING:
@@ -35,25 +37,44 @@ def default_path(home: Path) -> Path:
     return support / "dictionary.store"
 
 
+class _UnindexedWalError(AppError):
+    """Words sit in a -wal whose -shm is gone, where no read-only open can reach them."""
+
+
 def _uri(path: Path) -> str:
-    # A read-only open of a WAL database creates a missing -wal or -shm beside it;
-    # without both, VoiceInk is not writing, so the main file alone is the whole store.
-    live = all(path.with_name(path.name + suffix).exists() for suffix in ("-wal", "-shm"))
-    return f"{path.absolute().as_uri()}?mode=ro" + ("" if live else "&immutable=1")
+    # SQLite keeps the -wal and -shm beside a symlink's target, not beside the link.
+    path = path.resolve()
+    wal, shm = (path.with_name(path.name + suffix) for suffix in ("-wal", "-shm"))
+    # A read-only open creates a missing -wal or -shm, and deletes a -wal beside an
+    # empty main file, so it is used only where neither can happen.
+    if wal.exists() and shm.exists() and path.stat().st_size > 0:
+        return f"{path.as_uri()}?mode=ro"
+    # Without the -shm, an immutable open would read the main file alone and miss the
+    # -wal's words without a sign; an empty -wal holds none.
+    if wal.exists() and not shm.exists() and wal.stat().st_size > 0:
+        raise _UnindexedWalError(f"{wal.name} holds changes but {shm.name} is missing")
+    return f"{path.as_uri()}?mode=ro&immutable=1"
 
 
-def _select(path: Path) -> list[object]:
+def _order(word: str) -> tuple[list[str | int], str]:
+    # VoiceInk sorts with localizedStandardCompare: blind to case and accents, digit runs
+    # compared as numbers, and the lowercase twin first.
+    folded = unicodedata.normalize("NFKD", word.casefold())
+    bare = "".join(char for char in folded if not unicodedata.combining(char))
+    parts = re.split(r"(\d+)", bare)
+    return [int(part) if n % 2 else part for n, part in enumerate(parts)], word.swapcase()
+
+
+def _select(path: Path) -> list[str]:
     with closing(sqlite3.connect(_uri(path), uri=True, timeout=BUSY_TIMEOUT_SECONDS)) as db:
-        rows: list[tuple[object]] = db.execute(
-            "SELECT ZWORD FROM ZVOCABULARYWORD ORDER BY ZWORD"
-        ).fetchall()
-    return [value for (value,) in rows]
+        rows: list[tuple[object]] = db.execute("SELECT ZWORD FROM ZVOCABULARYWORD").fetchall()
+    return sorted((value for (value,) in rows if isinstance(value, str)), key=_order)
 
 
 def join(file_terms: Sequence[str], words: Sequence[str]) -> tuple[str, ...]:
     """The file's terms, then the words the file lacks, ignoring case, up to `MAX_KEYTERMS`."""
     held = {term.lower() for term in file_terms}
-    room = max(MAX_KEYTERMS - len(file_terms), 0)
+    room = MAX_KEYTERMS - len(file_terms)
     added = [word for word in words if word.lower() not in held][:room]
     return (*file_terms, *added)
 
@@ -106,11 +127,11 @@ class Dictionary:
                 _logger().info("serve.dictionary_restored", path=str(self.path))
         self._state, self._failure = state, failure
 
-    def _accept(self, values: Sequence[object]) -> tuple[str, ...]:
+    def _accept(self, values: Sequence[str]) -> tuple[str, ...]:
         seen: dict[str, str] = {}
         refused: set[str] = set()
         for value in values:
-            word = value.strip() if isinstance(value, str) else ""
+            word = value.strip()
             if not word or word.lower() in seen:
                 continue
             try:
