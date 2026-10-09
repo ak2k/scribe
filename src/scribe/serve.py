@@ -31,7 +31,8 @@ from starlette.routing import Route
 from scribe import __version__
 from scribe.errors import AppError, InputValidationError
 from scribe.schema import XaiResponse
-from scribe.vocab import deliver
+from scribe.vocab import Vocab, deliver
+from scribe.voiceink import join
 from scribe.xai_stt import XaiStt
 
 if TYPE_CHECKING:
@@ -43,7 +44,8 @@ if TYPE_CHECKING:
     from structlog.stdlib import BoundLogger
 
     from scribe.session_sources import SessionTerms
-    from scribe.vocab import TermsFile, Vocab
+    from scribe.vocab import TermsFile
+    from scribe.voiceink import Dictionary
 
 ENDPOINT = "/v1/audio/transcriptions"
 MAX_UPLOAD_BYTES = 25 * 1024 * 1024
@@ -115,6 +117,7 @@ class KeepRecord(_Record):
     text: str | None
     xai_text: str | None
     terms: list[str]
+    dictionary_terms: list[str] = []
     session_terms: dict[str, int]
     focus: FocusRecord
     aliases: list[dict[str, str]]
@@ -279,6 +282,7 @@ class _Server:
         stt: XaiStt,
         terms: TermsFile,
         sessions: SessionTerms,
+        dictionary: Dictionary | None,
         keep: Path | None,
         flags: Flags,
         max_bytes: int,
@@ -286,17 +290,23 @@ class _Server:
         self.stt = stt
         self.terms = terms
         self.sessions = sessions
+        self.dictionary = dictionary
         self.keep = keep
         self.flags = flags
         self.max_bytes = max_bytes
 
     async def health(self, _request: Request) -> Response:
+        dictionary = None
+        if self.dictionary is not None:
+            await self.dictionary.words()
+            dictionary = self.dictionary.health()
         return JSONResponse(
             {
                 "status": "ok",
                 "static_terms": len(self.terms.current().terms),
                 "session_terms": self.sessions.health(),
                 "focus": self.sessions.focus_health(),
+                "voiceink_dictionary": dictionary,
             }
         )
 
@@ -318,7 +328,11 @@ class _Server:
             return parsed
         fields, audio = parsed
         static = self.terms.current()
-        vocab, session_counts, focus = await self.sessions.vocab(static)
+        words = () if self.dictionary is None else await self.dictionary.words()
+        joined = join(static.terms, words)
+        vocab, session_counts, focus = await self.sessions.vocab(
+            Vocab(terms=joined, aliases=static.aliases)
+        )
         workdir = Path(await anyio.to_thread.run_sync(tempfile.mkdtemp))
         dictated: _Dictation | None = None
         try:
@@ -347,6 +361,7 @@ class _Server:
             total_ms=total_ms,
             xai_ms=result.xai_ms,
             terms=len(vocab.terms),
+            dictionary_terms=len(joined) - len(static.terms),
             session_terms=sum(session_counts.values()),
             focus=focus.verdict,
             focus_terms=focus.terms,
@@ -359,6 +374,7 @@ class _Server:
             xai_text=result.xai_text,
             # On disk a session term would outlive its window, so only the counts are kept.
             terms=list(static.terms),
+            dictionary_terms=list(joined[len(static.terms) :]),
             session_terms=session_counts,
             focus=FocusRecord(verdict=focus.verdict, terms=focus.terms),
             aliases=[{"heard": alias.heard, "written": alias.written} for alias in vocab.aliases],
@@ -441,6 +457,7 @@ def create_app(
     terms: TermsFile,
     *,
     session_terms: SessionTerms,
+    dictionary: Dictionary | None = None,
     keep: Path | None,
     flags: Flags,
     max_bytes: int = MAX_UPLOAD_BYTES,
@@ -451,12 +468,13 @@ def create_app(
         stt: The xAI client, held for the app's lifetime and closed at its shutdown.
         terms: The terms file, re-read when it changes.
         session_terms: The session term sources, polled while the app runs.
+        dictionary: VoiceInk's Dictionary, read on every dictation, or None to read none.
         keep: Where dictations are kept, or None to keep nothing.
         flags: The server's settings, recorded with each kept dictation.
         max_bytes: Upload cap, counted as the body streams in.
 
     """
-    server = _Server(stt, terms, session_terms, keep, flags, max_bytes)
+    server = _Server(stt, terms, session_terms, dictionary, keep, flags, max_bytes)
 
     # Closed on shutdown, where SIGTERM lands too: uvicorn re-raises the signal
     # after shutting down, so code after its `run` never sees a launchd stop.
@@ -486,6 +504,7 @@ def run(
     api_key: str,
     terms: TermsFile,
     session_terms: SessionTerms,
+    dictionary: Dictionary | None,
     keep: Path | None,
     host: str,
     port: int,
@@ -498,12 +517,23 @@ def run(
         "terms": str(terms.path),
         "session_terms": [source.name for source in session_terms.sources],
         "focus": None if session_terms.focus is None else session_terms.focus.name,
+        "voiceink_dictionary": None if dictionary is None else str(dictionary.path),
         "keep": None if keep is None else str(keep),
     }
     shown = f"[{host}]" if ":" in host else host
+    if dictionary is not None:
+        dictionary.read()
+        _logger().info("serve.dictionary", **dictionary.health())
     _logger().info("serve.listening", voiceink_endpoint=f"http://{shown}:{port}{ENDPOINT}")
     uvicorn.run(
-        create_app(stt, terms, session_terms=session_terms, keep=keep, flags=flags),
+        create_app(
+            stt,
+            terms,
+            session_terms=session_terms,
+            dictionary=dictionary,
+            keep=keep,
+            flags=flags,
+        ),
         host=host,
         port=port,
         log_level="warning",

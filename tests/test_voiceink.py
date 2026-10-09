@@ -3,6 +3,7 @@ from __future__ import annotations
 import sqlite3
 import time
 from contextlib import closing
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
@@ -14,7 +15,6 @@ from tests.voiceink_fixtures import add_words, closed_store, open_store
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
-    from pathlib import Path
 
 
 @pytest.fixture
@@ -43,7 +43,7 @@ def test_the_default_path_is_voiceinks_store_under_home(tmp_path: Path) -> None:
 
 
 def test_words_are_trimmed_deduped_ignoring_case_and_sorted(store: Path) -> None:
-    closed_store(store, "Quindle", "  Zorblatt ", "", "  ", "zorblatt", "Aplix")
+    closed_store(store, "Quindle", "Zorblatt  ", "", "  ", "zorblatt", "Aplix")
 
     dictionary = Dictionary(store)
 
@@ -187,3 +187,27 @@ def test_join_with_a_full_file_adds_nothing() -> None:
     file_terms = [f"file{n}" for n in range(MAX_KEYTERMS)]
 
     assert join(file_terms, ["Zorblatt"]) == tuple(file_terms)
+
+
+def test_a_relative_path_is_read_from_the_working_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    closed_store(tmp_path / "dictionary.store", "Zorblatt")
+    monkeypatch.chdir(tmp_path)
+
+    assert Dictionary(Path("dictionary.store")).read() == ("Zorblatt",)
+
+
+def test_a_store_that_cannot_be_looked_at_is_unreadable_not_an_error(tmp_path: Path) -> None:
+    folder = tmp_path / "locked"
+    folder.mkdir()
+    closed_store(folder / "dictionary.store", "Zorblatt")
+    folder.chmod(0)
+    try:
+        dictionary = Dictionary(folder / "dictionary.store")
+        words = dictionary.read()
+    finally:
+        folder.chmod(0o700)
+
+    assert words == ()
+    assert dictionary.health()["state"] == "unreadable"

@@ -1128,7 +1128,10 @@ async def test_dictionary_words_follow_the_file_terms_and_never_displace_them(
     sessions = _sessions(tmp_path, **_two_hosts())
     with capture_logs() as logs:
         async with _client(
-            xai, tmp_path, terms="".join(f"{t}\n" for t in file_terms), sessions=sessions,
+            xai,
+            tmp_path,
+            terms="".join(f"{t}\n" for t in file_terms),
+            sessions=sessions,
             dictionary=dictionary,
         ) as client:
             response = await _post(client)
@@ -1148,9 +1151,7 @@ async def test_a_word_added_in_voiceink_is_sent_with_the_next_dictation(tmp_path
     store = tmp_path / "dictionary.store"
     xai = Xai()
     with closing(open_store(store, "Zorblatt")) as writer:
-        async with _client(
-            xai, tmp_path, terms="herdr\n", dictionary=Dictionary(store)
-        ) as client:
+        async with _client(xai, tmp_path, terms="herdr\n", dictionary=Dictionary(store)) as client:
             await _post(client)
             add_words(writer, "Quindle")
             await _post(client)
@@ -1208,7 +1209,7 @@ async def test_health_shows_the_dictionary_path_state_and_count_but_no_word(
 
 
 def test_a_record_written_before_the_dictionary_still_parses() -> None:
-    record = {
+    record: dict[str, object] = {
         "received_at": NOW.isoformat(),
         "request": {
             "model": None,
