@@ -15,6 +15,7 @@ from scribe import cli, session_sources
 from scribe.cli import app
 from scribe.focus import Focus
 from scribe.serve import dictation_client
+from tests.voiceink_fixtures import closed_store
 from tests.xai_fixtures import xai_payload
 
 if TYPE_CHECKING:
@@ -39,6 +40,7 @@ def served(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> list[dict[str, ob
 
     monkeypatch.setattr("uvicorn.run", record)
     monkeypatch.setenv("XAI_API_KEY", KEY)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
     return starts
@@ -89,6 +91,7 @@ def test_the_default_terms_file_is_read_from_the_config_home(
         (["--session-terms-host=-oProxyCommand=x"], "--session-terms-host"),
         (["--session-terms-host", "box a"], "--session-terms-host"),
         (["--session-terms-host", "box\x1b"], "--session-terms-host"),
+        (["--voiceink-dictionary", "d.store", "--no-voiceink-dictionary"], "--no-voiceink"),
     ],
 )
 def test_a_bad_start_exits_two_with_one_line_before_serving(
@@ -146,6 +149,7 @@ def served_apps(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> list[ASGIApp
     monkeypatch.setattr("uvicorn.run", record)
     monkeypatch.setattr("scribe.serve.dictation_client", fake_xai)
     monkeypatch.setenv("XAI_API_KEY", KEY)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
     return apps
@@ -281,3 +285,66 @@ def test_help_lists_no_focus() -> None:
 
     assert result.exit_code == 0
     assert "--no-focus" in result.output
+
+
+def _dictionary_health(app_: ASGIApp) -> object:
+    return _dictate_and_check_health(app_)["voiceink_dictionary"]
+
+
+def test_the_dictionary_is_read_from_voiceinks_store_under_home(
+    served_apps: list[ASGIApp], tmp_path: Path
+) -> None:
+    store = (
+        tmp_path / "home" / "Library" / "Application Support" / "com.prakashjoshipax.VoiceInk"
+    ) / "dictionary.store"
+    store.parent.mkdir(parents=True)
+    closed_store(store, "Zorblatt")
+
+    result = runner.invoke(app, ["serve"])
+
+    assert result.exit_code == 0, result.output
+    (served,) = served_apps
+    assert _dictionary_health(served) == {"path": str(store), "state": "ok", "words": 1}
+    record = _kept_record(tmp_path)
+    assert record["dictionary_terms"] == ["Zorblatt"]
+    assert cast("dict[str, object]", record["flags"])["voiceink_dictionary"] == str(store)
+
+
+def test_a_missing_default_dictionary_is_no_error(
+    served_apps: list[ASGIApp], tmp_path: Path
+) -> None:
+    result = runner.invoke(app, ["serve"])
+
+    assert result.exit_code == 0, result.output
+    (served,) = served_apps
+    health = cast("dict[str, object]", _dictionary_health(served))
+    assert (health["state"], health["words"]) == ("missing", 0)
+
+
+def test_voiceink_dictionary_names_another_store(
+    served_apps: list[ASGIApp], tmp_path: Path
+) -> None:
+    store = closed_store(tmp_path / "elsewhere.store", "Quindle", "Zorblatt")
+
+    result = runner.invoke(app, ["serve", "--voiceink-dictionary", str(store)])
+
+    assert result.exit_code == 0, result.output
+    (served,) = served_apps
+    assert _dictionary_health(served) == {"path": str(store), "state": "ok", "words": 2}
+
+
+def test_no_voiceink_dictionary_reads_none(served_apps: list[ASGIApp], tmp_path: Path) -> None:
+    store = (
+        tmp_path / "home" / "Library" / "Application Support" / "com.prakashjoshipax.VoiceInk"
+    ) / "dictionary.store"
+    store.parent.mkdir(parents=True)
+    closed_store(store, "Zorblatt")
+
+    result = runner.invoke(app, ["serve", "--no-voiceink-dictionary"])
+
+    assert result.exit_code == 0, result.output
+    (served,) = served_apps
+    assert _dictionary_health(served) is None
+    record = _kept_record(tmp_path)
+    assert record["dictionary_terms"] == []
+    assert cast("dict[str, object]", record["flags"])["voiceink_dictionary"] is None
