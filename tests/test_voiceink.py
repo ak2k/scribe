@@ -56,6 +56,26 @@ def test_of_exact_case_twins_the_lowercase_one_is_kept(store: Path) -> None:
     assert Dictionary(store).read() == ("zorblatt",)
 
 
+def test_with_one_free_slot_the_word_with_fewer_leading_zeros_is_sent(store: Path) -> None:
+    closed_store(store, "Word002", "Word02", "Word2")
+    words = Dictionary(store).read()
+    file_terms = [f"file{n}" for n in range(MAX_KEYTERMS - 1)]
+
+    assert words == ("Word2", "Word02", "Word002")
+    assert join(file_terms, words)[-1] == "Word2"
+
+
+def test_a_number_too_long_to_convert_is_refused_alone(store: Path) -> None:
+    closed_store(store, "Quindle", "9" * 5000)
+    dictionary = Dictionary(store)
+
+    with capture_logs() as logs:
+        assert dictionary.read() == ("Quindle",)
+
+    assert dictionary.health() == {"path": str(store), "state": "ok", "words": 1}
+    assert [entry["event"] for entry in logs] == ["serve.dictionary_word_refused"]
+
+
 def test_a_word_xai_would_refuse_is_skipped_and_logged_once(store: Path) -> None:
     too_long = "x" * 51
     closed_store(store, "Quindle", too_long, "Zorb\x07latt")
