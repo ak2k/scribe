@@ -21,6 +21,7 @@ from structlog.testing import capture_logs
 from uvicorn.lifespan.on import LifespanOn
 from uvicorn.protocols.http.h11_impl import H11Protocol
 
+from scribe import voiceink
 from scribe.focus import Focus
 from scribe.serve import ENDPOINT, KeepRecord, create_app, dictation_client, run
 from scribe.session_sources import SessionTerms, Source, local_source, remote_source
@@ -1234,3 +1235,24 @@ def test_a_record_written_before_the_dictionary_still_parses() -> None:
     }
 
     assert KeepRecord.model_validate(record).dictionary_terms == []
+
+
+async def test_no_dictionary_read_runs_on_the_event_loop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    loop_thread = threading.get_ident()
+    seen: list[int] = []
+    select = voiceink._select  # pyright: ignore[reportPrivateUsage]  # spied on, not replaced
+
+    def spy(path: Path) -> list[str]:
+        seen.append(threading.get_ident())
+        return select(path)
+
+    monkeypatch.setattr(voiceink, "_select", spy)
+    store = closed_store(tmp_path / "dictionary.store", "Zorblatt")
+    async with _client(Xai(), tmp_path, dictionary=Dictionary(store)) as client:
+        await _post(client)
+        await client.get("/health")
+
+    assert len(seen) == 2
+    assert loop_thread not in seen

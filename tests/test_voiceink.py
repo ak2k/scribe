@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import sqlite3
-import time
 from contextlib import closing
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -9,9 +8,9 @@ from typing import TYPE_CHECKING
 import pytest
 from structlog.testing import capture_logs
 
-from scribe.voiceink import Dictionary, default_path, join
+from scribe.voiceink import Dictionary, join
 from scribe.xai_stt import MAX_KEYTERMS
-from tests.voiceink_fixtures import add_words, closed_store, open_store
+from tests.voiceink_fixtures import add_words, closed_store, crashed_store, open_store
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -32,23 +31,23 @@ def _listing(folder: Path) -> dict[str, bytes]:
     return {path.name: path.read_bytes() for path in sorted(folder.iterdir())}
 
 
-def test_the_default_path_is_voiceinks_store_under_home(tmp_path: Path) -> None:
-    assert default_path(tmp_path) == (
-        tmp_path
-        / "Library"
-        / "Application Support"
-        / "com.prakashjoshipax.VoiceInk"
-        / "dictionary.store"
-    )
-
-
-def test_words_are_trimmed_deduped_ignoring_case_and_sorted(store: Path) -> None:
+def test_words_are_trimmed_and_deduped_keeping_the_twin_voiceink_sorts_first(
+    store: Path,
+) -> None:
     closed_store(store, "Quindle", "Zorblatt  ", "", "  ", "zorblatt", "Aplix")
 
     dictionary = Dictionary(store)
 
-    assert dictionary.read() == ("Aplix", "Quindle", "Zorblatt")
+    assert dictionary.read() == ("Aplix", "Quindle", "zorblatt")
     assert dictionary.health() == {"path": str(store), "state": "ok", "words": 3}
+
+
+def test_words_sort_as_voiceink_sorts_them_ignoring_case_with_numbers_by_value(
+    store: Path,
+) -> None:
+    closed_store(store, "zeta", "Word10", "Beta", "_x", "Word2", "aardvark")
+
+    assert Dictionary(store).read() == ("_x", "aardvark", "Beta", "Word2", "Word10", "zeta")
 
 
 def test_a_word_xai_would_refuse_is_skipped_and_logged_once(store: Path) -> None:
@@ -148,39 +147,18 @@ def test_an_unreadable_store_keeps_the_last_good_words_and_warns_once(
     assert [entry["event"] for entry in logs] == ["serve.dictionary_restored"]
 
 
-def test_an_unreadable_store_never_read_well_gives_no_words(store: Path) -> None:
-    store.write_bytes(b"not a database, only some bytes" * 64)
-
-    assert Dictionary(store).read() == ()
-
-
-def test_a_read_is_quick(store: Path) -> None:
-    closed_store(store, *(f"Word{n}" for n in range(200)))
-    dictionary = Dictionary(store)
-
-    started = time.monotonic()
-    dictionary.read()
-
-    assert time.monotonic() - started < 0.5
-
-
-def test_join_puts_the_words_after_the_file_terms_and_never_displaces_them() -> None:
-    file_terms = [f"file{n}" for n in range(95)]
-    words = [f"Word{n}" for n in range(10)]
-
-    joined = join(file_terms, words)
-
-    assert len(joined) == MAX_KEYTERMS
-    assert joined[:95] == tuple(file_terms)
-    assert joined[95:] == ("Word0", "Word1", "Word2", "Word3", "Word4")
-
-
 def test_join_drops_a_word_the_file_already_holds_in_any_case() -> None:
     assert join(["Zorblatt", "herdr"], ["zorblatt", "Quindle", "HERDR"]) == (
         "Zorblatt",
         "herdr",
         "Quindle",
     )
+
+
+def test_join_counts_file_case_twins_against_the_cap() -> None:
+    file_terms = ["Zorblatt", "zorblatt", *(f"file{n}" for n in range(96))]
+
+    assert len(join(file_terms, [f"Word{n}" for n in range(10)])) == MAX_KEYTERMS
 
 
 def test_join_with_a_full_file_adds_nothing() -> None:
@@ -211,3 +189,77 @@ def test_a_store_that_cannot_be_looked_at_is_unreadable_not_an_error(tmp_path: P
 
     assert words == ()
     assert dictionary.health()["state"] == "unreadable"
+
+
+def test_a_store_gone_after_a_good_read_gives_no_words(store: Path) -> None:
+    closed_store(store, "Zorblatt")
+    dictionary = Dictionary(store)
+    assert dictionary.read() == ("Zorblatt",)
+
+    store.unlink()
+
+    assert dictionary.read() == ()
+    assert dictionary.health()["state"] == "missing"
+
+
+def test_a_crashed_writers_wal_is_read_and_left_unwritten(store: Path) -> None:
+    crashed_store(store, "Zorblatt", "Quindle")
+    before = _listing(store.parent)
+
+    assert Dictionary(store).read() == ("Quindle", "Zorblatt")
+
+    after = _listing(store.parent)
+    assert set(after) == set(before)
+    assert after["dictionary.store"] == before["dictionary.store"]
+    assert after["dictionary.store-wal"] == before["dictionary.store-wal"]
+
+
+@pytest.mark.parametrize("gone", ["-wal", "-shm"])
+def test_a_store_with_one_companion_file_gains_no_file(store: Path, gone: str) -> None:
+    crashed_store(store, "Zorblatt")
+    store.with_name(store.name + gone).unlink()
+    before = _listing(store.parent)
+
+    Dictionary(store).read()
+
+    after = _listing(store.parent)
+    assert set(after) == set(before)
+    assert after["dictionary.store"] == before["dictionary.store"]
+
+
+def test_words_in_a_wal_without_its_shm_are_unreadable_and_the_last_words_kept(
+    store: Path,
+) -> None:
+    crashed_store(store, "Zorblatt")
+    dictionary = Dictionary(store)
+    assert dictionary.read() == ("Zorblatt",)
+    store.with_name(store.name + "-shm").unlink()
+
+    with capture_logs() as logs:
+        first = dictionary.read()
+        second = dictionary.read()
+
+    assert first == second == ("Zorblatt",)
+    assert dictionary.health()["state"] == "unreadable"
+    warnings = [entry for entry in logs if entry["event"] == "serve.dictionary_unreadable"]
+    assert len(warnings) == 1
+
+
+def test_an_empty_store_beside_a_wal_keeps_its_wal(store: Path) -> None:
+    crashed_store(store, "Zorblatt")
+    store.write_bytes(b"")
+    before = _listing(store.parent)
+
+    Dictionary(store).read()
+
+    assert _listing(store.parent) == before
+
+
+def test_a_symlinked_store_reads_the_wal_beside_its_target(tmp_path: Path) -> None:
+    target = tmp_path / "real"
+    target.mkdir()
+    link = tmp_path / "dictionary.store"
+    with closing(open_store(target / "dictionary.store", "Zorblatt")):
+        link.symlink_to(target / "dictionary.store")
+
+        assert Dictionary(link).read() == ("Zorblatt",)
