@@ -65,6 +65,19 @@ def test_with_one_free_slot_the_word_with_fewer_leading_zeros_is_sent(store: Pat
     assert join(file_terms, words)[-1] == "Word2"
 
 
+def test_ties_go_to_accents_then_to_case_or_leading_zeros_from_the_left(store: Path) -> None:
+    closed_store(store, "Word2", "word02", "02quindle", "2Quindle", "zorblätt", "Zorblatt")
+
+    assert Dictionary(store).read() == (
+        "2Quindle",
+        "02quindle",
+        "word02",
+        "Word2",
+        "Zorblatt",
+        "zorblätt",
+    )
+
+
 def test_a_number_too_long_to_convert_is_refused_alone(store: Path) -> None:
     closed_store(store, "Quindle", "9" * 5000)
     dictionary = Dictionary(store)

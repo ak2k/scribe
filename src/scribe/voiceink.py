@@ -56,19 +56,41 @@ def _uri(path: Path) -> str:
     return f"{path.as_uri()}?mode=ro&immutable=1"
 
 
-def _order(word: str) -> tuple[list[str | int], str]:
-    # VoiceInk sorts with localizedStandardCompare: blind to case and accents, digit runs
-    # compared as numbers, and the lowercase twin first.
+def _digits(run: str) -> str:
+    return "".join(str(unicodedata.decimal(char)) for char in run)
+
+
+def _order(word: str) -> tuple[list[str | tuple[int, str]], list[str], list[tuple[int, str]]]:
+    # VoiceInk sorts with localizedStandardCompare: letters ignoring case and accents with
+    # digit runs by value, then accents, then case and leading zeros, whichever differs
+    # first from the left, the lowercase twin and fewer zeros first. A run is compared by
+    # its digits, as int() refuses a long one.
     folded = unicodedata.normalize("NFKD", word.casefold())
     bare = "".join(char for char in folded if not unicodedata.combining(char))
     parts = re.split(r"(\d+)", bare)
-    return [int(part) if n % 2 else part for n, part in enumerate(parts)], word.swapcase()
+    primary: list[str | tuple[int, str]] = [parts[0]]
+    for run, text in zip(parts[1::2], parts[2::2], strict=True):
+        value = _digits(run).lstrip("0")
+        primary += [(len(value), value), text]
+    accents: list[str] = []
+    for char in folded:
+        if unicodedata.combining(char) and accents:
+            accents[-1] += char
+        elif not char.isdecimal():
+            accents.append("")
+    tertiary = [
+        (len(token) - len(_digits(token).lstrip("0")), "")
+        if token.isdecimal()
+        else (0, token.swapcase())
+        for token in re.findall(r"\d+|.", word, re.DOTALL)
+    ]
+    return primary, accents, tertiary
 
 
 def _select(path: Path) -> list[str]:
     with closing(sqlite3.connect(_uri(path), uri=True, timeout=BUSY_TIMEOUT_SECONDS)) as db:
         rows: list[tuple[object]] = db.execute("SELECT ZWORD FROM ZVOCABULARYWORD").fetchall()
-    return sorted((value for (value,) in rows if isinstance(value, str)), key=_order)
+    return [value for (value,) in rows if isinstance(value, str)]
 
 
 def join(file_terms: Sequence[str], words: Sequence[str]) -> tuple[str, ...]:
@@ -128,11 +150,12 @@ class Dictionary:
         self._state, self._failure = state, failure
 
     def _accept(self, values: Sequence[str]) -> tuple[str, ...]:
-        seen: dict[str, str] = {}
+        # Each word is checked alone before the sort, so no entry can fail the whole read.
+        kept: list[str] = []
         refused: set[str] = set()
         for value in values:
             word = value.strip()
-            if not word or word.lower() in seen:
+            if not word:
                 continue
             try:
                 check_keyterms([word])
@@ -142,6 +165,10 @@ class Dictionary:
                 if word not in self._refused:
                     _logger().warning("serve.dictionary_word_refused", characters=len(word))
                 continue
-            seen[word.lower()] = word
+            kept.append(value)
         self._refused = frozenset(refused)
+        seen: dict[str, str] = {}
+        for value in sorted(kept, key=_order):
+            word = value.strip()
+            _ = seen.setdefault(word.lower(), word)
         return tuple(seen.values())
