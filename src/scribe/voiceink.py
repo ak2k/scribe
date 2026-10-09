@@ -78,11 +78,12 @@ def _order(word: str) -> tuple[list[str | tuple[int, str]], list[str], list[tupl
             accents[-1] += char
         elif not char.isdecimal():
             accents.append("")
+    tokens = (match.group() for match in re.finditer(r"\d+|.", word, re.DOTALL))
     tertiary = [
         (len(token) - len(_digits(token).lstrip("0")), "")
         if token.isdecimal()
         else (0, token.swapcase())
-        for token in re.findall(r"\d+|.", word, re.DOTALL)
+        for token in tokens
     ]
     return primary, accents, tertiary
 
