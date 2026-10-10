@@ -50,6 +50,13 @@ def test_words_sort_as_voiceink_sorts_them_ignoring_case_with_numbers_by_value(
     assert Dictionary(store).read() == ("_x", "aardvark", "Beta", "Word2", "Word10", "zeta")
 
 
+def test_a_padded_word_sorts_by_its_stored_padding_as_voiceink_fetches_it(store: Path) -> None:
+    # VoiceInk sorts the stored values before it trims them, so leading padding moves a word up.
+    closed_store(store, "Mango", " Zorblatt", "Aplix", "zorblatt")
+
+    assert Dictionary(store).read() == ("Zorblatt", "Aplix", "Mango")
+
+
 def test_of_exact_case_twins_the_lowercase_one_is_kept(store: Path) -> None:
     closed_store(store, "Zorblatt", "zorblatt")
 
