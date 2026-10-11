@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import suppress
 from typing import TYPE_CHECKING, cast
 
 import anyio
@@ -45,10 +46,11 @@ def pane_reply(
 class Herdr:
     """A fake herdr socket: answers each connection with `reply`, or never when it is None."""
 
-    def __init__(self, path: Path, reply: bytes | None) -> None:
-        """Listen at `path` once served."""
+    def __init__(self, path: Path, reply: bytes | None, *, hold: bool = False) -> None:
+        """Listen at `path` once served; with `hold`, keep each connection open after `reply`."""
         self.path = path
         self.reply = reply
+        self.hold = hold
         self.asked: list[object] = []
 
     async def serve(self, *, task_status: anyio.abc.TaskStatus[None]) -> None:
@@ -65,4 +67,8 @@ class Herdr:
             if reply is None:
                 await anyio.sleep_forever()
                 return
-            await stream.send(reply)
+            # A client past its cap or its size bound hangs up mid-reply, as it may.
+            with suppress(anyio.BrokenResourceError):
+                await stream.send(reply)
+            if self.hold:
+                await anyio.sleep_forever()

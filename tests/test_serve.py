@@ -377,7 +377,7 @@ async def test_a_herdr_hit_leads_the_keyterms_and_logs_its_source_but_nothing_of
     sessions = _focused_sessions(tmp_path)
     # Ghostty shows no session's tab, so a hit can only be herdr's.
     answer = f"front\nother tab\n{tmp_path}\n"
-    sessions.focus = Focus(lambda _argv, _timeout: answer, cap=30, herdr=herdr.path)
+    sessions.focus = Focus(lambda _argv, _timeout: answer, cap=30, herdr=herdr.path, herdr_cap=30)
     xai = Xai()
     got: list[httpx.Response] = []
     with capture_logs() as logs:

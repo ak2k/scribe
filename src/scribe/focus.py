@@ -252,8 +252,8 @@ class Focus:
     async def _query(self, recent: Sequence[SessionBlock]) -> _Match | str | None:
         """The match, None when Ghostty is not in front, or the cause of a failure.
 
-        A request that finds the last query still running is "slow" at once, as that
-        query's answer did not come within its own cap either.
+        A request that finds the permit held, by a late request's query or by a running
+        cross-check, is "slow" at once: one permit keeps Ghostty to one thread.
         """
         if not self._permit.acquire(blocking=False):
             return "slow"
@@ -308,6 +308,8 @@ class Focus:
         def run() -> None:
             outcome: Check
             try:
+                # DIVERGE: no request cap here: the check is off the request path, and an
+                # answer later than the cap still measures agreement.
                 answer = self._ask(recent)
             except Exception:  # noqa: BLE001  # a check only measures; its failure is "unknown"
                 outcome = "unknown"

@@ -21,6 +21,7 @@ from scribe.errors import ExternalServiceError, InputValidationError
 from scribe.focus import (
     ARGV,
     HERDR_CAP_SECONDS,
+    MAX_HERDR_REPLY_BYTES,
     QUERY_CAP_SECONDS,
     QUERY_TIMEOUT_SECONDS,
     Focus,
@@ -645,7 +646,7 @@ def test_a_herdr_hit_picks_the_panes_session_without_waiting_for_ghostty(short_d
 
     mine, other = _block("mine", titles=("Mine",)), _block("other", titles=("Other",))
     herdr = Herdr(short_dir / "h.sock", pane_reply("mine"))
-    focus = Focus(hung, herdr=herdr.path)
+    focus = Focus(hung, herdr=herdr.path, herdr_cap=ROOMY)
     try:
         with capture_logs() as logs:
             (picked, took) = _herdr_pick(herdr, focus, [other, mine])
@@ -665,7 +666,7 @@ def test_a_herdr_hit_picks_the_panes_session_without_waiting_for_ghostty(short_d
 def test_a_herdr_hit_needs_no_ghostty_in_front(short_dir: Path) -> None:
     mine = _block("mine")
     herdr = Herdr(short_dir / "h.sock", pane_reply("mine"))
-    focus = Focus(Osascript("back\n"), cap=ROOMY, herdr=herdr.path)
+    focus = Focus(Osascript("back\n"), cap=ROOMY, herdr=herdr.path, herdr_cap=ROOMY)
 
     with capture_logs() as logs:
         assert _herdr_pick(herdr, focus, [mine])[0] == ("hit", mine, "herdr")
@@ -688,8 +689,19 @@ def test_a_herdr_that_never_answers_falls_back_within_its_cap(short_dir: Path) -
     picked, took = _herdr_pick(herdr, focus, [mine])
 
     assert picked == ("hit", mine, "ghostty")
-    assert took < HERDR_CAP_SECONDS + 1
+    assert HERDR_CAP_SECONDS <= took < HERDR_CAP_SECONDS + 0.4
     assert HERDR_CAP_SECONDS <= QUERY_CAP_SECONDS / 5
+
+
+def test_a_herdr_reply_past_its_size_bound_falls_back_at_once(short_dir: Path) -> None:
+    mine = _block("mine", titles=("Mine",))
+    herdr = Herdr(short_dir / "h.sock", b"x" * (2 * MAX_HERDR_REPLY_BYTES), hold=True)
+    focus = Focus(Osascript(_front("Mine")), cap=ROOMY, herdr=herdr.path, herdr_cap=ROOMY)
+
+    picked, took = _herdr_pick(herdr, focus, [mine])
+
+    assert picked == ("hit", mine, "ghostty")
+    assert took < ROOMY / 6
 
 
 @pytest.mark.parametrize(
@@ -728,7 +740,7 @@ def test_a_herdr_that_never_answers_falls_back_within_its_cap(short_dir: Path) -
 def test_any_other_herdr_answer_falls_back_to_ghostty(short_dir: Path, reply: bytes) -> None:
     mine = _block("mine", titles=("Mine",))
     herdr = Herdr(short_dir / "h.sock", reply)
-    focus = Focus(Osascript(_front("Mine")), cap=ROOMY, herdr=herdr.path)
+    focus = Focus(Osascript(_front("Mine")), cap=ROOMY, herdr=herdr.path, herdr_cap=ROOMY)
 
     with capture_logs() as logs:
         assert _herdr_pick(herdr, focus, [mine])[0] == ("hit", mine, "ghostty")
@@ -740,7 +752,7 @@ def test_any_other_herdr_answer_falls_back_to_ghostty(short_dir: Path, reply: by
 def test_two_blocks_of_the_panes_session_fall_back_to_ghostty(short_dir: Path) -> None:
     mine, twin = _block("mine", titles=("Mine",)), _block("mine", titles=("Twin",), cwd="/v")
     herdr = Herdr(short_dir / "h.sock", pane_reply("mine"))
-    focus = Focus(Osascript(_front("Mine")), cap=ROOMY, herdr=herdr.path)
+    focus = Focus(Osascript(_front("Mine")), cap=ROOMY, herdr=herdr.path, herdr_cap=ROOMY)
 
     assert _herdr_pick(herdr, focus, [mine, twin])[0] == ("hit", mine, "ghostty")
 
@@ -748,7 +760,9 @@ def test_two_blocks_of_the_panes_session_fall_back_to_ghostty(short_dir: Path) -
 def test_nothing_from_the_pane_reaches_a_log_or_health(short_dir: Path) -> None:
     mine = _block(f"{SENTINEL}-session", titles=(f"{SENTINEL} title",), cwd=f"/{SENTINEL}-cwd")
     herdr = Herdr(short_dir / "h.sock", pane_reply(f"{SENTINEL}-session"))
-    focus = Focus(Osascript(_front(f"{SENTINEL} title", "/w")), cap=ROOMY, herdr=herdr.path)
+    focus = Focus(
+        Osascript(_front(f"{SENTINEL} title", "/w")), cap=ROOMY, herdr=herdr.path, herdr_cap=ROOMY
+    )
 
     with capture_logs() as logs:
         assert _herdr_pick(herdr, focus, [mine])[0][0] == "hit"
@@ -777,7 +791,7 @@ def test_after_a_herdr_hit_ghostty_is_asked_off_the_request_path_and_its_pick_lo
     mine, other = _block("mine", titles=("Mine",)), _block("other", titles=("Other",))
     herdr = Herdr(short_dir / "h.sock", pane_reply("mine"))
     osascript = Osascript(answer)
-    focus = Focus(osascript, cap=ROOMY, herdr=herdr.path)
+    focus = Focus(osascript, cap=ROOMY, herdr=herdr.path, herdr_cap=ROOMY)
 
     with capture_logs() as logs:
         picked = _herdr_pick(herdr, focus, [mine, other])[0]
@@ -803,7 +817,7 @@ def test_a_ghostty_query_still_running_skips_the_check(short_dir: Path) -> None:
 
     mine = _block("mine", titles=("Mine",))
     herdr = Herdr(short_dir / "h.sock", pane_reply("mine"))
-    focus = Focus(hung, herdr=herdr.path)
+    focus = Focus(hung, herdr=herdr.path, herdr_cap=ROOMY)
     try:
         with capture_logs() as logs:
             first, _ = _herdr_pick(herdr, focus, [mine])
@@ -835,7 +849,7 @@ def test_a_check_thread_that_cannot_start_frees_the_permit(
     mine = _block("mine", titles=("Mine",))
     herdr = Herdr(short_dir / "h.sock", pane_reply("mine"))
     osascript = Osascript(_front("Mine"))
-    focus = Focus(osascript, cap=ROOMY, herdr=herdr.path)
+    focus = Focus(osascript, cap=ROOMY, herdr=herdr.path, herdr_cap=ROOMY)
     with capture_logs() as logs:
         with monkeypatch.context() as patched:
             patched.setattr(threading.Thread, "start", no_check_thread)
