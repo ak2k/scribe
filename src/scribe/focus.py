@@ -1,13 +1,16 @@
-"""The focused Ghostty tab for `scribe serve`: asked for by each request, matched to a session.
+"""The focused session for `scribe serve`: asked for by each request, matched to a session block.
 
-A dictation goes to the frontmost app; when that is a Ghostty tab running Claude
-Code, the tab's title and directory single out that session's block in the
-local hook file, whose terms then lead the keyterms.
+A dictation goes to the session being typed into. herdr's socket names the
+focused pane's Claude Code session outright; failing that, when the frontmost app
+is a Ghostty tab running Claude Code, the tab's title and directory single out
+that session's block in the local hook file. The block's terms then lead the
+keyterms.
 """
 
 from __future__ import annotations
 
 import itertools
+import os
 import re
 import subprocess
 import threading
@@ -21,6 +24,8 @@ import anyio
 import anyio.from_thread
 import anyio.lowlevel
 import structlog
+from anyio.streams.buffered import BufferedByteReceiveStream
+from pydantic import BaseModel, ConfigDict
 
 from scribe.errors import AppError, InputValidationError
 from scribe.session_sources import run_program
@@ -55,8 +60,15 @@ QUERY_CAP_SECONDS = 0.25
 # Claude Code's terminal title before a session has one, as `title_key` reduces it.
 UNTITLED_KEY = "claude code"
 _CODE = re.compile(r"\((-\d{1,6})\)\s*$")
+# herdr answers in about 0.3 ms; a miss then costs a fifth of the Ghostty query's cap at most.
+HERDR_CAP_SECONDS = 0.05
+HERDR_REQUEST = b'{"id":"scribe","method":"pane.current","params":{}}\n'
+# A pane's reply is about a kilobyte; past this it is not one.
+MAX_HERDR_REPLY_BYTES = 1 << 16
 
 Verdict = Literal["off", "slow", "error", "away", "miss", "ambiguous", "elsewhere", "hit"]
+Source = Literal["herdr", "ghostty", "off"]
+Check = Literal["agree", "disagree", "unmatched", "away", "unknown"]
 type _Match = tuple[Verdict, SessionBlock | None]
 
 
@@ -128,6 +140,54 @@ def match(tab: Tab, blocks: Sequence[SessionBlock]) -> tuple[Verdict, SessionBlo
     return "hit", found[0]
 
 
+class _HerdrModel(BaseModel):
+    # DIVERGE: extra="ignore" because herdr adds pane fields across versions and its
+    # reply carries many that are not read here.
+    model_config = ConfigDict(extra="ignore", frozen=True, strict=True)
+
+
+class _AgentSession(_HerdrModel):
+    source: str
+    kind: str
+    value: str
+
+
+class _Pane(_HerdrModel):
+    focused: bool
+    agent: str | None = None
+    agent_session: _AgentSession | None = None
+
+
+class _PaneCurrent(_HerdrModel):
+    type: Literal["pane_current"]
+    pane: _Pane
+
+
+class _HerdrReply(_HerdrModel):
+    result: _PaneCurrent
+
+
+def herdr_match(reply: bytes, blocks: Sequence[SessionBlock]) -> SessionBlock | None:
+    """The block of the Claude Code session in herdr's focused pane, or None.
+
+    The session id must name exactly one block. Strings are only compared, so
+    nothing here can stall on the filesystem.
+    """
+    pane = _HerdrReply.model_validate_json(reply).result.pane
+    session = pane.agent_session
+    if (
+        not pane.focused
+        or pane.agent != "claude"
+        or session is None
+        or session.source != "herdr:claude"
+        or session.kind != "id"
+        or not session.value
+    ):
+        return None
+    found = [block for block in blocks if block.session_id == session.value]
+    return found[0] if len(found) == 1 else None
+
+
 def _cause(exc: Exception) -> str:
     """A failure as a code that holds nothing from the tab: the error output can quote a title."""
     if isinstance(exc.__cause__, subprocess.TimeoutExpired):
@@ -158,15 +218,27 @@ def _spelling(cwd: str) -> str:
 
 
 class Focus:
-    """The focused Ghostty tab, asked for by each request."""
+    """The focused session, asked of herdr and then Ghostty by each request."""
 
-    name = "ghostty"
+    def __init__(
+        self,
+        runner: Runner,
+        *,
+        cap: float = QUERY_CAP_SECONDS,
+        herdr: Path | None = None,
+        herdr_cap: float = HERDR_CAP_SECONDS,
+    ) -> None:
+        """Hold a query run with `runner`, which a request waits on for at most `cap` seconds.
 
-    def __init__(self, runner: Runner, *, cap: float = QUERY_CAP_SECONDS) -> None:
-        """Hold a query run with `runner`, which a request waits on for at most `cap` seconds."""
+        herdr's socket at `herdr`, when given, is asked first, for at most `herdr_cap` seconds.
+        """
         self.cap = cap
+        self.herdr_cap = herdr_cap
+        self.name = "ghostty" if herdr is None else "herdr+ghostty"
         self._runner = runner
+        self._herdr = herdr
         self._state: Literal["never", "front", "away", "error", "slow"] = "never"
+        self._source: Source | None = None
         self._failure: str | None = None
         # A query past the cap is abandoned, not stopped, and a stalled mount can hold its
         # thread for good; one permit keeps that to one thread, however many requests come.
@@ -212,35 +284,97 @@ class Focus:
             return answer[0]
         return "slow"
 
-    async def pick(self, recent: Sequence[SessionBlock]) -> tuple[Verdict, SessionBlock | None]:
-        """The focused block among `recent`, the local blocks ranked within 24 h.
+    async def _ask_herdr(self, herdr: Path, recent: Sequence[SessionBlock]) -> SessionBlock | None:
+        with anyio.move_on_after(self.herdr_cap):
+            try:
+                async with await anyio.connect_unix(herdr) as stream:
+                    await stream.send(HERDR_REQUEST)
+                    reply = await BufferedByteReceiveStream(stream).receive_until(
+                        b"\n", MAX_HERDR_REPLY_BYTES
+                    )
+                return herdr_match(reply, recent)
+            # Absent, refused, closed early or any other shape: Ghostty is asked instead,
+            # and the reason is not logged, as the reply can quote a title or a path.
+            except Exception:  # noqa: BLE001  # no herdr answer may fail a dictation
+                return None
+        return None
 
-        Ghostty is asked now, so a tab chosen just before the dictation counts and
-        no earlier tab's session can be put first.
+    def _check(self, picked: SessionBlock, recent: Sequence[SessionBlock]) -> None:
+        """Log whether Ghostty's own match agrees with a herdr pick, off the request path."""
+        if not self._permit.acquire(blocking=False):
+            _logger().info("serve.focus_check", agree="unknown")
+            return
+
+        def run() -> None:
+            outcome: Check
+            try:
+                answer = self._ask(recent)
+            except Exception:  # noqa: BLE001  # a check only measures; its failure is "unknown"
+                outcome = "unknown"
+            else:
+                if answer is None:
+                    outcome = "away"
+                elif answer[1] is None:
+                    outcome = "unmatched"
+                else:
+                    outcome = "agree" if answer[1] is picked else "disagree"
+            finally:
+                self._permit.release()
+            _logger().info("serve.focus_check", agree=outcome)
+
+        try:
+            threading.Thread(target=run, name="focus check", daemon=True).start()
+        except Exception:  # noqa: BLE001  # a thread that never starts never frees the permit
+            self._permit.release()
+            _logger().info("serve.focus_check", agree="unknown")
+
+    async def pick(
+        self, recent: Sequence[SessionBlock]
+    ) -> tuple[Verdict, SessionBlock | None, Source]:
+        """The focused block among `recent`, the local blocks ranked within 24 h, and who named it.
+
+        herdr, then Ghostty, is asked now, so a pane or tab chosen just before the
+        dictation counts and no earlier one's session can be put first.
         """
         if not recent:
-            return "miss", None
+            return "miss", None, "ghostty"
+        # DIVERGE: herdr's pick stands even when another app is in front: focus only
+        # orders which session's terms come first, and the pane typed into last is a
+        # better guess then than the newest session.
+        if self._herdr is not None:
+            block = await self._ask_herdr(self._herdr, recent)
+            if block is not None:
+                self._source = "herdr"
+                self._check(block, recent)
+                return "hit", block, "herdr"
+        self._source = "ghostty"
         answer = await self._query(recent)
         if isinstance(answer, str):
             if answer != self._failure:
                 _logger().warning("serve.focus_failed", error=answer)
             self._failure = answer
             self._state = "slow" if answer == "slow" else "error"
-            return ("slow" if answer == "slow" else "error"), None
+            return ("slow" if answer == "slow" else "error"), None, "ghostty"
         if self._failure is not None:
             _logger().info("serve.focus_restored")
             self._failure = None
         if answer is None:
             self._state = "away"
-            return "away", None
+            return "away", None, "ghostty"
         self._state = "front"
-        return answer
+        return *answer, "ghostty"
 
     def health(self) -> dict[str, object]:
-        """The last query's outcome; nothing from the tab."""
-        return {"state": self._state}
+        """The last Ghostty query's outcome and the source of the last pick; nothing from either."""
+        return {"state": self._state, "source": self._source}
+
+
+def herdr_socket() -> Path:
+    """herdr's socket: `$HERDR_SOCKET_PATH` when set, else herdr's default."""
+    configured = os.environ.get("HERDR_SOCKET_PATH")
+    return Path(configured) if configured else Path.home() / ".config" / "herdr" / "herdr.sock"
 
 
 def ghostty_focus() -> Focus:
-    """The focused-tab query, asking Ghostty with osascript."""
-    return Focus(run_program)
+    """The focused-session query, asking herdr's socket and then Ghostty with osascript."""
+    return Focus(run_program, herdr=herdr_socket())

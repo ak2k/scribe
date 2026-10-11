@@ -28,7 +28,7 @@ if TYPE_CHECKING:
 
     from structlog.stdlib import BoundLogger
 
-    from scribe.focus import Focus, Verdict
+    from scribe.focus import Focus, Source, Verdict
     from scribe.session_terms import SessionBlock
 
     Runner = Callable[[Sequence[str], float], str]
@@ -225,10 +225,11 @@ class Merged:
 
 @dataclass(frozen=True)
 class FocusUse:
-    """What the focused tab did for one dictation: its verdict, and the terms it put first."""
+    """What focus did for one dictation: its verdict, the terms it put first, and who named it."""
 
     verdict: Verdict
     terms: int
+    source: Source
 
 
 def _keyterm(term: str) -> bool:
@@ -309,18 +310,19 @@ class SessionTerms:
         # One read per source: the focused block and the turns must come from the same file.
         reads = [(source, source.live_and_recent(now)) for source in self.sources]
         verdict: Verdict = "off"
+        source: Source = "off"
         focused = None
         if self.focus is not None:
             # A remote tab shows the herdr title and this Mac's cwd, so only local blocks qualify.
             recent = next((r for source, (_, r) in reads if source is self._local), ())
-            verdict, block = await self.focus.pick(recent)
+            verdict, block, source = await self.focus.pick(recent)
             focused = None if block is None else (LOCAL_NAME, block)
         live = [(source.name, blocks) for source, (blocks, _) in reads]
         merged = merge(static.terms, live, focused)
         return (
             Vocab(terms=merged.terms, aliases=static.aliases),
             merged.counts,
-            FocusUse(verdict, merged.focused),
+            FocusUse(verdict, merged.focused, source),
         )
 
     async def poll(self) -> None:

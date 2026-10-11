@@ -365,6 +365,7 @@ class _Server:
             session_terms=sum(session_counts.values()),
             focus=focus.verdict,
             focus_terms=focus.terms,
+            focus_source=focus.source,
             edits=len(result.edits),
         )
         record = KeepRecord(
