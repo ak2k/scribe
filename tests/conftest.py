@@ -1,8 +1,14 @@
 """Shared test fixtures."""
 
+import os
+import shutil
+import tempfile
 from collections.abc import Iterator, Sequence
+from pathlib import Path
 from typing import NoReturn
 
+import anyio
+import anyio.abc
 import pytest
 import structlog
 from hypothesis import settings
@@ -93,3 +99,32 @@ def no_real_focus(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     yield
     # A request turns any query error into a verdict, so the refusal alone could pass unseen.
     assert not reached, "reached the real focus query; inject a runner"
+
+
+@pytest.fixture(autouse=True)
+def no_real_herdr(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Fail a test that connects to the real herdr socket, rather than let it ask the live herdr."""
+    real = {str(Path.home() / ".config" / "herdr" / "herdr.sock")}
+    if os.environ.get("HERDR_SOCKET_PATH"):
+        real.add(os.environ["HERDR_SOCKET_PATH"])
+    reached: list[str] = []
+    connect = anyio.connect_unix
+
+    async def guarded(path: str | bytes | os.PathLike[str]) -> anyio.abc.UNIXSocketStream:
+        if os.fsdecode(path) in real:
+            reached.append(os.fsdecode(path))
+            raise AssertionError("reached the real herdr socket; pass a fake one")
+        return await connect(path)
+
+    monkeypatch.setattr("anyio.connect_unix", guarded)
+    yield
+    # A failed herdr ask falls back to Ghostty, so the refusal alone could pass unseen.
+    assert not reached, "reached the real herdr socket; pass a fake one"
+
+
+@pytest.fixture
+def short_dir() -> Iterator[Path]:
+    """A directory for a unix socket: macOS caps its path at 104 bytes, which tmp_path can pass."""
+    made = Path(tempfile.mkdtemp(dir="/tmp", prefix="hd"))
+    yield made
+    shutil.rmtree(made)

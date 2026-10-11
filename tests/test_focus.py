@@ -20,19 +20,24 @@ from structlog.testing import capture_logs
 from scribe.errors import ExternalServiceError, InputValidationError
 from scribe.focus import (
     ARGV,
+    HERDR_CAP_SECONDS,
+    MAX_HERDR_REPLY_BYTES,
     QUERY_CAP_SECONDS,
     QUERY_TIMEOUT_SECONDS,
     Focus,
     Tab,
     Verdict,
+    ghostty_focus,
+    herdr_socket,
     match,
     parse_answer,
     title_key,
 )
 from scribe.session_terms import SessionBlock
+from tests.herdr_fixtures import SENTINEL, Herdr, pane_reply
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
     from pathlib import Path
 
 NOW = datetime(2026, 10, 5, 12, 0, tzinfo=UTC)
@@ -75,7 +80,9 @@ def _front(title: str = TITLE, cwd: str = "/w") -> str:
 
 
 def _pick(focus: Focus, blocks: Sequence[SessionBlock]) -> tuple[Verdict, SessionBlock | None]:
-    return anyio.run(focus.pick, blocks)
+    verdict, block, source = anyio.run(focus.pick, blocks)
+    assert source == "ghostty"
+    return verdict, block
 
 
 def _asked(answer: str | Exception) -> Focus:
@@ -340,7 +347,7 @@ def test_no_local_block_within_24_h_runs_no_query_and_is_a_miss() -> None:
 
     assert _pick(focus, []) == ("miss", None)
     assert osascript.calls == []
-    assert focus.health() == {"state": "never"}
+    assert focus.health() == {"state": "never", "source": None}
 
 
 def test_each_request_asks_for_the_tab_it_is_dictated_into() -> None:
@@ -369,7 +376,7 @@ def test_a_query_hanging_past_the_cap_is_slow_and_focuses_nothing() -> None:
         release.set()
     assert time.monotonic() - started < QUERY_CAP_SECONDS + 1
     assert logs == [{"event": "serve.focus_failed", "error": "slow", "log_level": "warning"}]
-    assert focus.health() == {"state": "slow"}
+    assert focus.health() == {"state": "slow", "source": "ghostty"}
 
 
 def test_a_directory_lookup_hanging_past_the_cap_is_slow_and_never_blocks_the_loop(
@@ -400,7 +407,7 @@ def test_a_directory_lookup_hanging_past_the_cap_is_slow_and_never_blocks_the_lo
         async with anyio.create_task_group() as group:
             group.start_soon(heartbeat)
             started = time.monotonic()
-            verdict, _ = await focus.pick([_block("mine", cwd=stuck)])
+            verdict, _, _ = await focus.pick([_block("mine", cwd=stuck)])
             picked.append((verdict, time.monotonic() - started))
             await anyio.sleep(0.05)
             group.cancel_scope.cancel()
@@ -494,7 +501,7 @@ def test_a_burst_of_requests_starts_one_query_and_the_rest_get_no_focus_at_once(
     async def burst() -> None:
         async def one() -> None:
             started = time.monotonic()
-            verdict, _ = await focus.pick([_block("s")])
+            verdict, _, _ = await focus.pick([_block("s")])
             took.append((verdict, time.monotonic() - started))
 
         async with anyio.create_task_group() as group:
@@ -527,18 +534,18 @@ def test_a_query_thread_that_cannot_start_frees_focus_for_the_next_request(
 
 
 def test_before_any_request_the_state_is_never() -> None:
-    assert Focus(Osascript(_front())).health() == {"state": "never"}
+    assert Focus(Osascript(_front())).health() == {"state": "never", "source": None}
 
 
 def test_ghostty_away_is_away() -> None:
     focus = _asked("back\n")
 
     assert _pick(focus, [_block("s")]) == ("away", None)
-    assert focus.health() == {"state": "away"}
+    assert focus.health() == {"state": "away", "source": "ghostty"}
 
 
 def test_a_front_answer_shows_front_in_health() -> None:
-    assert _asked(_front()).health() == {"state": "front"}
+    assert _asked(_front()).health() == {"state": "front", "source": "ghostty"}
 
 
 def _failure(message: str, cause: BaseException | None = None) -> ExternalServiceError:
@@ -566,7 +573,7 @@ def test_a_failed_query_logs_only_its_cause_and_is_an_error(error: Exception, ca
         assert _pick(focus, [_block("s")]) == ("error", None)
 
     assert logs == [{"event": "serve.focus_failed", "error": cause, "log_level": "warning"}]
-    assert focus.health() == {"state": "error"}
+    assert focus.health() == {"state": "error", "source": "ghostty"}
 
 
 def test_an_unparseable_answer_is_an_error_naming_no_title() -> None:
@@ -593,3 +600,299 @@ def test_failures_log_once_per_cause_and_recovery_once() -> None:
         ("serve.focus_restored", None),
     ]
     assert TITLE not in repr(logs)
+
+
+# herdr: the focused pane's session, asked of herdr's socket before Ghostty.
+
+
+def _herdr_pick(
+    herdr: Herdr | None, focus: Focus, blocks: Sequence[SessionBlock]
+) -> tuple[tuple[Verdict, SessionBlock | None, str], float]:
+    """Pick with `herdr` answering, and how long the pick took."""
+    picked: list[tuple[tuple[Verdict, SessionBlock | None, str], float]] = []
+
+    async def main() -> None:
+        async with anyio.create_task_group() as group:
+            if herdr is not None:
+                await group.start(herdr.serve)
+            started = time.monotonic()
+            result = await focus.pick(blocks)
+            picked.append((result, time.monotonic() - started))
+            group.cancel_scope.cancel()
+
+    anyio.run(main)
+    return picked[0]
+
+
+def _checks(logs: Sequence[Mapping[str, object]], count: int = 1) -> list[object]:
+    """The cross-check outcomes logged, waiting for `count` of them from their threads."""
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        found = [entry["agree"] for entry in logs if entry["event"] == "serve.focus_check"]
+        if len(found) >= count:
+            return found
+        time.sleep(0.01)
+    return [entry["agree"] for entry in logs if entry["event"] == "serve.focus_check"]
+
+
+def test_a_herdr_hit_picks_the_panes_session_without_waiting_for_ghostty(short_dir: Path) -> None:
+    release = threading.Event()
+    calls: list[float] = []
+
+    def hung(_argv: Sequence[str], _timeout: float) -> str:
+        calls.append(time.monotonic())
+        release.wait(10)
+        return _front("Mine")
+
+    mine, other = _block("mine", titles=("Mine",)), _block("other", titles=("Other",))
+    herdr = Herdr(short_dir / "h.sock", pane_reply("mine"))
+    focus = Focus(hung, herdr=herdr.path, herdr_cap=ROOMY)
+    try:
+        with capture_logs() as logs:
+            (picked, took) = _herdr_pick(herdr, focus, [other, mine])
+            release.set()
+            outcomes = _checks(logs)
+    finally:
+        release.set()
+
+    assert picked == ("hit", mine, "herdr")
+    assert took < QUERY_CAP_SECONDS
+    assert herdr.asked == [{"id": "scribe", "method": "pane.current", "params": {}}]
+    assert outcomes == ["agree"]
+    assert len(calls) == 1
+    assert focus.health() == {"state": "herdr", "source": "herdr"}
+
+
+def test_a_herdr_hit_needs_no_ghostty_in_front(short_dir: Path) -> None:
+    mine = _block("mine")
+    herdr = Herdr(short_dir / "h.sock", pane_reply("mine"))
+    focus = Focus(Osascript("back\n"), cap=ROOMY, herdr=herdr.path, herdr_cap=ROOMY)
+
+    with capture_logs() as logs:
+        assert _herdr_pick(herdr, focus, [mine])[0] == ("hit", mine, "herdr")
+        assert _checks(logs) == ["away"]
+
+
+def test_a_missing_herdr_socket_falls_back_to_ghostty(short_dir: Path) -> None:
+    mine = _block("mine")
+    focus = Focus(Osascript(_front()), cap=ROOMY, herdr=short_dir / "absent.sock")
+
+    assert _herdr_pick(None, focus, [mine])[0] == ("hit", mine, "ghostty")
+    assert focus.health() == {"state": "front", "source": "ghostty"}
+
+
+def test_a_herdr_that_never_answers_falls_back_within_its_cap(short_dir: Path) -> None:
+    mine = _block("mine", titles=("Mine",))
+    herdr = Herdr(short_dir / "h.sock", None)
+    focus = Focus(Osascript(_front("Mine")), cap=ROOMY, herdr=herdr.path)
+
+    picked, took = _herdr_pick(herdr, focus, [mine])
+
+    assert picked == ("hit", mine, "ghostty")
+    assert HERDR_CAP_SECONDS <= took < HERDR_CAP_SECONDS + 0.4
+    assert HERDR_CAP_SECONDS <= QUERY_CAP_SECONDS / 5
+
+
+def test_a_herdr_reply_past_its_size_bound_falls_back_at_once(short_dir: Path) -> None:
+    mine = _block("mine", titles=("Mine",))
+    herdr = Herdr(short_dir / "h.sock", b"x" * (2 * MAX_HERDR_REPLY_BYTES), hold=True)
+    focus = Focus(Osascript(_front("Mine")), cap=ROOMY, herdr=herdr.path, herdr_cap=ROOMY)
+
+    picked, took = _herdr_pick(herdr, focus, [mine])
+
+    assert picked == ("hit", mine, "ghostty")
+    assert took < ROOMY / 6
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        b"not json\n",
+        b"[]\n",
+        b'{"id": "scribe", "error": {"code": "x", "message": "y"}}\n',
+        pane_reply(kind_of_result="pane_list"),
+        pane_reply(focused=False),
+        pane_reply(focused="yes"),
+        pane_reply(None),
+        pane_reply(agent=None),
+        pane_reply(agent="codex"),
+        pane_reply(source="herdr:codex"),
+        pane_reply(kind="name"),
+        pane_reply("someone-else"),
+        pane_reply("mine")[:-1],
+    ],
+    ids=[
+        "malformed",
+        "not-an-object",
+        "error-reply",
+        "wrong-type",
+        "unfocused",
+        "focused-not-bool",
+        "no-agent-session",
+        "no-agent",
+        "another-agent",
+        "another-source",
+        "another-kind",
+        "unknown-session",
+        "no-newline",
+    ],
+)
+def test_any_other_herdr_answer_falls_back_to_ghostty(short_dir: Path, reply: bytes) -> None:
+    mine = _block("mine", titles=("Mine",))
+    herdr = Herdr(short_dir / "h.sock", reply)
+    focus = Focus(Osascript(_front("Mine")), cap=ROOMY, herdr=herdr.path, herdr_cap=ROOMY)
+
+    with capture_logs() as logs:
+        assert _herdr_pick(herdr, focus, [mine])[0] == ("hit", mine, "ghostty")
+
+    assert not [entry for entry in logs if entry["event"] == "serve.focus_check"]
+    assert SENTINEL not in repr(logs)
+
+
+def test_two_blocks_of_the_panes_session_fall_back_to_ghostty(short_dir: Path) -> None:
+    mine, twin = _block("mine", titles=("Mine",)), _block("mine", titles=("Twin",), cwd="/v")
+    herdr = Herdr(short_dir / "h.sock", pane_reply("mine"))
+    focus = Focus(Osascript(_front("Mine")), cap=ROOMY, herdr=herdr.path, herdr_cap=ROOMY)
+
+    assert _herdr_pick(herdr, focus, [mine, twin])[0] == ("hit", mine, "ghostty")
+
+
+def test_nothing_from_the_pane_reaches_a_log_or_health(short_dir: Path) -> None:
+    mine = _block(f"{SENTINEL}-session", titles=(f"{SENTINEL} title",), cwd=f"/{SENTINEL}-cwd")
+    herdr = Herdr(short_dir / "h.sock", pane_reply(f"{SENTINEL}-session"))
+    focus = Focus(
+        Osascript(_front(f"{SENTINEL} title", "/w")), cap=ROOMY, herdr=herdr.path, herdr_cap=ROOMY
+    )
+
+    with capture_logs() as logs:
+        assert _herdr_pick(herdr, focus, [mine])[0][0] == "hit"
+        assert _checks(logs) == ["unmatched"]
+
+    assert SENTINEL not in repr(logs)
+    assert SENTINEL not in repr(focus.health())
+
+
+@pytest.mark.parametrize(
+    ("answer", "outcome"),
+    [
+        (_front("Mine"), "agree"),
+        (_front("Other"), "disagree"),
+        (_front("Claude Code"), "unmatched"),
+        (_front("Nobody's"), "unmatched"),
+        (_front("Mine", "/elsewhere"), "unmatched"),
+        ("back\n", "away"),
+        (ExternalServiceError("exit 1: (-1743)"), "unknown"),
+        ("front\nbad\n", "unknown"),
+    ],
+)
+def test_after_a_herdr_hit_ghostty_is_asked_off_the_request_path_and_its_pick_logged(
+    short_dir: Path, answer: str | Exception, outcome: str
+) -> None:
+    mine, other = _block("mine", titles=("Mine",)), _block("other", titles=("Other",))
+    herdr = Herdr(short_dir / "h.sock", pane_reply("mine"))
+    osascript = Osascript(answer)
+    focus = Focus(osascript, cap=ROOMY, herdr=herdr.path, herdr_cap=ROOMY)
+
+    with capture_logs() as logs:
+        picked = _herdr_pick(herdr, focus, [mine, other])[0]
+        outcomes = _checks(logs)
+
+    assert picked == ("hit", mine, "herdr")
+    assert outcomes == [outcome]
+    assert [entry for entry in logs if entry["event"] == "serve.focus_check"] == [
+        {"event": "serve.focus_check", "agree": outcome, "log_level": "info"}
+    ]
+    assert len(osascript.calls) == 1
+    assert focus.health() == {"state": "herdr", "source": "herdr"}
+
+
+def test_a_ghostty_query_still_running_skips_the_check(short_dir: Path) -> None:
+    release = threading.Event()
+    calls: list[float] = []
+
+    def hung(_argv: Sequence[str], _timeout: float) -> str:
+        calls.append(time.monotonic())
+        release.wait(10)
+        return _front("Mine")
+
+    mine = _block("mine", titles=("Mine",))
+    herdr = Herdr(short_dir / "h.sock", pane_reply("mine"))
+    focus = Focus(hung, herdr=herdr.path, herdr_cap=ROOMY)
+    try:
+        with capture_logs() as logs:
+            first, _ = _herdr_pick(herdr, focus, [mine])
+            second, took = _herdr_pick(herdr, focus, [mine])
+            skipped = _checks(logs)
+            release.set()
+            outcomes = _checks(logs, 2)
+    finally:
+        release.set()
+
+    assert first == second == ("hit", mine, "herdr")
+    assert took < QUERY_CAP_SECONDS
+    assert skipped == ["unknown"]
+    assert outcomes == ["unknown", "agree"]
+    assert len(calls) == 1
+
+
+def test_a_check_thread_that_cannot_start_frees_the_permit(
+    monkeypatch: pytest.MonkeyPatch, short_dir: Path
+) -> None:
+    start = threading.Thread.start
+
+    # Only the check's thread: the fake herdr's listener starts threads of its own.
+    def no_check_thread(self: threading.Thread) -> None:
+        if self.name == "focus check":
+            raise RuntimeError
+        start(self)
+
+    mine = _block("mine", titles=("Mine",))
+    herdr = Herdr(short_dir / "h.sock", pane_reply("mine"))
+    osascript = Osascript(_front("Mine"))
+    focus = Focus(osascript, cap=ROOMY, herdr=herdr.path, herdr_cap=ROOMY)
+    with capture_logs() as logs:
+        with monkeypatch.context() as patched:
+            patched.setattr(threading.Thread, "start", no_check_thread)
+            assert _herdr_pick(herdr, focus, [mine])[0] == ("hit", mine, "herdr")
+        assert _herdr_pick(herdr, focus, [mine])[0] == ("hit", mine, "herdr")
+        outcomes = _checks(logs, 2)
+
+    assert outcomes == ["unknown", "agree"]
+    assert len(osascript.calls) == 1
+
+
+def test_health_shows_whichever_source_answered_the_last_pick(short_dir: Path) -> None:
+    mine = _block("mine", titles=("Mine",))
+    herdr = Herdr(short_dir / "h.sock", pane_reply("someone-else"))
+    focus = Focus(Osascript("back\n"), cap=ROOMY, herdr=herdr.path, herdr_cap=ROOMY)
+    seen: list[dict[str, object]] = []
+
+    with capture_logs():
+        for reply in ("someone-else", "mine", "someone-else"):
+            herdr.reply = pane_reply(reply)
+            _herdr_pick(herdr, focus, [mine])
+            seen.append(focus.health())
+
+    assert seen == [
+        {"state": "away", "source": "ghostty"},
+        {"state": "herdr", "source": "herdr"},
+        {"state": "away", "source": "ghostty"},
+    ]
+
+
+def test_focus_is_named_for_the_sources_it_asks(short_dir: Path) -> None:
+    assert Focus(Osascript(_front())).name == "ghostty"
+    assert Focus(Osascript(_front()), herdr=short_dir / "h.sock").name == "herdr+ghostty"
+
+
+def test_herdrs_socket_is_its_environment_variable_or_the_default(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("HERDR_SOCKET_PATH", raising=False)
+    assert herdr_socket() == tmp_path / ".config" / "herdr" / "herdr.sock"
+
+    monkeypatch.setenv("HERDR_SOCKET_PATH", str(tmp_path / "elsewhere.sock"))
+    assert herdr_socket() == tmp_path / "elsewhere.sock"
+    focus = ghostty_focus()
+    assert focus.name == "herdr+ghostty"

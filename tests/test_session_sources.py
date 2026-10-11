@@ -433,7 +433,7 @@ def test_a_blocks_expiry_ages_it_out_even_while_its_host_is_down() -> None:
 
     gone = SessionTerms([source], clock=lambda: NOW + timedelta(minutes=30))
     source.refresh(lambda: NOW + timedelta(minutes=30))
-    assert _vocab(gone, static) == (static, {"box-a": 0}, FocusUse("off", 0))
+    assert _vocab(gone, static) == (static, {"box-a": 0}, FocusUse("off", 0, "off"))
 
 
 def test_health_counts_live_blocks_and_terms_and_the_fetch_age() -> None:
@@ -677,7 +677,7 @@ def test_a_focus_hit_puts_that_sessions_terms_first_and_says_so() -> None:
 
     assert vocab.terms == ("static_t", "mine_a", "mine_b", "other_a")
     assert counts == {LOCAL_NAME: 3}
-    assert focus == FocusUse("hit", 2)
+    assert focus == FocusUse("hit", 2, "ghostty")
 
 
 def test_a_request_reads_the_local_file_once_so_a_newer_read_cannot_double_the_focus(
@@ -709,7 +709,7 @@ def test_a_request_reads_the_local_file_once_so_a_newer_read_cannot_double_the_f
     vocab, _, focus = _vocab(sessions, Vocab((), ()))
 
     assert vocab.terms == ("mine_a", "other_a")
-    assert focus == FocusUse("hit", 1)
+    assert focus == FocusUse("hit", 1, "ghostty")
 
 
 def test_an_untitled_tab_leaves_the_turns_as_they_were() -> None:
@@ -723,7 +723,7 @@ def test_an_untitled_tab_leaves_the_turns_as_they_were() -> None:
 
     vocab, _, focus = _vocab(sessions, Vocab((), ()))
 
-    assert focus == FocusUse("miss", 0)
+    assert focus == FocusUse("miss", 0, "ghostty")
     assert vocab.terms == ("newer_a", "mine_a")
 
 
@@ -737,7 +737,7 @@ def test_a_remote_block_holding_the_tabs_title_is_never_focused() -> None:
 
     vocab, _, focus = _vocab(sessions, Vocab((), ()))
 
-    assert focus == FocusUse("miss", 0)
+    assert focus == FocusUse("miss", 0, "ghostty")
     assert vocab.terms == ("remote_t", "local_t")
 
 
@@ -749,7 +749,7 @@ def test_without_a_recent_local_block_a_request_is_a_miss_that_never_queries() -
 
     vocab, _, focus = _vocab(sessions, Vocab((), ()))
 
-    assert focus == FocusUse("miss", 0)
+    assert focus == FocusUse("miss", 0, "ghostty")
     assert vocab.terms == ("remote_t",)
     assert runner.calls == []
 
@@ -761,18 +761,18 @@ def test_a_tab_chosen_just_before_a_dictation_leads_it_and_the_previous_tab_does
     sessions = SessionTerms(
         [_local(before, chosen)], clock=lambda: NOW, focus=Focus(osascript, cap=ROOMY)
     )
-    assert _vocab(sessions, Vocab((), ()))[2] == FocusUse("hit", 1)
+    assert _vocab(sessions, Vocab((), ()))[2] == FocusUse("hit", 1, "ghostty")
 
     vocab, _, focus = _vocab(sessions, Vocab((), ()))
 
-    assert focus == FocusUse("hit", 1)
+    assert focus == FocusUse("hit", 1, "ghostty")
     assert vocab.terms == ("chosen_t", "before_t")
 
 
 def test_focus_off_is_reported_as_off() -> None:
     sessions = SessionTerms([_local(_block("s", NOW, ["t"]))], clock=lambda: NOW)
 
-    assert _vocab(sessions, Vocab((), ()))[2] == FocusUse("off", 0)
+    assert _vocab(sessions, Vocab((), ()))[2] == FocusUse("off", 0, "off")
     assert sessions.focus_health() is None
 
 
@@ -850,7 +850,7 @@ def test_a_focused_vocab_never_holds_an_expired_unfocused_blocks_term(
 
     admissible = [t for t in dict.fromkeys(focused.terms) if t not in _BAD_TERMS]
     lead = [t for t in admissible if t not in static][: MAX_KEYTERMS - len(static)]
-    assert focus == FocusUse("hit", len(lead))
+    assert focus == FocusUse("hit", len(lead), "ghostty")
     assert vocab.terms[: len(static) + len(lead)] == (*static, *lead)
     allowed = set(static) | set(focused.terms)
     allowed |= {t for block in made if block.expires > NOW for t in block.terms}

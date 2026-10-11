@@ -245,7 +245,7 @@ def test_on_macos_focus_is_on_by_default(
     assert result.exit_code == 0, result.output
     assert len(factory) == 1
     (served,) = served_apps
-    assert _dictate_and_check_health(served)["focus"] == {"state": "never"}
+    assert _dictate_and_check_health(served)["focus"] == {"state": "never", "source": None}
     record = _kept_record(tmp_path)
     assert cast("dict[str, object]", record["flags"])["focus"] == "ghostty"
     assert record["focus"] == {"verdict": "miss", "terms": 0}

@@ -27,6 +27,7 @@ from scribe.serve import ENDPOINT, KeepRecord, create_app, dictation_client, run
 from scribe.session_sources import SessionTerms, Source, local_source, remote_source
 from scribe.vocab import TermsFile
 from scribe.voiceink import Dictionary
+from tests.herdr_fixtures import SENTINEL, Herdr, pane_reply
 from tests.voiceink_fixtures import add_words, closed_store, open_store
 from tests.xai_fixtures import xai_payload
 
@@ -283,7 +284,7 @@ async def test_the_request_log_line_counts_session_terms_and_names_none(tmp_path
 
     (line,) = [entry for entry in logs if entry["event"] == "serve.request"]
     assert line["session_terms"] == 5
-    assert (line["focus"], line["focus_terms"]) == ("off", 0)
+    assert (line["focus"], line["focus_terms"], line["focus_source"]) == ("off", 0, "off")
     assert "local_a" not in repr(logs)
     assert "A tab" not in repr(logs)
 
@@ -324,13 +325,16 @@ async def test_a_focus_hit_leads_the_keyterms_and_is_recorded_by_verdict_and_cou
     keyterms = [body for name, body in _fields(xai.seen[0]) if name == "keyterm"]
     assert keyterms == [b"herdr", b"secret_term", b"focus_two", b"other_t"]
     (line,) = [entry for entry in logs if entry["event"] == "serve.request"]
-    assert (line["focus"], line["focus_terms"]) == ("hit", 2)
+    assert (line["focus"], line["focus_terms"], line["focus_source"]) == ("hit", 2, "ghostty")
     assert line["session_terms"] == 3
     (kept,) = _kept(tmp_path)
     result = _json(kept / "result.json")
     assert result["focus"] == {"verdict": "hit", "terms": 2}
     assert result["session_terms"] == {"local file": 3}
-    assert cast("dict[str, object]", health.json())["focus"] == {"state": "front"}
+    assert cast("dict[str, object]", health.json())["focus"] == {
+        "state": "front",
+        "source": "ghostty",
+    }
     written = (kept / "result.json").read_text(encoding="utf-8")
     for secret in (*FOCUS_SECRETS, str(tmp_path / "tab-cwd")):
         assert secret not in written
@@ -364,6 +368,43 @@ async def test_a_focus_query_hanging_past_its_cap_still_answers_the_dictation(
     assert (line["focus"], line["focus_terms"]) == ("slow", 0)
     (kept,) = _kept(tmp_path)
     assert _json(kept / "result.json")["focus"] == {"verdict": "slow", "terms": 0}
+
+
+async def test_a_herdr_hit_leads_the_keyterms_and_logs_its_source_but_nothing_of_the_pane(
+    tmp_path: Path, short_dir: Path
+) -> None:
+    herdr = Herdr(short_dir / "h.sock", pane_reply("secret-session"))
+    sessions = _focused_sessions(tmp_path)
+    # Ghostty shows no session's tab, so a hit can only be herdr's.
+    answer = f"front\nother tab\n{tmp_path}\n"
+    sessions.focus = Focus(lambda _argv, _timeout: answer, cap=30, herdr=herdr.path, herdr_cap=30)
+    xai = Xai()
+    got: list[httpx.Response] = []
+    with capture_logs() as logs:
+        async with anyio.create_task_group() as group:
+            await group.start(herdr.serve)
+            async with _client(xai, tmp_path, terms="herdr\n", sessions=sessions) as client:
+                await _post(client)
+                got.append(await client.get("/health"))
+            group.cancel_scope.cancel()
+    (health,) = got
+
+    keyterms = [body for name, body in _fields(xai.seen[0]) if name == "keyterm"]
+    assert keyterms == [b"herdr", b"secret_term", b"focus_two", b"other_t"]
+    (line,) = [entry for entry in logs if entry["event"] == "serve.request"]
+    assert (line["focus"], line["focus_terms"], line["focus_source"]) == ("hit", 2, "herdr")
+    (kept,) = _kept(tmp_path)
+    result = _json(kept / "result.json")
+    assert result["focus"] == {"verdict": "hit", "terms": 2}
+    assert cast("dict[str, object]", health.json())["focus"] == {
+        "state": "herdr",
+        "source": "herdr",
+    }
+    written = (kept / "result.json").read_text(encoding="utf-8")
+    for secret in (*FOCUS_SECRETS, SENTINEL, str(tmp_path / "tab-cwd")):
+        assert secret not in written
+        assert secret not in health.text
+        assert secret not in repr(logs)
 
 
 async def test_the_poller_runs_from_startup_until_shutdown(tmp_path: Path) -> None:
