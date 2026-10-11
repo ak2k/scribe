@@ -660,7 +660,7 @@ def test_a_herdr_hit_picks_the_panes_session_without_waiting_for_ghostty(short_d
     assert herdr.asked == [{"id": "scribe", "method": "pane.current", "params": {}}]
     assert outcomes == ["agree"]
     assert len(calls) == 1
-    assert focus.health() == {"state": "never", "source": "herdr"}
+    assert focus.health() == {"state": "herdr", "source": "herdr"}
 
 
 def test_a_herdr_hit_needs_no_ghostty_in_front(short_dir: Path) -> None:
@@ -803,7 +803,7 @@ def test_after_a_herdr_hit_ghostty_is_asked_off_the_request_path_and_its_pick_lo
         {"event": "serve.focus_check", "agree": outcome, "log_level": "info"}
     ]
     assert len(osascript.calls) == 1
-    assert focus.health() == {"state": "never", "source": "herdr"}
+    assert focus.health() == {"state": "herdr", "source": "herdr"}
 
 
 def test_a_ghostty_query_still_running_skips_the_check(short_dir: Path) -> None:
@@ -859,6 +859,25 @@ def test_a_check_thread_that_cannot_start_frees_the_permit(
 
     assert outcomes == ["unknown", "agree"]
     assert len(osascript.calls) == 1
+
+
+def test_health_shows_whichever_source_answered_the_last_pick(short_dir: Path) -> None:
+    mine = _block("mine", titles=("Mine",))
+    herdr = Herdr(short_dir / "h.sock", pane_reply("someone-else"))
+    focus = Focus(Osascript("back\n"), cap=ROOMY, herdr=herdr.path, herdr_cap=ROOMY)
+    seen: list[dict[str, object]] = []
+
+    with capture_logs():
+        for reply in ("someone-else", "mine", "someone-else"):
+            herdr.reply = pane_reply(reply)
+            _herdr_pick(herdr, focus, [mine])
+            seen.append(focus.health())
+
+    assert seen == [
+        {"state": "away", "source": "ghostty"},
+        {"state": "herdr", "source": "herdr"},
+        {"state": "away", "source": "ghostty"},
+    ]
 
 
 def test_focus_is_named_for_the_sources_it_asks(short_dir: Path) -> None:

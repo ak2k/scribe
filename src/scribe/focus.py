@@ -237,7 +237,7 @@ class Focus:
         self.name = "ghostty" if herdr is None else "herdr+ghostty"
         self._runner = runner
         self._herdr = herdr
-        self._state: Literal["never", "front", "away", "error", "slow"] = "never"
+        self._state: Literal["never", "herdr", "front", "away", "error", "slow"] = "never"
         self._source: FocusSource | None = None
         self._failure: str | None = None
         # A query past the cap is abandoned, not stopped, and a stalled mount can hold its
@@ -346,7 +346,7 @@ class Focus:
         if self._herdr is not None:
             block = await self._ask_herdr(self._herdr, recent)
             if block is not None:
-                self._source = "herdr"
+                self._state = self._source = "herdr"
                 self._check(block, recent)
                 return "hit", block, "herdr"
         self._source = "ghostty"
@@ -367,7 +367,7 @@ class Focus:
         return *answer, "ghostty"
 
     def health(self) -> dict[str, object]:
-        """The last Ghostty query's outcome and the source of the last pick; nothing from either."""
+        """The last pick's outcome ("herdr" when herdr named it) and source; nothing from either."""
         return {"state": self._state, "source": self._source}
 
 

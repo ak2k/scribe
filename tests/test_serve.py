@@ -397,7 +397,7 @@ async def test_a_herdr_hit_leads_the_keyterms_and_logs_its_source_but_nothing_of
     result = _json(kept / "result.json")
     assert result["focus"] == {"verdict": "hit", "terms": 2}
     assert cast("dict[str, object]", health.json())["focus"] == {
-        "state": "never",
+        "state": "herdr",
         "source": "herdr",
     }
     written = (kept / "result.json").read_text(encoding="utf-8")
