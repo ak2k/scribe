@@ -67,7 +67,7 @@ HERDR_REQUEST = b'{"id":"scribe","method":"pane.current","params":{}}\n'
 MAX_HERDR_REPLY_BYTES = 1 << 16
 
 Verdict = Literal["off", "slow", "error", "away", "miss", "ambiguous", "elsewhere", "hit"]
-Source = Literal["herdr", "ghostty", "off"]
+FocusSource = Literal["herdr", "ghostty", "off"]
 Check = Literal["agree", "disagree", "unmatched", "away", "unknown"]
 type _Match = tuple[Verdict, SessionBlock | None]
 
@@ -238,7 +238,7 @@ class Focus:
         self._runner = runner
         self._herdr = herdr
         self._state: Literal["never", "front", "away", "error", "slow"] = "never"
-        self._source: Source | None = None
+        self._source: FocusSource | None = None
         self._failure: str | None = None
         # A query past the cap is abandoned, not stopped, and a stalled mount can hold its
         # thread for good; one permit keeps that to one thread, however many requests come.
@@ -330,7 +330,7 @@ class Focus:
 
     async def pick(
         self, recent: Sequence[SessionBlock]
-    ) -> tuple[Verdict, SessionBlock | None, Source]:
+    ) -> tuple[Verdict, SessionBlock | None, FocusSource]:
         """The focused block among `recent`, the local blocks ranked within 24 h, and who named it.
 
         herdr, then Ghostty, is asked now, so a pane or tab chosen just before the
@@ -370,7 +370,7 @@ class Focus:
 
 
 def herdr_socket() -> Path:
-    """herdr's socket: `$HERDR_SOCKET_PATH` when set, else herdr's default."""
+    """The herdr socket: `$HERDR_SOCKET_PATH` when set, else herdr's default."""
     configured = os.environ.get("HERDR_SOCKET_PATH")
     return Path(configured) if configured else Path.home() / ".config" / "herdr" / "herdr.sock"
 

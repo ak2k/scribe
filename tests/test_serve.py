@@ -379,13 +379,15 @@ async def test_a_herdr_hit_leads_the_keyterms_and_logs_its_source_but_nothing_of
     answer = f"front\nother tab\n{tmp_path}\n"
     sessions.focus = Focus(lambda _argv, _timeout: answer, cap=30, herdr=herdr.path)
     xai = Xai()
+    got: list[httpx.Response] = []
     with capture_logs() as logs:
         async with anyio.create_task_group() as group:
             await group.start(herdr.serve)
             async with _client(xai, tmp_path, terms="herdr\n", sessions=sessions) as client:
                 await _post(client)
-                health = await client.get("/health")
+                got.append(await client.get("/health"))
             group.cancel_scope.cancel()
+    (health,) = got
 
     keyterms = [body for name, body in _fields(xai.seen[0]) if name == "keyterm"]
     assert keyterms == [b"herdr", b"secret_term", b"focus_two", b"other_t"]

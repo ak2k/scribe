@@ -36,7 +36,7 @@ from scribe.session_terms import SessionBlock
 from tests.herdr_fixtures import SENTINEL, Herdr, pane_reply
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
     from pathlib import Path
 
 NOW = datetime(2026, 10, 5, 12, 0, tzinfo=UTC)
@@ -603,6 +603,7 @@ def test_failures_log_once_per_cause_and_recovery_once() -> None:
 
 # herdr: the focused pane's session, asked of herdr's socket before Ghostty.
 
+
 def _herdr_pick(
     herdr: Herdr | None, focus: Focus, blocks: Sequence[SessionBlock]
 ) -> tuple[tuple[Verdict, SessionBlock | None, str], float]:
@@ -622,7 +623,7 @@ def _herdr_pick(
     return picked[0]
 
 
-def _checks(logs: list[dict[str, object]], count: int = 1) -> list[object]:
+def _checks(logs: Sequence[Mapping[str, object]], count: int = 1) -> list[object]:
     """The cross-check outcomes logged, waiting for `count` of them from their threads."""
     deadline = time.monotonic() + 5
     while time.monotonic() < deadline:

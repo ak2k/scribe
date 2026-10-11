@@ -125,6 +125,6 @@ def no_real_herdr(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
 @pytest.fixture
 def short_dir() -> Iterator[Path]:
     """A directory for a unix socket: macOS caps its path at 104 bytes, which tmp_path can pass."""
-    made = Path(tempfile.mkdtemp(dir="/tmp", prefix="hd"))  # noqa: S108  # tmp_path is too long for a socket path
+    made = Path(tempfile.mkdtemp(dir="/tmp", prefix="hd"))
     yield made
     shutil.rmtree(made)

@@ -3,15 +3,14 @@
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import anyio
+import anyio.abc
 from anyio.streams.buffered import BufferedByteReceiveStream
 
 if TYPE_CHECKING:
     from pathlib import Path
-
-    import anyio.abc
 
 SENTINEL = "zq-sentinel-7f3a"
 
@@ -25,7 +24,7 @@ def pane_reply(
     kind: str = "id",
     kind_of_result: str = "pane_current",
 ) -> bytes:
-    """herdr's answer for a pane running `agent` in `session`, every other field holding SENTINEL."""
+    """The herdr answer for a pane running `agent` in `session`; other fields hold SENTINEL."""
     pane: dict[str, object] = {
         "pane_id": f"{SENTINEL}-pane",
         "focused": focused,
@@ -61,7 +60,9 @@ class Herdr:
     async def _answer(self, stream: anyio.abc.SocketStream) -> None:
         async with stream:
             line = await BufferedByteReceiveStream(stream).receive_until(b"\n", 1 << 16)
-            self.asked.append(json.loads(line))
-            if self.reply is None:
+            self.asked.append(cast("object", json.loads(line)))
+            reply = self.reply
+            if reply is None:
                 await anyio.sleep_forever()
-            await stream.send(self.reply)
+                return
+            await stream.send(reply)
