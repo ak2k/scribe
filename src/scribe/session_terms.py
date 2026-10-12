@@ -172,6 +172,8 @@ class _Transcript:
     branch: str | None = None
     entrypoint: str | None = None
     drifted: int = 0
+    # The operator's newest prompt in the tail.
+    prompt: str | None = None
     # Oldest first, as the transcript holds them.
     custom_titles: list[str] = field(default_factory=list[str])
     ai_titles: list[str] = field(default_factory=list[str])
@@ -441,6 +443,8 @@ def _read_transcript(lines: list[str]) -> _Transcript:
         if when is not None and when.tzinfo is None:
             when = when.replace(tzinfo=UTC)
         found.texts.extend((when, text) for text in texts)
+        if record.type == "user" and texts:
+            found.prompt = texts[-1]
         if record.type == "custom-title" and record.custom_title:
             found.custom_titles.append(record.custom_title)
         elif record.type == "ai-title" and record.ai_title:
@@ -505,8 +509,12 @@ def _session_record(
     extracted = [extract_terms(text) for _, text in texts]
     named = [repo_name(Path(hook.cwd)), *([found.branch] if found.branch else [])]
     named = [term for term in named if _admissible(term) and _identifier_shaped(term)]
+    read = [text for _, text in texts]
+    # The hook runs async, so the tail may already hold the prompt it was given.
+    if hook.prompt is not None and hook.prompt == found.prompt:
+        read[-1] = ""
     try:
-        names = _names([text for _, text in texts], {*named, *chain.from_iterable(extracted)})
+        names = _names(read, {*named, *chain.from_iterable(extracted)})
     except Exception as exc:  # noqa: BLE001 - names are extra; their failure must not cost the terms
         log_failure(terms_dir, now, f"names: {type(exc).__name__}: {exc}")
         names = [list[str]() for _ in texts]

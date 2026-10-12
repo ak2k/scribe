@@ -1224,6 +1224,23 @@ def test_the_word_list_is_not_read_without_a_candidate(
     assert not (tmp_path / "terms" / "hook.log").exists()
 
 
+_ASKED = "please ask Quellin now"
+
+
+def test_a_prompt_already_in_the_tail_counts_its_names_once(tmp_path: Path) -> None:
+    counts = _counts(tmp_path, _NAMED, _ASKED, prompt=_ASKED)
+
+    assert "Zorvath" in counts
+    assert "Quellin" not in counts
+
+
+def test_a_prompt_not_yet_in_the_tail_counts_its_names_once(tmp_path: Path) -> None:
+    counts = _counts(tmp_path, _NAMED, prompt=_ASKED)
+
+    assert "Zorvath" in counts
+    assert "Quellin" not in counts
+
+
 def test_an_admitted_name_counts_every_sighting_across_texts_and_the_prompt(
     tmp_path: Path,
 ) -> None:
