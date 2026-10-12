@@ -369,7 +369,7 @@ def _names(texts: list[str], terms: set[str]) -> list[list[str]]:
         for word, count in uses.items()
         if count >= NAME_USES and word not in terms and _admissible(word)
     }
-    # Loaded only when needed: most events see no candidate.
+    # Loaded only once a word passes the shape and count tests.
     if names:
         names = {word for word in names if word.lower() not in _common_words()}
     return [[word for word, _ in words if word in names] for words in found]
