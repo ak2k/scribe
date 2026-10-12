@@ -1062,8 +1062,9 @@ def test_health_shows_whichever_source_answered_the_last_pick(short_dir: Path) -
         ):
             herdr.reply = reply
             _herdr_pick(herdr, focus, [mine])
-            # The check holds the permit a malformed reply's Ghostty query needs.
-            _check_lines(logs, min(count, 2))
+            # The check holds the permit a malformed reply's Ghostty query needs, and
+            # every pick but that one starts a check, whose line must land in `logs`.
+            _check_lines(logs, (1, 2, 2, 3)[count - 1])
             seen.append(focus.health())
 
     assert seen == [
@@ -1071,6 +1072,11 @@ def test_health_shows_whichever_source_answered_the_last_pick(short_dir: Path) -
         {"state": "herdr", "source": "herdr"},
         {"state": "away", "source": "ghostty"},
         {"state": "miss", "source": "herdr"},
+    ]
+    assert [(entry["agree"], entry["after"]) for entry in logs] == [
+        ("away", "miss"),
+        ("away", "hit"),
+        ("away", "miss"),
     ]
 
 

@@ -259,7 +259,7 @@ class Picked:
 
 
 class Focus:
-    """The focused session, asked of herdr and then Ghostty by each request."""
+    """The focused session, asked of herdr, and of Ghostty when herdr gives no answer."""
 
     def __init__(
         self,
@@ -401,7 +401,8 @@ class Focus:
     async def pick(self, recent: Sequence[SessionBlock]) -> Picked:
         """The focused block among `recent`, the local blocks ranked within 24 h, and who named it.
 
-        herdr, then Ghostty, is asked now, so a pane or tab chosen just before the
+        herdr is asked now, and Ghostty when herdr gives no answer (a timeout, no
+        connection or a malformed reply), so a pane or tab chosen just before the
         dictation counts and no earlier one's session can be put first.
         """
         if not recent:
@@ -420,11 +421,11 @@ class Focus:
                 self._check(block, recent)
                 return Picked("hit", block, "herdr", reason, herdr_ms)
             # DIVERGE: once herdr has answered, its miss stands and Ghostty is not asked
-            # on the request path: herdr runs inside Ghostty, whose front tab is then
-            # herdr's and matches no session, so the query could only add its wait. The
-            # loss is a Claude tab in a Ghostty window outside herdr while herdr's focused
-            # pane is not a pickable Claude pane; the check's "disagree" after a miss
-            # counts it.
+            # on the request path. While herdr's client is in front, Ghostty's front tab
+            # is herdr's and matches no session, so the query could only add its wait.
+            # herdr answers from its own layout whether or not its client is in front, so
+            # a Claude tab in front outside herdr goes unpicked; each
+            # `serve.focus_check` with after="miss" and agree="disagree" is one such loss.
             if reason in ANSWERED_MISSES:
                 self._state, self._source = "miss", "herdr"
                 self._check(None, recent)
