@@ -427,7 +427,9 @@ def test_a_directory_lookup_hanging_past_the_cap_is_slow_and_never_blocks_the_lo
 def test_requests_timing_out_on_a_stalled_lookup_hold_one_worker_between_them(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    stuck = "/stuck-mount/proj"
+    # A directory no other test stalls on: a thread an earlier one abandoned can still be
+    # resolving its own when the lookup below is swapped in.
+    stuck = "/held-mount/proj"
     real = os.path.realpath
     release = threading.Event()
     stalled_calls: list[str] = []
