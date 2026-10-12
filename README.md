@@ -331,4 +331,5 @@ libraries / CLIs / scrapers / data pipelines / one-off scripts.
 
 ## License
 
-MIT.
+MIT. The word list src/scribe/data/common_en.txt.gz is derived from wordfreq's data
+and is licensed CC BY-SA 4.0; see src/scribe/data/NOTICE.
