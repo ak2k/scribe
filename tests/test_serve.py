@@ -32,7 +32,7 @@ from tests.voiceink_fixtures import add_words, closed_store, open_store
 from tests.xai_fixtures import xai_payload
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable, Iterator, Sequence
+    from collections.abc import AsyncIterator, Callable, Iterator, Mapping, Sequence
     from pathlib import Path
 
     from starlette.types import ASGIApp, Message
@@ -285,6 +285,7 @@ async def test_the_request_log_line_counts_session_terms_and_names_none(tmp_path
     (line,) = [entry for entry in logs if entry["event"] == "serve.request"]
     assert line["session_terms"] == 5
     assert (line["focus"], line["focus_terms"], line["focus_source"]) == ("off", 0, "off")
+    assert (line["herdr"], line["herdr_ms"]) == ("off", None)
     assert "local_a" not in repr(logs)
     assert "A tab" not in repr(logs)
 
@@ -326,6 +327,7 @@ async def test_a_focus_hit_leads_the_keyterms_and_is_recorded_by_verdict_and_cou
     assert keyterms == [b"herdr", b"secret_term", b"focus_two", b"other_t"]
     (line,) = [entry for entry in logs if entry["event"] == "serve.request"]
     assert (line["focus"], line["focus_terms"], line["focus_source"]) == ("hit", 2, "ghostty")
+    assert (line["herdr"], line["herdr_ms"]) == ("off", None)
     assert line["session_terms"] == 3
     (kept,) = _kept(tmp_path)
     result = _json(kept / "result.json")
@@ -393,11 +395,179 @@ async def test_a_herdr_hit_leads_the_keyterms_and_logs_its_source_but_nothing_of
     assert keyterms == [b"herdr", b"secret_term", b"focus_two", b"other_t"]
     (line,) = [entry for entry in logs if entry["event"] == "serve.request"]
     assert (line["focus"], line["focus_terms"], line["focus_source"]) == ("hit", 2, "herdr")
+    assert line["herdr"] == "hit"
+    assert isinstance(line["herdr_ms"], float)
     (kept,) = _kept(tmp_path)
     result = _json(kept / "result.json")
     assert result["focus"] == {"verdict": "hit", "terms": 2}
     assert cast("dict[str, object]", health.json())["focus"] == {
         "state": "herdr",
+        "source": "herdr",
+    }
+    written = (kept / "result.json").read_text(encoding="utf-8")
+    for secret in (*FOCUS_SECRETS, SENTINEL, str(tmp_path / "tab-cwd")):
+        assert secret not in written
+        assert secret not in health.text
+        assert secret not in repr(logs)
+
+
+async def _checked(logs: Sequence[Mapping[str, object]]) -> list[Mapping[str, object]]:
+    """The cross-check lines logged, waiting for the one its thread writes."""
+
+    def lines() -> list[Mapping[str, object]]:
+        return [entry for entry in logs if entry["event"] == "serve.focus_check"]
+
+    with anyio.move_on_after(5):
+        while not lines():  # noqa: ASYNC110  # a thread writes the line and sets no event
+            await anyio.sleep(0.01)
+    return lines()
+
+
+def _twin_sessions(tmp_path: Path) -> SessionTerms:
+    """The focused sessions, with two more blocks that share one session id."""
+    sessions = _focused_sessions(tmp_path)
+    local = tmp_path / "current.txt"
+    twins = _session_file(
+        ("twin-session", NOW - timedelta(minutes=3), ["twin_a"]),
+        ("twin-session", NOW - timedelta(minutes=4), ["twin_b"]),
+    )
+    local.write_text(local.read_text(encoding="utf-8") + twins, encoding="utf-8")
+    sessions.sources[0].refresh(lambda: NOW)
+    return sessions
+
+
+@pytest.mark.parametrize(
+    ("reply", "served", "reason", "focus"),
+    [
+        (pane_reply("secret-session"), True, "hit", ("hit", 2, "herdr")),
+        (None, True, "timeout", ("away", 0, "ghostty")),
+        (None, False, "unreachable", ("away", 0, "ghostty")),
+        (b"not json\n", True, "malformed", ("away", 0, "ghostty")),
+        (pane_reply("secret-session", focused=False), True, "unfocused", ("miss", 0, "herdr")),
+        (pane_reply("secret-session", agent="codex"), True, "no-agent", ("miss", 0, "herdr")),
+        (pane_reply("someone-else"), True, "no-block", ("miss", 0, "herdr")),
+        (pane_reply("twin-session"), True, "several", ("miss", 0, "herdr")),
+    ],
+    ids=[
+        "hit",
+        "timeout",
+        "unreachable",
+        "malformed",
+        "unfocused",
+        "no-agent",
+        "no-block",
+        "several",
+    ],
+)
+async def test_the_request_log_line_says_what_became_of_the_herdr_ask_and_how_long_it_took(
+    tmp_path: Path,
+    short_dir: Path,
+    reply: bytes | None,
+    served: bool,
+    reason: str,
+    focus: tuple[str, int, str],
+) -> None:
+    herdr = Herdr(short_dir / "h.sock", reply)
+    sessions = _twin_sessions(tmp_path)
+    # Only a herdr that never answers waits out its cap, so that one's is short.
+    sessions.focus = Focus(
+        lambda _argv, _timeout: "back\n",
+        cap=30,
+        herdr=herdr.path,
+        herdr_cap=30 if reply is not None else 0.05,
+    )
+    xai = Xai()
+    got: list[httpx.Response] = []
+    with capture_logs() as logs:
+        async with anyio.create_task_group() as group:
+            if served:
+                await group.start(herdr.serve)
+            async with _client(xai, tmp_path, terms="herdr\n", sessions=sessions) as client:
+                got.append(await _post(client))
+            if focus[2] == "herdr":
+                await _checked(logs)
+            group.cancel_scope.cancel()
+
+    assert [response.status_code for response in got] == [200]
+    (line,) = [entry for entry in logs if entry["event"] == "serve.request"]
+    assert line["herdr"] == reason
+    herdr_ms = cast("object", line["herdr_ms"])
+    assert isinstance(herdr_ms, float)
+    assert 0 <= herdr_ms == round(herdr_ms, 1)
+    assert (line["focus"], line["focus_terms"], line["focus_source"]) == focus
+    keyterms = [body for name, body in _fields(xai.seen[0]) if name == "keyterm"]
+    # The focused session's block has expired, so only a hit brings its terms in.
+    by_recency = [b"herdr", b"other_t", b"twin_a", b"twin_b"]
+    led = [b"herdr", b"secret_term", b"focus_two", b"other_t", b"twin_a", b"twin_b"]
+    assert keyterms == (led if reason == "hit" else by_recency)
+    assert SENTINEL not in repr(logs)
+
+
+async def test_herdr_is_off_on_the_log_line_when_no_local_block_is_recent(
+    tmp_path: Path, short_dir: Path
+) -> None:
+    remote = remote_source("box-a", runner=Ssh(_session_file(("a-s", NOW, ["kbx25"]))))
+    remote.refresh(lambda: NOW)
+    # An absent socket: asked, it would be "unreachable".
+    focus = Focus(lambda _argv, _timeout: "back\n", cap=30, herdr=short_dir / "absent.sock")
+    sessions = SessionTerms([remote], clock=lambda: NOW, focus=focus)
+    with capture_logs() as logs:
+        async with _client(Xai(), tmp_path, sessions=sessions) as client:
+            await _post(client)
+
+    (line,) = [entry for entry in logs if entry["event"] == "serve.request"]
+    assert (line["focus"], line["focus_source"]) == ("miss", "ghostty")
+    assert (line["herdr"], line["herdr_ms"]) == ("off", None)
+
+
+async def test_an_answered_herdr_miss_never_waits_for_ghostty_and_keeps_nothing_of_the_pane(
+    tmp_path: Path, short_dir: Path
+) -> None:
+    release = threading.Event()
+    threads: list[str] = []
+
+    def slow(_argv: Sequence[str], _timeout: float) -> str:
+        threads.append(threading.current_thread().name)
+        release.wait(3)
+        return f"front\n✳ Secret tab title\n{tmp_path / 'tab-cwd'}\n"
+
+    herdr = Herdr(short_dir / "h.sock", pane_reply(f"{SENTINEL}-session"))
+    sessions = _focused_sessions(tmp_path)
+    sessions.focus = Focus(slow, cap=30, herdr=herdr.path, herdr_cap=30)
+    xai = Xai()
+    got: list[httpx.Response] = []
+    took: list[float] = []
+    checks: list[Mapping[str, object]] = []
+    try:
+        with capture_logs() as logs:
+            async with anyio.create_task_group() as group:
+                await group.start(herdr.serve)
+                async with _client(xai, tmp_path, terms="herdr\n", sessions=sessions) as client:
+                    started = time.monotonic()
+                    await _post(client)
+                    took.append(time.monotonic() - started)
+                    got.append(await client.get("/health"))
+                release.set()
+                checks += await _checked(logs)
+                group.cancel_scope.cancel()
+    finally:
+        release.set()
+    (health,) = got
+
+    assert took[0] < 1
+    assert threads == ["focus check"]
+    keyterms = [body for name, body in _fields(xai.seen[0]) if name == "keyterm"]
+    assert keyterms == [b"herdr", b"other_t"]
+    (line,) = [entry for entry in logs if entry["event"] == "serve.request"]
+    assert (line["focus"], line["focus_terms"], line["focus_source"]) == ("miss", 0, "herdr")
+    assert line["herdr"] == "no-block"
+    # Ghostty's own pick, made off the request path, is the one the miss lost.
+    assert [(entry["agree"], entry["after"]) for entry in checks] == [("disagree", "miss")]
+    (kept,) = _kept(tmp_path)
+    result = _json(kept / "result.json")
+    assert result["focus"] == {"verdict": "miss", "terms": 0}
+    assert cast("dict[str, object]", health.json())["focus"] == {
+        "state": "miss",
         "source": "herdr",
     }
     written = (kept / "result.json").read_text(encoding="utf-8")

@@ -34,6 +34,7 @@ from scribe.session_sources import (
 from scribe.session_terms import SessionBlock, format_block
 from scribe.vocab import Alias, Vocab, deliver
 from scribe.xai_stt import MAX_KEYTERMS
+from tests.herdr_fixtures import Herdr, pane_reply
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -752,6 +753,46 @@ def test_without_a_recent_local_block_a_request_is_a_miss_that_never_queries() -
     assert focus == FocusUse("miss", 0, "ghostty")
     assert vocab.terms == ("remote_t",)
     assert runner.calls == []
+
+
+def test_a_herdr_miss_leaves_the_turns_as_they_were_and_says_why(short_dir: Path) -> None:
+    mine = _titled("mine", NOW - timedelta(minutes=10), ["mine_a"], "My tab")
+    newer = _titled("newer", NOW - timedelta(minutes=1), ["newer_a"], "Other tab")
+    herdr = Herdr(short_dir / "h.sock", pane_reply("someone-else"))
+    osascript = Runner("front\nMy tab\n/w\n")
+    focus = Focus(osascript, cap=ROOMY, herdr=herdr.path, herdr_cap=ROOMY)
+    sessions = SessionTerms([_local(newer, mine)], clock=lambda: NOW, focus=focus)
+    got: list[tuple[Vocab, dict[str, int], FocusUse]] = []
+
+    async def main() -> None:
+        async with anyio.create_task_group() as group:
+            await group.start(herdr.serve)
+            got.append(await sessions.vocab(Vocab((), ())))
+            group.cancel_scope.cancel()
+
+    with capture_logs() as logs:
+        anyio.run(main)
+        deadline = time.monotonic() + 5
+        while not logs and time.monotonic() < deadline:
+            time.sleep(0.01)
+    ((vocab, counts, use),) = got
+
+    assert use == FocusUse("miss", 0, "herdr", "no-block")
+    assert isinstance(use.herdr_ms, float)
+    assert vocab.terms == ("newer_a", "mine_a")
+    assert counts == {LOCAL_NAME: 2}
+    # Ghostty would have picked the older session; it is asked only by the check.
+    assert [(entry["event"], entry["agree"], entry["after"]) for entry in logs] == [
+        ("serve.focus_check", "disagree", "miss")
+    ]
+
+
+def test_the_time_of_a_herdr_ask_never_makes_two_uses_differ() -> None:
+    assert FocusUse("miss", 0, "herdr", "no-block", 0.3) == FocusUse(
+        "miss", 0, "herdr", "no-block", 104.2
+    )
+    assert FocusUse("off", 0, "off") == FocusUse("off", 0, "off", "off", None)
+    assert FocusUse("miss", 0, "herdr", "no-block") != FocusUse("miss", 0, "herdr", "several")
 
 
 def test_a_tab_chosen_just_before_a_dictation_leads_it_and_the_previous_tab_does_not() -> None:
