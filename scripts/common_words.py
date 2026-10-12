@@ -12,6 +12,7 @@ The output is byte-reproducible: sorted, and gzipped with a fixed mtime.
 from __future__ import annotations
 
 import gzip
+import io
 from pathlib import Path
 
 from wordfreq import iter_wordlist, zipf_frequency
@@ -30,7 +31,11 @@ def main() -> None:
             words.add(word)
     text = "".join(f"{word}\n" for word in sorted(words))
     OUT.parent.mkdir(parents=True, exist_ok=True)
-    OUT.write_bytes(gzip.compress(text.encode(), compresslevel=9, mtime=0))
+    # GzipFile writes the header itself; gzip.compress leaves its OS byte to zlib on 3.12.
+    buffer = io.BytesIO()
+    with gzip.GzipFile(fileobj=buffer, mode="wb", compresslevel=9, mtime=0) as handle:
+        handle.write(text.encode())
+    OUT.write_bytes(buffer.getvalue())
     print(len(words))
 
 

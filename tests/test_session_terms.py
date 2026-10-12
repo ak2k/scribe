@@ -1252,6 +1252,15 @@ def test_the_bundled_word_list_holds_common_words_not_names() -> None:
     assert not {"zorvath", "quellin"} & set(words)
 
 
+def test_the_bundled_word_list_has_a_header_any_interpreter_reproduces() -> None:
+    data = resources.files("scribe").joinpath("data/common_en.txt.gz").read_bytes()
+
+    # Bytes 4-7 are the mtime and byte 9 the OS, which zlib would set per platform.
+    assert data[4:8] == bytes(4)
+    assert data[9] == 0xFF
+    assert len(gzip.decompress(data).split()) == 26_327
+
+
 def test_a_name_reaches_the_keyterms_a_focused_dictation_sends(tmp_path: Path) -> None:
     _counts(tmp_path, _NAMED, "see kept_term")
 
