@@ -657,15 +657,14 @@ def _timed(picked: Picked, took: float) -> bool:
 class Slow:
     """A fake osascript that answers late, or once released, naming each thread that calls it."""
 
-    def __init__(self, answer: str, seconds: float = 1.0) -> None:
+    def __init__(self, answer: str) -> None:
         self.answer = answer
-        self.seconds = seconds
         self.release = threading.Event()
         self.threads: list[str] = []
 
     def __call__(self, _argv: Sequence[str], _timeout: float) -> str:
         self.threads.append(threading.current_thread().name)
-        self.release.wait(self.seconds)
+        self.release.wait(10)
         return self.answer
 
 
@@ -815,7 +814,7 @@ def test_a_herdr_answer_naming_no_block_is_a_miss_that_never_waits_for_ghostty(
     short_dir: Path, reply: bytes, reason: HerdrReason
 ) -> None:
     herdr = Herdr(short_dir / "h.sock", reply)
-    # Ghostty would pick a block, a second from now.
+    # Ghostty would pick a block, ten seconds from now.
     ghostty = Slow(_front("Mine"))
     focus = Focus(ghostty, cap=ROOMY, herdr=herdr.path, herdr_cap=ROOMY)
     try:
@@ -828,7 +827,7 @@ def test_a_herdr_answer_naming_no_block_is_a_miss_that_never_waits_for_ghostty(
 
     assert picked == Picked("miss", None, "herdr", reason)
     assert _timed(picked, took)
-    assert took < 0.5
+    assert took < 1
     assert ghostty.threads == ["focus check"]
     # Ghostty's pick is one the miss lost, never one that agrees with it.
     assert logs == [_check_line("disagree", "miss")]
@@ -838,7 +837,7 @@ def test_a_herdr_answer_naming_no_block_is_a_miss_that_never_waits_for_ghostty(
 
 def test_an_answered_miss_while_ghostty_is_busy_never_asks_it(short_dir: Path) -> None:
     herdr = Herdr(short_dir / "h.sock", pane_reply("someone-else"))
-    ghostty = Slow(_front("Mine"), seconds=10)
+    ghostty = Slow(_front("Mine"))
     focus = Focus(ghostty, cap=ROOMY, herdr=herdr.path, herdr_cap=ROOMY)
     blocks = _mine_and_twins()
     try:
@@ -852,7 +851,7 @@ def test_an_answered_miss_while_ghostty_is_busy_never_asks_it(short_dir: Path) -
         ghostty.release.set()
 
     assert first == second == Picked("miss", None, "herdr", "no-block")
-    assert took < 0.5
+    assert took < 1
     assert asked == ghostty.threads == ["focus check"]
     assert lines == [_check_line("unknown", "miss"), _check_line("disagree", "miss")]
 

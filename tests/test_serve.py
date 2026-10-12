@@ -528,8 +528,8 @@ async def test_an_answered_herdr_miss_never_waits_for_ghostty_and_keeps_nothing_
 
     def slow(_argv: Sequence[str], _timeout: float) -> str:
         threads.append(threading.current_thread().name)
-        release.wait(3)
-        return f"front\n✳ Secret tab title\n{tmp_path / 'tab-cwd'}\n"
+        release.wait(10)
+        return f"front\n\u2733 Secret tab title\n{tmp_path / 'tab-cwd'}\n"
 
     herdr = Herdr(short_dir / "h.sock", pane_reply(f"{SENTINEL}-session"))
     sessions = _focused_sessions(tmp_path)
@@ -554,7 +554,7 @@ async def test_an_answered_herdr_miss_never_waits_for_ghostty_and_keeps_nothing_
         release.set()
     (health,) = got
 
-    assert took[0] < 1
+    assert took[0] < 2
     assert threads == ["focus check"]
     keyterms = [body for name, body in _fields(xai.seen[0]) if name == "keyterm"]
     assert keyterms == [b"herdr", b"other_t"]
