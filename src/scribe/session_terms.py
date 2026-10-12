@@ -9,6 +9,7 @@ Every submitted prompt is also logged, as truth for a later bake-off.
 from __future__ import annotations
 
 import fcntl
+import gzip
 import json
 import os
 import re
@@ -18,6 +19,9 @@ from collections import Counter
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
+from functools import cache
+from importlib import resources
+from itertools import chain
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -33,6 +37,9 @@ if TYPE_CHECKING:
 TAIL_BYTES = 256 * 1024
 MERGED_CAP = 60
 MIN_TERM_CHARS = 3
+MIN_NAME_CHARS = 4
+# Mid-sentence uses an event's texts must hold before a plain word counts as a name.
+NAME_USES = 2
 # A terminal tab can lag a re-title, so a few earlier titles still identify the session.
 MAX_TITLES = 5
 WINDOW = timedelta(minutes=30)
@@ -71,6 +78,16 @@ _BLOCK_HEADER = re.compile(
     r"# session (?P<id>\S+) ranked (?P<ranked>\S+) expires (?P<expires>\S+) (?P<about>\{.*\})"
 )
 _SESSION_ID = r"^[A-Za-z0-9_-]{1,128}$"
+# A whole token, as `_SPLIT` cuts them, that may trim to a capitalized word.
+_CAPITALIZED = re.compile(
+    r"(?<![^\s\u2013\u2014])[\"'`(\[{<*\u201c\u2018]*[A-Z][a-z]{3}[^\s\u2013\u2014]*"
+)
+_SEPARATORS = "\u2013\u2014"
+_LINE_BREAKS = "\n\r\u2028\u2029"
+# A bullet, heading, quote or table marker, or a list label, which no sentence continues past.
+_MARKER = re.compile(r"[^A-Za-z0-9]+|\d{1,3}[.)]|[A-Za-z][.)]")
+# Sentence-ending punctuation, then any closing quotes or brackets.
+_ENDS = re.compile(r"[.!?:][\"'`)\]}>*\u201d\u2019]*$")
 
 
 class HookInput(BaseModel):
@@ -276,13 +293,17 @@ def _identifier_shaped(term: str) -> bool:
     return not term.isalpha() or any(char.isupper() for char in term[1:])
 
 
+def _trim(raw: str) -> str:
+    token = _POSSESSIVE.sub("", raw.lstrip(_LEAD).rstrip(_TRAIL)).rstrip(_TRAIL)
+    # A call keeps its name: "run_hook()" arrives here as "run_hook(".
+    return token.removesuffix("(")
+
+
 def extract_terms(text: str) -> list[str]:
     """Return the identifier-shaped terms of `text`, in order, repeats included."""
     terms: list[str] = []
     for raw in _SPLIT.split(text):
-        token = _POSSESSIVE.sub("", raw.lstrip(_LEAD).rstrip(_TRAIL)).rstrip(_TRAIL)
-        # A call keeps its name: "run_hook()" arrives here as "run_hook(".
-        token = token.removesuffix("(")
+        token = _trim(raw)
         if "://" in token or token.lower().startswith("www."):
             continue
         if "/" in token:
@@ -298,6 +319,60 @@ def extract_terms(text: str) -> list[str]:
         elif _admissible(token) and _identifier_shaped(token):
             terms.append(token)
     return terms
+
+
+def _separator(char: str) -> bool:
+    return char.isspace() or char in _SEPARATORS
+
+
+def _sentence_initial(text: str, start: int) -> bool:
+    """Whether the token at `start` begins a text, a line, or a sentence."""
+    end = start
+    while end and _separator(text[end - 1]):
+        end -= 1
+    if not end or any(char in _LINE_BREAKS for char in text[end:start]):
+        return True
+    begin = end
+    while begin and not _separator(text[begin - 1]):
+        begin -= 1
+    previous = text[begin:end]
+    return _ENDS.search(previous) is not None or _MARKER.fullmatch(previous) is not None
+
+
+def _capitalized_words(text: str) -> list[tuple[str, bool]]:
+    """Each title-case ASCII word of `text` and whether it begins a sentence there."""
+    found: list[tuple[str, bool]] = []
+    for match in _CAPITALIZED.finditer(text):
+        word = _trim(match.group())
+        if len(word) >= MIN_NAME_CHARS and word.isascii() and word.isalpha() and word.istitle():
+            found.append((word, _sentence_initial(text, match.start())))
+    return found
+
+
+@cache
+def _common_words() -> frozenset[str]:
+    # At Zipf 3.0, 23 of the 24 words admitted from the operator's sessions were names.
+    data = resources.files("scribe").joinpath("data/common_en.txt.gz").read_bytes()
+    return frozenset(gzip.decompress(data).decode().split())
+
+
+def _names(texts: list[str], terms: set[str]) -> list[list[str]]:
+    """Per text, its uses of the plain names the texts use mid-sentence at least twice.
+
+    A capitalized word starting a sentence may be any word, so only later uses
+    show a name; a word that is one of `terms` or a common word is not one.
+    """
+    found = [_capitalized_words(text) for text in texts]
+    uses = Counter(word for words in found for word, initial in words if not initial)
+    names = {
+        word
+        for word, count in uses.items()
+        if count >= NAME_USES and word not in terms and _admissible(word)
+    }
+    # Loaded only when needed: most events see no candidate.
+    if names:
+        names = {word for word in names if word.lower() not in _common_words()}
+    return [[word for word, _ in words if word in names] for words in found]
 
 
 def read_tail(path: Path) -> list[str]:
@@ -422,15 +497,24 @@ def _session_record(
     found = _transcript(hook, terms_dir, now)
     known = [when for when, _ in found.texts if when is not None]
     current = known[0] if known else now
-    sources: list[tuple[datetime, list[str]]] = []
+    texts: list[tuple[datetime, str]] = []
     for when, text in found.texts:
         current = when if when is not None else current
-        sources.append((current, extract_terms(text)))
+        texts.append((current, text))
+    texts.append((now, hook.prompt or ""))
+    extracted = [extract_terms(text) for _, text in texts]
     named = [repo_name(Path(hook.cwd)), *([found.branch] if found.branch else [])]
-    sources.append(
-        (now, [term for term in named if _admissible(term) and _identifier_shaped(term)])
-    )
-    sources.append((now, extract_terms(hook.prompt or "")))
+    named = [term for term in named if _admissible(term) and _identifier_shaped(term)]
+    try:
+        names = _names([text for _, text in texts], {*named, *chain.from_iterable(extracted)})
+    except Exception as exc:  # noqa: BLE001 - names are extra; their failure must not cost the terms
+        log_failure(terms_dir, now, f"names: {type(exc).__name__}: {exc}")
+        names = [list[str]() for _ in texts]
+    sources = [
+        (when, [*terms, *uses])
+        for (when, _), terms, uses in zip(texts, extracted, names, strict=True)
+    ]
+    sources.insert(-1, (now, named))
 
     tallies: Counter[str] = Counter()
     seen: dict[str, datetime] = {}

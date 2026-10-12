@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import gzip
 import json
 import os
 import string
+import tempfile
 import threading
 import time
+from collections import Counter
 from datetime import UTC, datetime, timedelta
+from importlib import resources
 from pathlib import Path
 from typing import IO
 
@@ -19,7 +23,7 @@ from typer.testing import CliRunner
 from scribe import session_terms
 from scribe.cli import app
 from scribe.errors import InputValidationError
-from scribe.session_sources import MAX_FETCH_BYTES, remote_source
+from scribe.session_sources import MAX_FETCH_BYTES, merge, remote_source
 from scribe.session_terms import (
     LOG_LIMIT,
     MERGED_CAP,
@@ -1135,3 +1139,145 @@ def test_only_the_five_newest_distinct_titles_are_kept(tmp_path: Path) -> None:
     _event(tmp_path, "s1", "UserPromptSubmit", transcript=transcript, prompt="see a_term")
 
     assert _titles(tmp_path) == ("t6", "t5", "t4", "t2", "t3")
+
+
+def _said(tmp_path: Path, *texts: str) -> Path:
+    records: list[dict[str, object]] = [
+        {
+            "type": "user",
+            "timestamp": f"2026-10-05T11:00:{second:02d}Z",
+            "entrypoint": "cli",
+            "origin": _HUMAN,
+            "message": {"content": text},
+        }
+        for second, text in enumerate(texts)
+    ]
+    return _transcript(tmp_path, records)
+
+
+def _counts(tmp_path: Path, *texts: str, prompt: str | None = None) -> dict[str, int]:
+    extra = {} if prompt is None else {"prompt": prompt}
+    _event(tmp_path, "s1", "UserPromptSubmit", transcript=_said(tmp_path, *texts), **extra)
+    record = SessionRecord.model_validate_json(
+        (tmp_path / "terms" / "sessions" / "s1.json").read_text()
+    )
+    return {term.term: term.count for term in record.terms}
+
+
+# A name used twice mid-sentence, as the control every refusal below sits beside.
+_NAMED = "we asked Zorvath about it and then Zorvath replied"
+
+
+def test_a_plain_name_used_twice_mid_sentence_is_a_term(tmp_path: Path) -> None:
+    assert _counts(tmp_path, _NAMED) == {"Zorvath": 2}
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        pytest.param("Quellin went home. Quellin came back! Quellin? yes", id="sentence-initial"),
+        pytest.param("we saw Quellin once", id="once"),
+        pytest.param("a big Garden here and a Garden there", id="common-word"),
+        pytest.param("ask QUELLIN and QUELLIN again", id="all-caps"),
+        pytest.param("ask Vex and Vex again", id="three-letters"),
+        pytest.param("# Quellin\n## Quellin\n> Quellin", id="heading-or-quote"),
+        pytest.param("- Quellin\n* Quellin\n  ** Quellin", id="bullet"),
+        pytest.param("1. Quellin\n2) Quellin\na. Quellin", id="list-label"),
+        pytest.param("note: Quellin and also: Quellin", id="colon"),
+        pytest.param("| a | Quellin | b | Quellin |", id="table-cell"),
+        pytest.param("x - Quellin y - Quellin", id="mid-line-dash"),
+        pytest.param("(done.) Quellin and (ok!)' Quellin", id="closed-sentence"),
+        pytest.param("x\u2028Quellin y\u2029Quellin z\rQuellin", id="line-separators"),
+    ],
+)
+def test_a_word_that_is_not_a_plain_name_used_mid_sentence_is_not_a_term(
+    tmp_path: Path, text: str
+) -> None:
+    counts = _counts(tmp_path, _NAMED, text)
+
+    assert "Zorvath" in counts
+    assert not {"Quellin", "QUELLIN", "Garden", "Vex"} & counts.keys()
+
+
+def test_an_admitted_name_counts_every_sighting_across_texts_and_the_prompt(
+    tmp_path: Path,
+) -> None:
+    counts = _counts(
+        tmp_path,
+        "Zorvath arrived. later Zorvath's notes came",
+        "# Zorvath",
+        prompt="ask Zorvath",
+    )
+
+    assert counts == {"Zorvath": 4}
+
+
+def test_a_name_that_is_already_a_path_term_keeps_its_path_count(tmp_path: Path) -> None:
+    counts = _counts(tmp_path, "open docs/Zorvath now", _NAMED)
+
+    assert counts == {"Zorvath": 1, "docs/Zorvath": 1}
+
+
+def test_a_name_is_seen_last_when_its_latest_text_was(tmp_path: Path) -> None:
+    _counts(tmp_path, _NAMED, "see kept_term", "Zorvath again")
+
+    record = SessionRecord.model_validate_json(
+        (tmp_path / "terms" / "sessions" / "s1.json").read_text()
+    )
+    assert [(t.term, t.last_seen) for t in record.terms] == [
+        ("Zorvath", datetime(2026, 10, 5, 11, 0, 2, tzinfo=UTC)),
+        ("kept_term", datetime(2026, 10, 5, 11, 0, 1, tzinfo=UTC)),
+    ]
+
+
+def test_a_failing_word_list_costs_the_names_but_not_the_terms(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def unreadable() -> frozenset[str]:
+        raise OSError("no list")
+
+    monkeypatch.setattr(session_terms, "_common_words", unreadable)
+
+    assert _counts(tmp_path, _NAMED, "see kept_term") == {"kept_term": 1}
+    assert _current(tmp_path / "terms") == ["kept_term"]
+    assert "names: OSError: no list" in (tmp_path / "terms" / "hook.log").read_text()
+
+
+def test_the_bundled_word_list_holds_common_words_not_names() -> None:
+    data = resources.files("scribe").joinpath("data/common_en.txt.gz").read_bytes()
+    words = gzip.decompress(data).decode().split("\n")[:-1]
+
+    assert words == sorted(set(words))
+    assert {"please", "server", "garden"} <= set(words)
+    assert not {"zorvath", "quellin"} & set(words)
+
+
+def test_a_name_reaches_the_keyterms_a_focused_dictation_sends(tmp_path: Path) -> None:
+    _counts(tmp_path, _NAMED, "see kept_term")
+
+    blocks = _blocks(tmp_path / "terms")
+    merged = merge(["static_term"], [("local", blocks)], ("local", blocks[0]))
+
+    assert merged.terms == ("static_term", "kept_term", "Zorvath")
+
+
+_PROSE = st.one_of(
+    _TOKEN,
+    st.sampled_from(
+        ["Zorvath", "Zorvath's", "Quellin", "docs/Zorvath", "GadgetPanel", "kept_term", "1.", "#"]
+    ),
+)
+_GAP = st.sampled_from([" ", "\n", ". ", ": ", " - ", "\u2028", " | "])
+
+
+@given(st.lists(st.tuples(_PROSE, _GAP), max_size=20).map(lambda p: "".join(map("".join, p))))
+def test_names_leave_every_identifier_term_and_its_count_as_extracted(text: str) -> None:
+    expected = Counter(extract_terms(text))
+    with tempfile.TemporaryDirectory() as directory:
+        counts = _counts(Path(directory), text)
+
+    assert {term: counts[term] for term in expected} == dict(expected)
+    for name in counts.keys() - expected.keys():
+        assert name.isascii()
+        assert name.isalpha()
+        assert name.istitle()
