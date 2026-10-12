@@ -17,7 +17,8 @@ from pathlib import Path
 
 from wordfreq import iter_wordlist, zipf_frequency
 
-# On the operator's sessions 3.0 admitted 23 names and 1 other word; 2.5 lost 6 of the names.
+# On 60 measured Claude Code sessions 3.0 admitted 23 names and 1 other word;
+# 2.5 lost 6 of the names.
 ZIPF = 3.0
 MIN_LETTERS = 4
 OUT = Path(__file__).resolve().parent.parent / "src" / "scribe" / "data" / "common_en.txt.gz"

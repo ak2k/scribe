@@ -353,7 +353,7 @@ def _capitalized_words(text: str) -> list[tuple[str, bool]]:
 
 @cache
 def _common_words() -> frozenset[str]:
-    # At Zipf 3.0, 23 of the 24 words admitted from the operator's sessions were names.
+    # At Zipf 3.0, 23 of the 24 words admitted from 60 measured sessions were names.
     data = resources.files("scribe").joinpath("data/common_en.txt.gz").read_bytes()
     return frozenset(gzip.decompress(data).decode().split())
 
