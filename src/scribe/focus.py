@@ -14,9 +14,10 @@ import os
 import re
 import subprocess
 import threading
+import time
 import unicodedata
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
@@ -60,8 +61,10 @@ QUERY_CAP_SECONDS = 0.25
 # Claude Code's terminal title before a session has one, as `title_key` reduces it.
 UNTITLED_KEY = "claude code"
 _CODE = re.compile(r"\((-\d{1,6})\)\s*$")
-# herdr answers in about 0.3 ms; a miss then costs a fifth of the Ghostty query's cap at most.
-HERDR_CAP_SECONDS = 0.05
+# herdr usually answers in under 5 ms but sometimes at about 100 ms, and while herdr
+# runs, Ghostty's front tab is herdr's own and matches no session: a late herdr
+# answer beats an early fallback.
+HERDR_CAP_SECONDS = 0.15
 HERDR_REQUEST = b'{"id":"scribe","method":"pane.current","params":{}}\n'
 # A pane's reply is about a kilobyte; past this it is not one.
 MAX_HERDR_REPLY_BYTES = 1 << 16
@@ -69,7 +72,23 @@ MAX_HERDR_REPLY_BYTES = 1 << 16
 Verdict = Literal["off", "slow", "error", "away", "miss", "ambiguous", "elsewhere", "hit"]
 FocusSource = Literal["herdr", "ghostty", "off"]
 Check = Literal["agree", "disagree", "unmatched", "away", "unknown"]
+HerdrReason = Literal[
+    "off",
+    "hit",
+    "timeout",
+    "unreachable",
+    "malformed",
+    "unfocused",
+    "no-agent",
+    "no-block",
+    "several",
+]
+# herdr answered, and its focused pane names no one block.
+ANSWERED_MISSES: frozenset[HerdrReason] = frozenset(
+    {"unfocused", "no-agent", "no-block", "several"}
+)
 type _Match = tuple[Verdict, SessionBlock | None]
+type _HerdrMatch = tuple[HerdrReason, SessionBlock | None]
 
 
 def _logger() -> BoundLogger:
@@ -167,25 +186,35 @@ class _HerdrReply(_HerdrModel):
     result: _PaneCurrent
 
 
-def herdr_match(reply: bytes, blocks: Sequence[SessionBlock]) -> SessionBlock | None:
-    """The block of the Claude Code session in herdr's focused pane, or None.
+def herdr_match(reply: bytes, blocks: Sequence[SessionBlock]) -> _HerdrMatch:
+    """The block of the Claude Code session in herdr's focused pane, or why there is none.
 
     The session id must name exactly one block. Strings are only compared, so
-    nothing here can stall on the filesystem.
+    nothing here can stall on the filesystem. The reason is one of a fixed set
+    and holds nothing from the reply.
+
+    Raises:
+        ValueError: the reply is not a `pane_current` this code reads.
+
     """
     pane = _HerdrReply.model_validate_json(reply).result.pane
     session = pane.agent_session
+    if not pane.focused:
+        return "unfocused", None
     if (
-        not pane.focused
-        or pane.agent != "claude"
+        pane.agent != "claude"
         or session is None
         or session.source != "herdr:claude"
         or session.kind != "id"
         or not session.value
     ):
-        return None
+        return "no-agent", None
     found = [block for block in blocks if block.session_id == session.value]
-    return found[0] if len(found) == 1 else None
+    if not found:
+        return "no-block", None
+    if len(found) > 1:
+        return "several", None
+    return "hit", found[0]
 
 
 def _cause(exc: Exception) -> str:
@@ -217,8 +246,20 @@ def _spelling(cwd: str) -> str:
     return unicodedata.normalize("NFC", _resolved(cwd)).casefold()
 
 
+@dataclass(frozen=True)
+class Picked:
+    """One pick: its verdict, the block, who named it, and what became of the herdr ask."""
+
+    verdict: Verdict
+    block: SessionBlock | None
+    source: FocusSource
+    herdr: HerdrReason = "off"
+    # How long the herdr ask took; a timing never makes two picks differ.
+    herdr_ms: float | None = field(default=None, compare=False)
+
+
 class Focus:
-    """The focused session, asked of herdr and then Ghostty by each request."""
+    """The focused session, asked of herdr, and of Ghostty when herdr gives no answer."""
 
     def __init__(
         self,
@@ -237,7 +278,7 @@ class Focus:
         self.name = "ghostty" if herdr is None else "herdr+ghostty"
         self._runner = runner
         self._herdr = herdr
-        self._state: Literal["never", "herdr", "front", "away", "error", "slow"] = "never"
+        self._state: Literal["never", "herdr", "miss", "front", "away", "error", "slow"] = "never"
         self._source: FocusSource | None = None
         self._failure: str | None = None
         # A query past the cap is abandoned, not stopped, and a stalled mount can hold its
@@ -284,25 +325,34 @@ class Focus:
             return answer[0]
         return "slow"
 
-    async def _ask_herdr(self, herdr: Path, recent: Sequence[SessionBlock]) -> SessionBlock | None:
+    async def _ask_herdr(self, herdr: Path, recent: Sequence[SessionBlock]) -> _HerdrMatch:
+        # A failure is named by where it happened, never by its text: a reply or an
+        # error can quote a title or a path.
         with anyio.move_on_after(self.herdr_cap):
             try:
-                async with await anyio.connect_unix(herdr) as stream:
+                stream = await anyio.connect_unix(herdr)
+            except Exception:  # noqa: BLE001  # no herdr answer may fail a dictation
+                return "unreachable", None
+            try:
+                async with stream:
                     await stream.send(HERDR_REQUEST)
                     reply = await BufferedByteReceiveStream(stream).receive_until(
                         b"\n", MAX_HERDR_REPLY_BYTES
                     )
                 return herdr_match(reply, recent)
-            # Absent, refused, closed early or any other shape: Ghostty is asked instead,
-            # and the reason is not logged, as the reply can quote a title or a path.
             except Exception:  # noqa: BLE001  # no herdr answer may fail a dictation
-                return None
-        return None
+                return "malformed", None
+        return "timeout", None
 
-    def _check(self, picked: SessionBlock, recent: Sequence[SessionBlock]) -> None:
-        """Log whether Ghostty's own match agrees with a herdr pick, off the request path."""
+    def _check(self, picked: SessionBlock | None, recent: Sequence[SessionBlock]) -> None:
+        """Log what Ghostty's own match says of herdr's answer, off the request path.
+
+        After a herdr miss `picked` is None, so a block Ghostty matches is a
+        "disagree", the pick the skipped query would have made, and never an "agree".
+        """
+        after: Literal["hit", "miss"] = "miss" if picked is None else "hit"
         if not self._permit.acquire(blocking=False):
-            _logger().info("serve.focus_check", agree="unknown")
+            _logger().info("serve.focus_check", agree="unknown", after=after)
             return
 
         def run() -> None:
@@ -322,33 +372,15 @@ class Focus:
                     outcome = "agree" if answer[1] is picked else "disagree"
             finally:
                 self._permit.release()
-            _logger().info("serve.focus_check", agree=outcome)
+            _logger().info("serve.focus_check", agree=outcome, after=after)
 
         try:
             threading.Thread(target=run, name="focus check", daemon=True).start()
         except Exception:  # noqa: BLE001  # a thread that never starts never frees the permit
             self._permit.release()
-            _logger().info("serve.focus_check", agree="unknown")
+            _logger().info("serve.focus_check", agree="unknown", after=after)
 
-    async def pick(
-        self, recent: Sequence[SessionBlock]
-    ) -> tuple[Verdict, SessionBlock | None, FocusSource]:
-        """The focused block among `recent`, the local blocks ranked within 24 h, and who named it.
-
-        herdr, then Ghostty, is asked now, so a pane or tab chosen just before the
-        dictation counts and no earlier one's session can be put first.
-        """
-        if not recent:
-            return "miss", None, "ghostty"
-        # DIVERGE: herdr's pick stands even when another app is in front: focus only
-        # orders which session's terms come first, and the pane typed into last is a
-        # better guess then than the newest session.
-        if self._herdr is not None:
-            block = await self._ask_herdr(self._herdr, recent)
-            if block is not None:
-                self._state = self._source = "herdr"
-                self._check(block, recent)
-                return "hit", block, "herdr"
+    async def _ask_ghostty(self, recent: Sequence[SessionBlock]) -> _Match:
         self._source = "ghostty"
         answer = await self._query(recent)
         if isinstance(answer, str):
@@ -356,18 +388,57 @@ class Focus:
                 _logger().warning("serve.focus_failed", error=answer)
             self._failure = answer
             self._state = "slow" if answer == "slow" else "error"
-            return ("slow" if answer == "slow" else "error"), None, "ghostty"
+            return self._state, None
         if self._failure is not None:
             _logger().info("serve.focus_restored")
             self._failure = None
         if answer is None:
             self._state = "away"
-            return "away", None, "ghostty"
+            return "away", None
         self._state = "front"
-        return *answer, "ghostty"
+        return answer
+
+    async def pick(self, recent: Sequence[SessionBlock]) -> Picked:
+        """The focused block among `recent`, the local blocks ranked within 24 h, and who named it.
+
+        herdr is asked now, and Ghostty when herdr gives no answer (a timeout, no
+        connection or a malformed reply), so a pane or tab chosen just before the
+        dictation counts and no earlier one's session can be put first.
+        """
+        if not recent:
+            return Picked("miss", None, "ghostty")
+        reason: HerdrReason = "off"
+        herdr_ms: float | None = None
+        if self._herdr is not None:
+            started = time.monotonic()
+            reason, block = await self._ask_herdr(self._herdr, recent)
+            herdr_ms = round((time.monotonic() - started) * 1000, 1)
+            # DIVERGE: herdr's pick stands even when another app is in front: focus only
+            # orders which session's terms come first, and the pane typed into last is a
+            # better guess then than the newest session.
+            if block is not None:
+                self._state = self._source = "herdr"
+                self._check(block, recent)
+                return Picked("hit", block, "herdr", reason, herdr_ms)
+            # DIVERGE: once herdr has answered, its miss stands and Ghostty is not asked
+            # on the request path. While herdr's client is in front, Ghostty's front tab
+            # is herdr's and matches no session, so the query could only add its wait.
+            # herdr answers from its own layout whether or not its client is in front, so
+            # a Claude tab in front outside herdr goes unpicked; each
+            # `serve.focus_check` with after="miss" and agree="disagree" is one such loss.
+            if reason in ANSWERED_MISSES:
+                self._state, self._source = "miss", "herdr"
+                self._check(None, recent)
+                return Picked("miss", None, "herdr", reason, herdr_ms)
+        verdict, block = await self._ask_ghostty(recent)
+        return Picked(verdict, block, "ghostty", reason, herdr_ms)
 
     def health(self) -> dict[str, object]:
-        """The last pick's outcome ("herdr" when herdr named it) and source; nothing from either."""
+        """The last pick's outcome and source; nothing from either.
+
+        The outcome is "herdr" when herdr named the block and "miss" when herdr
+        answered without one.
+        """
         return {"state": self._state, "source": self._source}
 
 

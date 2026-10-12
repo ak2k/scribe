@@ -366,6 +366,8 @@ class _Server:
             focus=focus.verdict,
             focus_terms=focus.terms,
             focus_source=focus.source,
+            herdr=focus.herdr,
+            herdr_ms=focus.herdr_ms,
             edits=len(result.edits),
         )
         record = KeepRecord(

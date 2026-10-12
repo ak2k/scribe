@@ -28,6 +28,7 @@ def pane_reply(
     """The herdr answer for a pane running `agent` in `session`; other fields hold SENTINEL."""
     pane: dict[str, object] = {
         "pane_id": f"{SENTINEL}-pane",
+        "workspace_id": f"{SENTINEL}-workspace",
         "focused": focused,
         "agent": agent,
         "agent_status": "idle",

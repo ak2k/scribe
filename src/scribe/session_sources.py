@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import subprocess
 import unicodedata
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
@@ -28,7 +28,7 @@ if TYPE_CHECKING:
 
     from structlog.stdlib import BoundLogger
 
-    from scribe.focus import Focus, FocusSource, Verdict
+    from scribe.focus import Focus, FocusSource, HerdrReason, Verdict
     from scribe.session_terms import SessionBlock
 
     Runner = Callable[[Sequence[str], float], str]
@@ -225,11 +225,17 @@ class Merged:
 
 @dataclass(frozen=True)
 class FocusUse:
-    """What focus did for one dictation: its verdict, the terms it put first, and who named it."""
+    """What focus did for one dictation: its verdict, the terms it put first, and who named it.
+
+    `herdr` is what became of the herdr ask and `herdr_ms` how long it took.
+    """
 
     verdict: Verdict
     terms: int
     source: FocusSource
+    herdr: HerdrReason = "off"
+    # A timing never makes two uses differ.
+    herdr_ms: float | None = field(default=None, compare=False)
 
 
 def _keyterm(term: str) -> bool:
@@ -309,21 +315,23 @@ class SessionTerms:
         now = self._clock()
         # One read per source: the focused block and the turns must come from the same file.
         reads = [(source, source.live_and_recent(now)) for source in self.sources]
-        verdict: Verdict = "off"
-        named_by: FocusSource = "off"
+        picked = None
         focused = None
         if self.focus is not None:
             # A remote tab shows the herdr title and this Mac's cwd, so only local blocks qualify.
             recent = next((r for source, (_, r) in reads if source is self._local), ())
-            verdict, block, named_by = await self.focus.pick(recent)
-            focused = None if block is None else (LOCAL_NAME, block)
+            picked = await self.focus.pick(recent)
+            focused = None if picked.block is None else (LOCAL_NAME, picked.block)
         live = [(source.name, blocks) for source, (blocks, _) in reads]
         merged = merge(static.terms, live, focused)
-        return (
-            Vocab(terms=merged.terms, aliases=static.aliases),
-            merged.counts,
-            FocusUse(verdict, merged.focused, named_by),
+        use = (
+            FocusUse("off", merged.focused, "off")
+            if picked is None
+            else FocusUse(
+                picked.verdict, merged.focused, picked.source, picked.herdr, picked.herdr_ms
+            )
         )
+        return Vocab(terms=merged.terms, aliases=static.aliases), merged.counts, use
 
     async def poll(self) -> None:
         """Refresh each source on its interval until cancelled."""
