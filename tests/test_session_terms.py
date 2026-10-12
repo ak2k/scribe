@@ -1172,6 +1172,10 @@ def test_a_plain_name_used_twice_mid_sentence_is_a_term(tmp_path: Path) -> None:
     assert _counts(tmp_path, _NAMED) == {"Zorvath": 2}
 
 
+def test_a_name_set_off_by_dashes_is_still_mid_sentence(tmp_path: Path) -> None:
+    assert _counts(tmp_path, "we asked \u2014 Quellin and then\u2014Quellin") == {"Quellin": 2}
+
+
 @pytest.mark.parametrize(
     "text",
     [
@@ -1183,6 +1187,8 @@ def test_a_plain_name_used_twice_mid_sentence_is_a_term(tmp_path: Path) -> None:
         pytest.param("# Quellin\n## Quellin\n> Quellin", id="heading-or-quote"),
         pytest.param("- Quellin\n* Quellin\n  ** Quellin", id="bullet"),
         pytest.param("1. Quellin\n2) Quellin\na. Quellin", id="list-label"),
+        pytest.param("2) Quellin\n3) Quellin", id="numbered-label"),
+        pytest.param("b) Quellin\nc) Quellin", id="lettered-label"),
         pytest.param("note: Quellin and also: Quellin", id="colon"),
         pytest.param("| a | Quellin | b | Quellin |", id="table-cell"),
         pytest.param("x - Quellin y - Quellin", id="mid-line-dash"),
@@ -1199,6 +1205,25 @@ def test_a_word_that_is_not_a_plain_name_used_mid_sentence_is_not_a_term(
     assert not {"Quellin", "QUELLIN", "Garden", "Vex"} & counts.keys()
 
 
+def test_a_name_that_only_begins_texts_is_not_a_term(tmp_path: Path) -> None:
+    counts = _counts(tmp_path, _NAMED, "Quellin went home", "Quellin came back")
+
+    assert "Zorvath" in counts
+    assert "Quellin" not in counts
+
+
+def test_the_word_list_is_not_read_without_a_candidate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def unreadable() -> frozenset[str]:
+        raise OSError("no list")
+
+    monkeypatch.setattr(session_terms, "_common_words", unreadable)
+
+    assert _counts(tmp_path, "we saw Quellin once", "see kept_term") == {"kept_term": 1}
+    assert not (tmp_path / "terms" / "hook.log").exists()
+
+
 def test_an_admitted_name_counts_every_sighting_across_texts_and_the_prompt(
     tmp_path: Path,
 ) -> None:
@@ -1213,9 +1238,9 @@ def test_an_admitted_name_counts_every_sighting_across_texts_and_the_prompt(
 
 
 def test_a_name_that_is_already_a_path_term_keeps_its_path_count(tmp_path: Path) -> None:
-    counts = _counts(tmp_path, "open docs/Zorvath now", _NAMED)
+    counts = _counts(tmp_path, "open docs/Zorvath now", _NAMED, "ask Quellin and Quellin")
 
-    assert counts == {"Zorvath": 1, "docs/Zorvath": 1}
+    assert counts == {"Zorvath": 1, "docs/Zorvath": 1, "Quellin": 2}
 
 
 def test_a_name_is_seen_last_when_its_latest_text_was(tmp_path: Path) -> None:
