@@ -784,6 +784,35 @@ def test_a_reply_trickled_past_the_cap_is_not_cut(
     assert len(seen) == 1
 
 
+def test_the_last_attempt_keeps_the_time_left_to_the_deadline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: list[httpx.Request] = []
+
+    def outage_then_slow(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        if len(seen) == 1:
+            return httpx.Response(503, text="upstream unavailable")
+        # A server that answers after 0.4 s, behind a socket that honors its timeout.
+        if _read_timeout(request) < 0.4:
+            time.sleep(_read_timeout(request))
+            raise httpx.ReadTimeout("stalled", request=request)
+        time.sleep(0.4)
+        return _ok(request)
+
+    monkeypatch.setattr(serve, "XAI_DEADLINE_SECONDS", 1.0)
+    monkeypatch.setattr(serve, "XAI_ATTEMPT_SECONDS", 0.2)
+    client = serve.dictation_client(KEY, transport=httpx.MockTransport(outage_then_slow))
+
+    try:
+        reply: object = client.transcribe(_clip(tmp_path))
+    except ExternalServiceError as exc:
+        reply = exc
+
+    assert reply == xai_payload()
+    assert len(seen) == 2
+
+
 def test_a_normal_dictation_is_one_request_on_the_kept_connection(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
