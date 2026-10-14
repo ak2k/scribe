@@ -948,3 +948,50 @@ def test_connections_idle_through_a_sleep_after_overlapping_calls_carry_no_dicta
 
     assert wire.requests == [1, 2, 3, 4]
     assert reply == xai_payload()
+
+
+def _clocks(monkeypatch: pytest.MonkeyPatch) -> dict[str, float]:
+    """Drive the wall and monotonic clocks the kept client reads; both start far from zero."""
+    clocks = {"wall": 1_000_000.0, "monotonic": 5_000.0}
+    monkeypatch.setattr(xai_stt, "_wall_clock", lambda: clocks["wall"])
+    monkeypatch.setattr(xai_stt, "_monotonic", lambda: clocks["monotonic"], raising=False)
+    return clocks
+
+
+def test_a_sleep_shorter_than_the_keep_alive_also_replaces_the_pool(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clocks = _clocks(monkeypatch)
+    wire = _Wire()
+    client = XaiStt(
+        KEY, network_backend=_ReplyingBackend(wire), deadline_seconds=8, keep_alive=True
+    )
+    clip = _clip(tmp_path)
+
+    client.transcribe(clip)
+    clocks["wall"] += 60
+    client.transcribe(clip)
+
+    assert wire.requests == [1, 2]
+    assert wire.closed == 1
+    client.close()
+
+
+def test_calls_with_no_sleep_between_them_keep_the_pool(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clocks = _clocks(monkeypatch)
+    wire = _Wire()
+    client = XaiStt(
+        KEY, network_backend=_ReplyingBackend(wire), deadline_seconds=8, keep_alive=True
+    )
+    clip = _clip(tmp_path)
+
+    for awake in (0, 1, 200, 0.5):
+        clocks["wall"] += awake
+        clocks["monotonic"] += awake
+        client.transcribe(clip)
+
+    assert wire.requests == [1, 1, 1, 1]
+    assert wire.closed == 0
+    client.close()
