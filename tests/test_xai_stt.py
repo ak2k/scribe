@@ -891,3 +891,60 @@ def test_a_replacement_never_closes_a_connection_a_call_is_using(
 
     assert closed_while_held == 0
     assert replies == [xai_payload()]
+
+
+def test_connections_idle_through_a_sleep_after_overlapping_calls_carry_no_dictation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    now = [1_000_000.0]
+    monkeypatch.setattr(xai_stt, "_wall_clock", lambda: now[0])
+    wire = _Wire()
+    entered = {number: threading.Event() for number in (1, 2, 3)}
+    release = {number: threading.Event() for number in (1, 2, 3)}
+    # Connections whose peer dropped them during the sleep: they never answer again.
+    dead: set[int] = set()
+
+    class Overlapping(_Replying):
+        """Holds each of the first three connections' first reply until released."""
+
+        @override
+        def read(self, max_bytes: int, timeout: float | None = None) -> bytes:
+            if self._number in release:
+                entered[self._number].set()
+                assert release[self._number].wait(5)
+            if self._number in dead:
+                assert timeout is not None
+                time.sleep(timeout)
+                raise httpcore.ReadTimeout
+            return super().read(max_bytes, timeout)
+
+    client = _dictation_client(
+        monkeypatch, _ReplyingBackend(wire, stream=Overlapping), deadline=1.0
+    )
+    clip = _clip(tmp_path)
+    calls: dict[int, threading.Thread] = {}
+    try:
+        for number in (1, 2, 3):
+            calls[number] = threading.Thread(target=client.transcribe, args=(clip,))
+            calls[number].start()
+            assert entered[number].wait(5)
+        for number in (1, 2):
+            release[number].set()
+            calls[number].join(5)
+        # The machine sleeps past the keep-alive while the third call is in flight.
+        now[0] += KEPT_ALIVE_SECONDS + 1
+        dead.update({1, 2})
+        release[3].set()
+        calls[3].join(5)
+
+        try:
+            reply: object = client.transcribe(clip)
+        except ExternalServiceError as exc:
+            reply = exc
+    finally:
+        for event in release.values():
+            event.set()
+    client.close()
+
+    assert wire.requests == [1, 2, 3, 4]
+    assert reply == xai_payload()
