@@ -13,8 +13,9 @@ import httpx
 import pytest
 import stamina
 
+from scribe import serve, xai_stt
 from scribe.errors import AppError, ExternalServiceError, InputValidationError
-from scribe.xai_stt import MAX_UPLOAD_BYTES, XaiStt, resolve_api_key
+from scribe.xai_stt import KEPT_ALIVE_SECONDS, MAX_UPLOAD_BYTES, XaiStt, resolve_api_key
 from tests.xai_fixtures import xai_payload
 
 if TYPE_CHECKING:
@@ -541,10 +542,12 @@ def test_no_retry_starts_after_the_deadline(tmp_path: Path) -> None:
 class _Wire:
     """Connections opened and closed over an in-memory network."""
 
-    def __init__(self, *, honors_timeouts: bool) -> None:
+    def __init__(self, *, honors_timeouts: bool = False) -> None:
         self.honors_timeouts = honors_timeouts
         self.opened = 0
         self.closed = 0
+        # The connection, by its opening order from 1, that carried each request.
+        self.requests: list[int] = []
 
 
 class _TrickledHeaders(httpcore.NetworkStream):
@@ -619,4 +622,135 @@ def test_a_deadline_closes_a_connection_whose_headers_trickle_past_it(
 
     assert time.monotonic() - started < 0.6
     assert (wire.opened, wire.closed) == (1, 1)
+    client.close()
+
+
+_REPLY_BODY = json.dumps(xai_payload()).encode()
+_REPLY = (
+    b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+    + f"Content-Length: {len(_REPLY_BODY)}\r\n\r\n".encode()
+    + _REPLY_BODY
+)
+
+
+class _Replying(httpcore.NetworkStream):
+    """A server that answers each request at once or, when it stalls, never."""
+
+    def __init__(self, wire: _Wire, *, stalls: bool) -> None:
+        wire.opened += 1
+        self._wire = wire
+        self._number = wire.opened
+        self._stalls = stalls
+        self._reply = b""
+
+    @override
+    def read(self, max_bytes: int, timeout: float | None = None) -> bytes:
+        if self._stalls:
+            assert timeout is not None
+            time.sleep(timeout)
+            raise httpcore.ReadTimeout
+        reply, self._reply = self._reply, b""
+        return reply
+
+    @override
+    def write(self, buffer: bytes, timeout: float | None = None) -> None:
+        if buffer.startswith(b"POST "):
+            self._wire.requests.append(self._number)
+            self._reply = _REPLY
+
+    @override
+    def close(self) -> None:
+        self._wire.closed += 1
+
+    @override
+    def start_tls(
+        self,
+        ssl_context: ssl.SSLContext,
+        server_hostname: str | None = None,
+        timeout: float | None = None,
+    ) -> httpcore.NetworkStream:
+        return self
+
+
+class _ReplyingBackend(httpcore.NetworkBackend):
+    """Connections that stall for the first `stalled` opened, then answer."""
+
+    def __init__(self, wire: _Wire, *, stalled: int = 0) -> None:
+        self._wire = wire
+        self._stalled = stalled
+
+    @override
+    def connect_tcp(
+        self,
+        host: str,
+        port: int,
+        timeout: float | None = None,
+        local_address: str | None = None,
+        socket_options: Iterable[httpcore.SOCKET_OPTION] | None = None,
+    ) -> httpcore.NetworkStream:
+        return _Replying(self._wire, stalls=self._wire.opened < self._stalled)
+
+
+def _dictation_client(
+    monkeypatch: pytest.MonkeyPatch, backend: httpcore.NetworkBackend, *, deadline: float
+) -> XaiStt:
+    """The server's xAI client over `backend`, a stalled attempt yielding after 0.2 s."""
+    monkeypatch.setattr(serve, "XAI_DEADLINE_SECONDS", deadline)
+    monkeypatch.setattr(serve, "XAI_ATTEMPT_SECONDS", 0.2, raising=False)
+    monkeypatch.setattr(httpcore, "SyncBackend", lambda: backend)
+    return serve.dictation_client(KEY)
+
+
+def test_a_stalled_attempt_yields_to_a_retry_on_a_new_connection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    wire = _Wire()
+    client = _dictation_client(monkeypatch, _ReplyingBackend(wire, stalled=1), deadline=1.0)
+    started = time.monotonic()
+
+    try:
+        reply: object = client.transcribe(_clip(tmp_path))
+    except ExternalServiceError as exc:
+        reply = exc
+    elapsed = time.monotonic() - started
+    client.close()
+
+    assert reply == xai_payload()
+    assert wire.requests == [1, 2]
+    assert elapsed < 1.0
+
+
+def test_a_normal_dictation_is_one_request_on_the_kept_connection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    wire = _Wire()
+    client = _dictation_client(monkeypatch, _ReplyingBackend(wire), deadline=1.0)
+    clip = _clip(tmp_path)
+
+    assert client.transcribe(clip) == xai_payload()
+    assert client.transcribe(clip) == xai_payload()
+    client.close()
+
+    assert wire.requests == [1, 1]
+
+
+def test_a_connection_idle_through_a_sleep_carries_no_dictation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The wall clock counts a sleep; the monotonic clock under httpcore's own
+    # keep-alive expiry does not, so it moves only the milliseconds this test takes.
+    now = [1_000_000.0]
+    monkeypatch.setattr(xai_stt, "_wall_clock", lambda: now[0], raising=False)
+    wire = _Wire()
+    client = XaiStt(
+        KEY, network_backend=_ReplyingBackend(wire), deadline_seconds=8, keep_alive=True
+    )
+    clip = _clip(tmp_path)
+
+    client.transcribe(clip)
+    now[0] += KEPT_ALIVE_SECONDS + 1
+    client.transcribe(clip)
+
+    assert wire.requests == [1, 2]
+    assert wire.closed == 1
     client.close()
