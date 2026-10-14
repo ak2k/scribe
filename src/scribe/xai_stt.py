@@ -202,8 +202,6 @@ def _post(
     scalars: list[_Part],
     timeout_seconds: float,
     ends_at: float | None,
-    *,
-    retryable: bool = False,
 ) -> httpx.Response:
     """POST one attempt at `/stt`, with `file` as the last multipart field."""
     # A handle per attempt: httpx encodes multipart lazily at send time and
@@ -219,7 +217,7 @@ def _post(
             if ends_at is None:
                 response = client.post("/stt", files=parts, timeout=timeout)
             else:
-                response = _post_until(client, parts, timeout, ends_at, retryable=retryable)
+                response = _post_until(client, parts, timeout, ends_at)
     except OSError as exc:
         raise InputValidationError(f"cannot read audio file {path}: {exc}") from exc
     response.raise_for_status()
@@ -227,22 +225,16 @@ def _post(
 
 
 class _Until(httpx.SyncByteStream):
-    """A reply body that stops at the first chunk arriving past `ends_at`.
+    """A reply body that stops at the first chunk arriving past `ends_at`."""
 
-    `retryable` when `ends_at` ends only this attempt, not the whole call.
-    """
-
-    def __init__(self, inner: httpx.SyncByteStream, ends_at: float, *, retryable: bool) -> None:
+    def __init__(self, inner: httpx.SyncByteStream, ends_at: float) -> None:
         self._inner = inner
         self._ends_at = ends_at
-        self._retryable = retryable
 
     @override
     def __iter__(self) -> Iterator[bytes]:
         for chunk in self._inner:
             if time.monotonic() > self._ends_at:
-                if self._retryable:
-                    raise httpx.ReadTimeout("xAI did not finish its reply within the attempt")
                 raise ExternalServiceError("xAI did not finish its reply before the deadline")
             yield chunk
 
@@ -252,20 +244,14 @@ class _Until(httpx.SyncByteStream):
 
 
 def _post_until(
-    client: httpx.Client,
-    parts: list[_Part],
-    timeout: httpx.Timeout,
-    ends_at: float,
-    *,
-    retryable: bool,
+    client: httpx.Client, parts: list[_Part], timeout: httpx.Timeout, ends_at: float
 ) -> httpx.Response:
     """POST, reading the reply chunk by chunk and closing it once `ends_at` passes."""
     # A read timeout bounds only each wait on the socket, so a reply trickled in
     # slowly would otherwise hold its thread and connection long past the deadline.
     with client.stream("POST", "/stt", files=parts, timeout=timeout) as response:
         # A sync client's reply body is always a sync stream.
-        stream = cast("httpx.SyncByteStream", response.stream)
-        response.stream = _Until(stream, ends_at, retryable=retryable)
+        response.stream = _Until(cast("httpx.SyncByteStream", response.stream), ends_at)
         _ = response.read()
     return response
 
@@ -415,10 +401,10 @@ class XaiStt:
                 included, is replaced before the next call.
             network_backend: Socket layer under a deadline, when `transport`
                 is not given; tests inject an in-memory one.
-            attempt_seconds: Under a deadline, seconds after which an attempt
-                that is not the last is abandoned as a read timeout, so the
-                retry gets the rest of the deadline on a new connection.
-                None for no cap.
+            attempt_seconds: Longest single connect, write or read wait of an
+                attempt that is not the last; past it the attempt ends as a
+                transport timeout, and the retry gets the rest of the
+                deadline on a new connection. None for no cap.
 
         """
         self._api_key = api_key
@@ -482,11 +468,11 @@ class XaiStt:
         if self._shared is not None:
             self._shared.close()
 
-    def _attempt_timeout(self, ends_at: float | None) -> float:
-        """Per-attempt timeout: the client's, cut to what is left of the attempt."""
-        if ends_at is None:
+    def _attempt_timeout(self, started: float) -> float:
+        """Per-attempt timeout: the client's, cut to what is left of the deadline."""
+        if self._deadline_seconds is None:
             return self._timeout_seconds
-        left = ends_at - time.monotonic()
+        left = self._deadline_seconds - (time.monotonic() - started)
         # Never zero, which httpx reads as an immediate timeout on connect.
         return max(min(self._timeout_seconds, left), 0.1)
 
@@ -565,23 +551,12 @@ class XaiStt:
                 # so a retry can otherwise fall due past the deadline.
                 if ends_at is not None and time.monotonic() >= ends_at:
                     raise ExternalServiceError("xAI did not answer before the deadline")
-                attempt_ends = ends_at
-                if (
-                    attempt_ends is not None
-                    and self._attempt_seconds is not None
-                    and attempt.num < self._attempts
-                ):
-                    attempt_ends = min(attempt_ends, time.monotonic() + self._attempt_seconds)
-                token = _ENDS_AT.set(attempt_ends)
+                timeout = self._attempt_timeout(started)
+                if self._attempt_seconds is not None and attempt.num < self._attempts:
+                    timeout = min(timeout, self._attempt_seconds)
+                token = _ENDS_AT.set(ends_at)
                 try:
-                    return _post(
-                        client,
-                        path,
-                        scalars,
-                        self._attempt_timeout(attempt_ends),
-                        attempt_ends,
-                        retryable=attempt_ends != ends_at,
-                    )
+                    return _post(client, path, scalars, timeout, ends_at)
                 finally:
                     _ENDS_AT.reset(token)
         raise AssertionError("unreachable: stamina re-raises the last failure")  # pragma: no cover

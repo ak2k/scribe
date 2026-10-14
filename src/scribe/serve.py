@@ -53,8 +53,11 @@ KEEP_NEWEST = 1000
 # A dictation is waited on by someone at a keyboard: two quick tries, never minutes.
 XAI_ATTEMPTS = 2
 XAI_DEADLINE_SECONDS = 8.0
-# Above the slowest answer seen from xAI, 3.4 s, and leaving the retry about
-# three times the 99th-percentile answer time before the deadline.
+# The longest single socket wait of a first attempt, so a dead connection yields
+# to a retry on a new one: above the slowest answer seen from xAI, 3.4 s, and
+# leaving the retry about three times the 99th-percentile answer time before the
+# deadline. A reply trickled in slowly still runs to the deadline, and a server
+# that thinks longer than this before answering is retried with less time still.
 XAI_ATTEMPT_SECONDS = 4.0
 # Past the xAI budget plus cleanup; a client that stalls mid-upload is cut off then
 # rather than holding off a stop forever.
