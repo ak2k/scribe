@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import stat
 import unicodedata
 from dataclasses import dataclass
 from itertools import pairwise
@@ -251,42 +252,64 @@ def _rewrite(
 class TermsFile:
     """A terms file, re-read whenever its modification time or size changes."""
 
-    def __init__(self, path: Path, *, required: bool) -> None:
+    def __init__(self, path: Path, *, required: bool, lenient: bool = False) -> None:
         """Read the file now.
 
         Args:
             path: The terms file.
             required: Whether a missing file is an error rather than no terms.
+            lenient: Never raise: a file that is not a regular file, or is
+                unreadable or malformed, logs one error and keeps the last
+                good read, which at the start is no terms.
 
         Raises:
-            InputValidationError: the file is required and missing, unreadable,
-                or malformed.
+            InputValidationError: the file is required and missing, or not
+                lenient and unreadable or malformed.
 
         """
         self.path = path
-        self._required = required
+        self._required = required and not lenient
+        self._lenient = lenient
+        self._vocab = Vocab(terms=(), aliases=())
+        self._state: Literal["ok", "missing", "failed"] = "ok"
         self._signature = self._stat()
-        self._vocab = self._read()
+        if lenient:
+            self._reread("serve.terms_read_failed")
+        else:
+            self._vocab = self._read()
 
-    def _stat(self) -> tuple[int, int] | None:
+    def _stat(self) -> tuple[int, int, bool] | None:
         try:
             info = self.path.stat()
         except OSError:
             return None
-        return info.st_mtime_ns, info.st_size
+        return info.st_mtime_ns, info.st_size, stat.S_ISREG(info.st_mode)
 
     def _read(self) -> Vocab:
+        # Opening a FIFO or a device can block the event loop that calls `current`.
+        if self._lenient and self._signature is not None and not self._signature[2]:
+            raise InputValidationError(f"terms file {self.path} is not a regular file")
         try:
             # utf-8-sig: a byte order mark some editors write is not part of a term.
             text = self.path.read_text(encoding="utf-8-sig")
         except FileNotFoundError as exc:
+            self._state = "missing"
             if not self._required:
                 return Vocab(terms=(), aliases=())
             raise InputValidationError(f"terms file {self.path} does not exist") from exc
         # ValueError too: a non-UTF-8 file raises UnicodeDecodeError, not OSError.
         except (OSError, ValueError) as exc:
             raise InputValidationError(f"cannot read terms file {self.path}: {exc}") from exc
-        return parse_terms(text, where=str(self.path))
+        vocab = parse_terms(text, where=str(self.path))
+        self._state = "ok"
+        return vocab
+
+    def _reread(self, event: str) -> None:
+        try:
+            self._vocab = self._read()
+        except InputValidationError as exc:
+            self._state = "failed"
+            _logger().error(event, error=str(exc))
 
     def current(self) -> Vocab:
         """Return the vocabulary, re-reading the file first if it changed.
@@ -296,8 +319,14 @@ class TermsFile:
         signature = self._stat()
         if signature != self._signature:
             self._signature = signature
-            try:
-                self._vocab = self._read()
-            except InputValidationError as exc:
-                _logger().error("serve.terms_reload_failed", error=str(exc))
+            self._reread("serve.terms_reload_failed")
         return self._vocab
+
+    def health(self) -> dict[str, object]:
+        """The file's path, the last read's state, and the terms and aliases in use."""
+        return {
+            "path": str(self.path),
+            "state": self._state,
+            "terms": len(self._vocab.terms),
+            "aliases": len(self._vocab.aliases),
+        }

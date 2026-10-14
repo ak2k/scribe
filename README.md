@@ -213,6 +213,15 @@ means a digit, a capital after a lowercase letter, or punctuation inside it, and
 at least 3 letters and digits; so `TODO`, `c++` and `.bashrc` are sent to xAI but
 never snapped to. Use an alias for those. The file is re-read when it changes.
 
+`--override-terms FILE` names a second file in the same format, yours to edit
+when `--terms` is generated elsewhere: append `heard => written` and the next
+dictation uses it. Its aliases are tried before the terms file's and its terms
+are sent first; a term in both is sent once, spelled as yours spells it. It
+never stops serve: a missing file gives no terms, and one that is malformed,
+over 100 terms or not a regular file logs an error and keeps its last good
+read. serve never writes it. `GET /health` shows its path, state (`ok`,
+`missing` or `failed`) and counts; `result.json` records its term count.
+
 The words in VoiceInk's Dictionary come next, snapped the same way. VoiceInk
 sends them only to its built-in providers, never to a custom model, so serve
 reads them from VoiceInk's store itself on every dictation, never writing to it

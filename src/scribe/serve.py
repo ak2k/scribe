@@ -126,6 +126,7 @@ class KeepRecord(_Record):
     xai_text: str | None
     terms: list[str]
     dictionary_terms: list[str] = []
+    override_terms: int = 0
     session_terms: dict[str, int]
     focus: FocusRecord
     aliases: list[dict[str, str]]
@@ -294,9 +295,11 @@ class _Server:
         keep: Path | None,
         flags: Flags,
         max_bytes: int,
+        override: TermsFile | None,
     ) -> None:
         self.stt = stt
         self.terms = terms
+        self.override = override
         self.sessions = sessions
         self.dictionary = dictionary
         self.keep = keep
@@ -308,6 +311,10 @@ class _Server:
         if self.dictionary is not None:
             await self.dictionary.words()
             dictionary = self.dictionary.health()
+        override = None
+        if self.override is not None:
+            self.override.current()
+            override = self.override.health()
         return JSONResponse(
             {
                 "status": "ok",
@@ -315,6 +322,7 @@ class _Server:
                 "session_terms": self.sessions.health(),
                 "focus": self.sessions.focus_health(),
                 "voiceink_dictionary": dictionary,
+                "override_terms": override,
             }
         )
 
@@ -336,10 +344,13 @@ class _Server:
             return parsed
         fields, audio = parsed
         static = self.terms.current()
+        person = Vocab(terms=(), aliases=()) if self.override is None else self.override.current()
+        # The person's file goes first: its aliases are tried first and its terms survive the cap.
+        files = join(person.terms, static.terms)
         words = () if self.dictionary is None else await self.dictionary.words()
-        joined = join(static.terms, words)
+        joined = join(files, words)
         vocab, session_counts, focus = await self.sessions.vocab(
-            Vocab(terms=joined, aliases=static.aliases)
+            Vocab(terms=joined, aliases=person.aliases + static.aliases)
         )
         workdir = Path(await anyio.to_thread.run_sync(tempfile.mkdtemp))
         dictated: _Dictation | None = None
@@ -369,7 +380,8 @@ class _Server:
             total_ms=total_ms,
             xai_ms=result.xai_ms,
             terms=len(vocab.terms),
-            dictionary_terms=len(joined) - len(static.terms),
+            dictionary_terms=len(joined) - len(files),
+            override_terms=len(person.terms),
             session_terms=sum(session_counts.values()),
             focus=focus.verdict,
             focus_terms=focus.terms,
@@ -384,8 +396,9 @@ class _Server:
             text=result.text,
             xai_text=result.xai_text,
             # On disk a session term would outlive its window, so only the counts are kept.
-            terms=list(static.terms),
-            dictionary_terms=list(joined[len(static.terms) :]),
+            terms=list(files),
+            dictionary_terms=list(joined[len(files) :]),
+            override_terms=len(person.terms),
             session_terms=session_counts,
             focus=FocusRecord(verdict=focus.verdict, terms=focus.terms),
             aliases=[{"heard": alias.heard, "written": alias.written} for alias in vocab.aliases],
@@ -472,6 +485,7 @@ def create_app(
     keep: Path | None,
     flags: Flags,
     max_bytes: int = MAX_UPLOAD_BYTES,
+    override_terms: TermsFile | None = None,
 ) -> Starlette:
     """Build the ASGI app.
 
@@ -483,9 +497,11 @@ def create_app(
         keep: Where dictations are kept, or None to keep nothing.
         flags: The server's settings, recorded with each kept dictation.
         max_bytes: Upload cap, counted as the body streams in.
+        override_terms: A person's terms file, read leniently and ahead of `terms`,
+            or None to read none.
 
     """
-    server = _Server(stt, terms, session_terms, dictionary, keep, flags, max_bytes)
+    server = _Server(stt, terms, session_terms, dictionary, keep, flags, max_bytes, override_terms)
 
     # Closed on shutdown, where SIGTERM lands too: uvicorn re-raises the signal
     # after shutting down, so code after its `run` never sees a launchd stop.
@@ -519,6 +535,7 @@ def run(
     keep: Path | None,
     host: str,
     port: int,
+    override_terms: TermsFile | None = None,
 ) -> None:
     """Serve until interrupted."""
     stt = dictation_client(api_key)
@@ -526,6 +543,7 @@ def run(
         "host": host,
         "port": port,
         "terms": str(terms.path),
+        "override_terms": None if override_terms is None else str(override_terms.path),
         "session_terms": [source.name for source in session_terms.sources],
         "focus": None if session_terms.focus is None else session_terms.focus.name,
         "voiceink_dictionary": None if dictionary is None else str(dictionary.path),
@@ -544,6 +562,7 @@ def run(
             dictionary=dictionary,
             keep=keep,
             flags=flags,
+            override_terms=override_terms,
         ),
         host=host,
         port=port,
