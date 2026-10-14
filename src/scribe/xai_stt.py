@@ -40,8 +40,13 @@ _PER_CALL_LIMITS = httpx.Limits(max_connections=100, max_keepalive_connections=2
 # A kept client's idle connection outlives the pause between two dictations.
 KEPT_ALIVE_SECONDS = 300.0
 # httpcore expires idle connections on the monotonic clock, which on macOS stops
-# while the machine sleeps; the wall clock keeps counting through a sleep.
+# while the machine sleeps; the wall clock keeps counting through a sleep, so the
+# wall clock pulling ahead of the monotonic one is a sleep.
 _wall_clock = time.time
+_monotonic = time.monotonic
+# Awake, the two clocks drift apart by far less than this; a false trigger costs
+# one new connection, while a missed sleep costs a dictation.
+_SLEEP_TOLERANCE_SECONDS = 1.0
 _BODY_EXCERPT_CHARS = 300
 _SAFE_FILENAME_CHARS = re.compile(r"[^A-Za-z0-9._-]+")
 _MAX_UPLOAD_NAME_CHARS = 96
@@ -396,9 +401,9 @@ class XaiStt:
                 connect, write and read waits at most until it, so no request
                 is in flight once it passes. None for no bound.
             keep_alive: Hold one client, and its connections, across calls
-                until `close`, rather than one client per call. A client idle
-                longer than `KEPT_ALIVE_SECONDS` of wall time, a sleep
-                included, is replaced before the next call.
+                until `close`, rather than one client per call. After the
+                machine sleeps, the client is replaced before the next call
+                that no other call overlaps.
             network_backend: Socket layer under a deadline, when `transport`
                 is not given; tests inject an in-memory one.
             attempt_seconds: Longest single connect, write or read wait of an
@@ -420,7 +425,8 @@ class XaiStt:
         # Threads share the kept client, so it is replaced only while no call is using it.
         self._lock = threading.Lock()
         self._in_flight = 0
-        self._idle_since: float | None = None
+        self._clocks_seen: tuple[float, float] | None = None
+        self._slept = False
 
     def _kept_client(self) -> httpx.Client:
         return self._new_client(httpx.Limits(keepalive_expiry=KEPT_ALIVE_SECONDS))
@@ -444,16 +450,13 @@ class XaiStt:
                 yield client
             return
         with self._lock:
+            self._watch_for_sleep()
             # An injected transport holds its own connections, so a new client
             # over it would reuse them; only a client that owns its pool is replaced.
-            if (
-                self._transport is None
-                and self._in_flight == 0
-                and self._idle_since is not None
-                and _wall_clock() - self._idle_since > KEPT_ALIVE_SECONDS
-            ):
+            if self._slept and self._in_flight == 0 and self._transport is None:
                 self._shared.close()
                 self._shared = self._kept_client()
+                self._slept = False
             self._in_flight += 1
             client = self._shared
         try:
@@ -461,7 +464,17 @@ class XaiStt:
         finally:
             with self._lock:
                 self._in_flight -= 1
-                self._idle_since = _wall_clock()
+                self._watch_for_sleep()
+
+    def _watch_for_sleep(self) -> None:
+        """Latch a sleep since the last look; only a replacement of the pool clears it."""
+        seen = (_wall_clock(), _monotonic())
+        if self._clocks_seen is not None:
+            wall = seen[0] - self._clocks_seen[0]
+            awake = seen[1] - self._clocks_seen[1]
+            if wall - awake > _SLEEP_TOLERANCE_SECONDS:
+                self._slept = True
+        self._clocks_seen = seen
 
     def close(self) -> None:
         """Close the kept-alive client, if there is one."""
