@@ -672,12 +672,25 @@ class _Replying(httpcore.NetworkStream):
         return self
 
 
+class _Uploading(_Replying):
+    """A healthy server that takes 50 ms to accept each large chunk of an upload."""
+
+    @override
+    def write(self, buffer: bytes, timeout: float | None = None) -> None:
+        if len(buffer) > 1024:
+            time.sleep(0.05)
+        super().write(buffer, timeout)
+
+
 class _ReplyingBackend(httpcore.NetworkBackend):
     """Connections that stall for the first `stalled` opened, then answer."""
 
-    def __init__(self, wire: _Wire, *, stalled: int = 0) -> None:
+    def __init__(
+        self, wire: _Wire, *, stalled: int = 0, stream: type[_Replying] = _Replying
+    ) -> None:
         self._wire = wire
         self._stalled = stalled
+        self._stream = stream
 
     @override
     def connect_tcp(
@@ -688,7 +701,7 @@ class _ReplyingBackend(httpcore.NetworkBackend):
         local_address: str | None = None,
         socket_options: Iterable[httpcore.SOCKET_OPTION] | None = None,
     ) -> httpcore.NetworkStream:
-        return _Replying(self._wire, stalls=self._wire.opened < self._stalled)
+        return self._stream(self._wire, stalls=self._wire.opened < self._stalled)
 
 
 def _dictation_client(
@@ -720,33 +733,47 @@ def test_a_stalled_attempt_yields_to_a_retry_on_a_new_connection(
     assert elapsed < 1.0
 
 
-def test_a_reply_trickled_past_an_attempts_time_yields_to_a_retry(
+def test_an_upload_slower_than_the_cap_is_one_request(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    closed: list[bool] = []
+    wire = _Wire()
+    client = _dictation_client(
+        monkeypatch, _ReplyingBackend(wire, stream=_Uploading), deadline=1.0
+    )
+    clip = _clip(tmp_path, body=bytes(9 * 64 * 1024))
+
+    try:
+        reply: object = client.transcribe(clip)
+    except ExternalServiceError as exc:
+        reply = exc
+    client.close()
+
+    assert reply == xai_payload()
+    assert wire.requests == [1]
+
+
+def test_a_reply_trickled_past_the_cap_is_not_cut(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    body = json.dumps(xai_payload()).encode()
+    step = len(body) // 5 + 1
 
     class Trickle(httpx.SyncByteStream):
         @override
         def __iter__(self) -> Iterator[bytes]:
-            for _ in range(100):
-                time.sleep(0.02)
-                yield b" "
-
-        @override
-        def close(self) -> None:
-            closed.append(True)
+            for start in range(0, len(body), step):
+                time.sleep(0.1)
+                yield body[start : start + step]
 
     seen: list[httpx.Request] = []
 
-    def trickling_once(request: httpx.Request) -> httpx.Response:
+    def trickling(request: httpx.Request) -> httpx.Response:
         seen.append(request)
-        if len(seen) == 1:
-            return httpx.Response(200, stream=Trickle())
-        return _ok(request)
+        return httpx.Response(200, stream=Trickle())
 
     monkeypatch.setattr(serve, "XAI_DEADLINE_SECONDS", 1.0)
     monkeypatch.setattr(serve, "XAI_ATTEMPT_SECONDS", 0.2, raising=False)
-    client = serve.dictation_client(KEY, transport=httpx.MockTransport(trickling_once))
+    client = serve.dictation_client(KEY, transport=httpx.MockTransport(trickling))
 
     try:
         reply: object = client.transcribe(_clip(tmp_path))
@@ -754,8 +781,7 @@ def test_a_reply_trickled_past_an_attempts_time_yields_to_a_retry(
         reply = exc
 
     assert reply == xai_payload()
-    assert len(seen) == 2
-    assert closed == [True]
+    assert len(seen) == 1
 
 
 def test_a_normal_dictation_is_one_request_on_the_kept_connection(
