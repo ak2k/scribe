@@ -738,9 +738,7 @@ def test_an_upload_slower_than_the_cap_is_one_request(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     wire = _Wire()
-    client = _dictation_client(
-        monkeypatch, _ReplyingBackend(wire, stream=_Uploading), deadline=1.0
-    )
+    client = _dictation_client(monkeypatch, _ReplyingBackend(wire, stream=_Uploading), deadline=1.0)
     clip = _clip(tmp_path, body=bytes(9 * 64 * 1024))
 
     try:
