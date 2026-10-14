@@ -995,3 +995,121 @@ def test_calls_with_no_sleep_between_them_keep_the_pool(
     assert wire.requests == [1, 1, 1, 1]
     assert wire.closed == 0
     client.close()
+
+
+class _SleepWire(_Wire):
+    """A wire that holds chosen replies until released and loses connections in a sleep."""
+
+    def __init__(self, *, held: Iterable[int]) -> None:
+        super().__init__()
+        # Keyed by request, numbered from 1 in the order the requests were sent.
+        self.entered = {number: threading.Event() for number in held}
+        self.release = {number: threading.Event() for number in held}
+        # Connections whose peer dropped them during the sleep: they never answer again.
+        self.dead: set[int] = set()
+
+
+class _Sleeping(_Replying):
+    def __init__(self, wire: _Wire, *, stalls: bool) -> None:
+        super().__init__(wire, stalls=stalls)
+        assert isinstance(wire, _SleepWire)
+        self._sleep_wire = wire
+        self._request = 0
+
+    @override
+    def write(self, buffer: bytes, timeout: float | None = None) -> None:
+        if buffer.startswith(b"POST "):
+            self._request = len(self._sleep_wire.requests) + 1
+        super().write(buffer, timeout)
+
+    @override
+    def read(self, max_bytes: int, timeout: float | None = None) -> bytes:
+        wire = self._sleep_wire
+        if self._request in wire.release:
+            wire.entered[self._request].set()
+            assert wire.release[self._request].wait(5)
+        if self._number in wire.dead:
+            assert timeout is not None
+            time.sleep(timeout)
+            raise httpcore.ReadTimeout
+        return super().read(max_bytes, timeout)
+
+
+def _start_call(client: XaiStt, clip: Path, outcomes: list[object]) -> threading.Thread:
+    def call() -> None:
+        try:
+            outcomes.append(client.transcribe(clip))
+        except ExternalServiceError as exc:
+            outcomes.append(exc)
+
+    thread = threading.Thread(target=call)
+    thread.start()
+    return thread
+
+
+def test_a_call_after_a_sleep_while_another_runs_retries_on_a_new_connection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clocks = _clocks(monkeypatch)
+    wire = _SleepWire(held=(1, 2, 3))
+    client = _dictation_client(monkeypatch, _ReplyingBackend(wire, stream=_Sleeping), deadline=1.0)
+    clip = _clip(tmp_path)
+    outcomes: list[object] = []
+    calls: list[threading.Thread] = []
+    try:
+        for number in (1, 2, 3):
+            calls.append(_start_call(client, clip, outcomes))
+            assert wire.entered[number].wait(5)
+        for number in (1, 2):
+            wire.release[number].set()
+            calls[number - 1].join(5)
+        # The machine sleeps while the third call is in flight; the idle two die.
+        clocks["wall"] += 60
+        wire.dead.update({1, 2})
+
+        try:
+            reply: object = client.transcribe(clip)
+        except ExternalServiceError as exc:
+            reply = exc
+    finally:
+        for event in wire.release.values():
+            event.set()
+        for thread in calls:
+            thread.join(5)
+    client.close()
+
+    assert wire.requests == [1, 2, 3, 1, 4]
+    assert reply == xai_payload()
+
+
+def test_a_call_whose_wait_spans_a_sleep_retries_on_a_new_connection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clocks = _clocks(monkeypatch)
+    wire = _SleepWire(held=(1, 2, 3))
+    client = _dictation_client(monkeypatch, _ReplyingBackend(wire, stream=_Sleeping), deadline=1.0)
+    clip = _clip(tmp_path)
+    outcomes: list[object] = []
+    try:
+        # Two overlapping calls leave two idle connections in the pool.
+        overlapping: list[threading.Thread] = []
+        for number in (1, 2):
+            overlapping.append(_start_call(client, clip, outcomes))
+            assert wire.entered[number].wait(5)
+        for number in (1, 2):
+            wire.release[number].set()
+            overlapping[number - 1].join(5)
+        held = _start_call(client, clip, outcomes)
+        assert wire.entered[3].wait(5)
+        # The machine sleeps while the call waits on its reply; both connections die.
+        clocks["wall"] += 60
+        wire.dead.update({1, 2})
+        wire.release[3].set()
+        held.join(5)
+    finally:
+        for event in wire.release.values():
+            event.set()
+    client.close()
+
+    assert wire.requests == [1, 2, 1, 3]
+    assert outcomes[2] == xai_payload()
