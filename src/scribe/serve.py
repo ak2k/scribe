@@ -55,9 +55,10 @@ XAI_ATTEMPTS = 2
 XAI_DEADLINE_SECONDS = 8.0
 # The longest single socket wait of a first attempt, so a dead connection yields
 # to a retry on a new one: above the slowest answer seen from xAI, 3.4 s, and
-# leaving the retry about three times the 99th-percentile answer time before the
-# deadline. A reply trickled in slowly still runs to the deadline, and a server
-# that thinks longer than this before answering is retried with less time still.
+# leaving the retry 2.9 to 3.8 s before the deadline, 2 to 2.7 times the
+# 99th-percentile answer time. A reply trickled in slowly still runs to the
+# deadline, and a server that thinks longer than this before answering is
+# retried with less time still.
 XAI_ATTEMPT_SECONDS = 4.0
 # Past the xAI budget plus cleanup; a client that stalls mid-upload is cut off then
 # rather than holding off a stop forever.

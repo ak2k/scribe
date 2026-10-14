@@ -417,7 +417,7 @@ class XaiStt:
         self._attempt_seconds = attempt_seconds
         self._network_backend = network_backend or httpcore.SyncBackend()
         self._shared = self._kept_client() if keep_alive else None
-        # Threads share the kept client, so its replacement waits for every call on it.
+        # Threads share the kept client, so it is replaced only while no call is using it.
         self._lock = threading.Lock()
         self._in_flight = 0
         self._idle_since: float | None = None
