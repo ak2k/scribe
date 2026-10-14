@@ -53,6 +53,9 @@ KEEP_NEWEST = 1000
 # A dictation is waited on by someone at a keyboard: two quick tries, never minutes.
 XAI_ATTEMPTS = 2
 XAI_DEADLINE_SECONDS = 8.0
+# Above the slowest answer seen from xAI, 3.4 s, and leaving the retry about
+# three times the 99th-percentile answer time before the deadline.
+XAI_ATTEMPT_SECONDS = 4.0
 # Past the xAI budget plus cleanup; a client that stalls mid-upload is cut off then
 # rather than holding off a stop forever.
 SHUTDOWN_GRACE_SECONDS = 10
@@ -83,6 +86,7 @@ def dictation_client(api_key: str, *, transport: httpx.BaseTransport | None = No
         attempts=XAI_ATTEMPTS,
         deadline_seconds=XAI_DEADLINE_SECONDS,
         keep_alive=True,
+        attempt_seconds=XAI_ATTEMPT_SECONDS,
     )
 
 

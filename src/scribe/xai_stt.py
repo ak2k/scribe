@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import re
 import stat
+import threading
 import time
 import unicodedata
 from contextlib import contextmanager
@@ -38,6 +39,9 @@ _RETRYABLE_STATUSES = frozenset({408, 429, 500, 502, 503, 504})
 _PER_CALL_LIMITS = httpx.Limits(max_connections=100, max_keepalive_connections=20)
 # A kept client's idle connection outlives the pause between two dictations.
 KEPT_ALIVE_SECONDS = 300.0
+# httpcore expires idle connections on the monotonic clock, which on macOS stops
+# while the machine sleeps; the wall clock keeps counting through a sleep.
+_wall_clock = time.time
 _BODY_EXCERPT_CHARS = 300
 _SAFE_FILENAME_CHARS = re.compile(r"[^A-Za-z0-9._-]+")
 _MAX_UPLOAD_NAME_CHARS = 96
@@ -198,6 +202,8 @@ def _post(
     scalars: list[_Part],
     timeout_seconds: float,
     ends_at: float | None,
+    *,
+    retryable: bool = False,
 ) -> httpx.Response:
     """POST one attempt at `/stt`, with `file` as the last multipart field."""
     # A handle per attempt: httpx encodes multipart lazily at send time and
@@ -213,7 +219,7 @@ def _post(
             if ends_at is None:
                 response = client.post("/stt", files=parts, timeout=timeout)
             else:
-                response = _post_until(client, parts, timeout, ends_at)
+                response = _post_until(client, parts, timeout, ends_at, retryable=retryable)
     except OSError as exc:
         raise InputValidationError(f"cannot read audio file {path}: {exc}") from exc
     response.raise_for_status()
@@ -221,16 +227,22 @@ def _post(
 
 
 class _Until(httpx.SyncByteStream):
-    """A reply body that stops at the first chunk arriving past `ends_at`."""
+    """A reply body that stops at the first chunk arriving past `ends_at`.
 
-    def __init__(self, inner: httpx.SyncByteStream, ends_at: float) -> None:
+    `retryable` when `ends_at` ends only this attempt, not the whole call.
+    """
+
+    def __init__(self, inner: httpx.SyncByteStream, ends_at: float, *, retryable: bool) -> None:
         self._inner = inner
         self._ends_at = ends_at
+        self._retryable = retryable
 
     @override
     def __iter__(self) -> Iterator[bytes]:
         for chunk in self._inner:
             if time.monotonic() > self._ends_at:
+                if self._retryable:
+                    raise httpx.ReadTimeout("xAI did not finish its reply within the attempt")
                 raise ExternalServiceError("xAI did not finish its reply before the deadline")
             yield chunk
 
@@ -240,14 +252,20 @@ class _Until(httpx.SyncByteStream):
 
 
 def _post_until(
-    client: httpx.Client, parts: list[_Part], timeout: httpx.Timeout, ends_at: float
+    client: httpx.Client,
+    parts: list[_Part],
+    timeout: httpx.Timeout,
+    ends_at: float,
+    *,
+    retryable: bool,
 ) -> httpx.Response:
     """POST, reading the reply chunk by chunk and closing it once `ends_at` passes."""
     # A read timeout bounds only each wait on the socket, so a reply trickled in
     # slowly would otherwise hold its thread and connection long past the deadline.
     with client.stream("POST", "/stt", files=parts, timeout=timeout) as response:
         # A sync client's reply body is always a sync stream.
-        response.stream = _Until(cast("httpx.SyncByteStream", response.stream), ends_at)
+        stream = cast("httpx.SyncByteStream", response.stream)
+        response.stream = _Until(stream, ends_at, retryable=retryable)
         _ = response.read()
     return response
 
@@ -375,6 +393,7 @@ class XaiStt:
         deadline_seconds: float | None = None,
         keep_alive: bool = False,
         network_backend: httpcore.NetworkBackend | None = None,
+        attempt_seconds: float | None = None,
     ) -> None:
         """Hold request settings; no connection is opened until `transcribe`.
 
@@ -391,9 +410,15 @@ class XaiStt:
                 connect, write and read waits at most until it, so no request
                 is in flight once it passes. None for no bound.
             keep_alive: Hold one client, and its connections, across calls
-                until `close`, rather than one client per call.
+                until `close`, rather than one client per call. A client idle
+                longer than `KEPT_ALIVE_SECONDS` of wall time, a sleep
+                included, is replaced before the next call.
             network_backend: Socket layer under a deadline, when `transport`
                 is not given; tests inject an in-memory one.
+            attempt_seconds: Under a deadline, seconds after which an attempt
+                that is not the last is abandoned as a read timeout, so the
+                retry gets the rest of the deadline on a new connection.
+                None for no cap.
 
         """
         self._api_key = api_key
@@ -403,12 +428,16 @@ class XaiStt:
         self._max_bytes = max_bytes
         self._attempts = attempts
         self._deadline_seconds = deadline_seconds
+        self._attempt_seconds = attempt_seconds
         self._network_backend = network_backend or httpcore.SyncBackend()
-        self._shared = (
-            self._new_client(httpx.Limits(keepalive_expiry=KEPT_ALIVE_SECONDS))
-            if keep_alive
-            else None
-        )
+        self._shared = self._kept_client() if keep_alive else None
+        # Threads share the kept client, so its replacement waits for every call on it.
+        self._lock = threading.Lock()
+        self._in_flight = 0
+        self._idle_since: float | None = None
+
+    def _kept_client(self) -> httpx.Client:
+        return self._new_client(httpx.Limits(keepalive_expiry=KEPT_ALIVE_SECONDS))
 
     def _new_client(self, limits: httpx.Limits = _PER_CALL_LIMITS) -> httpx.Client:
         transport = self._transport
@@ -424,22 +453,40 @@ class XaiStt:
 
     @contextmanager
     def _client(self) -> Generator[httpx.Client]:
-        if self._shared is not None:
-            yield self._shared
+        if self._shared is None:
+            with self._new_client() as client:
+                yield client
             return
-        with self._new_client() as client:
+        with self._lock:
+            # An injected transport holds its own connections, so a new client
+            # over it would reuse them; only a client that owns its pool is replaced.
+            if (
+                self._transport is None
+                and self._in_flight == 0
+                and self._idle_since is not None
+                and _wall_clock() - self._idle_since > KEPT_ALIVE_SECONDS
+            ):
+                self._shared.close()
+                self._shared = self._kept_client()
+            self._in_flight += 1
+            client = self._shared
+        try:
             yield client
+        finally:
+            with self._lock:
+                self._in_flight -= 1
+                self._idle_since = _wall_clock()
 
     def close(self) -> None:
         """Close the kept-alive client, if there is one."""
         if self._shared is not None:
             self._shared.close()
 
-    def _attempt_timeout(self, started: float) -> float:
-        """Per-attempt timeout: the client's, cut to what is left of the deadline."""
-        if self._deadline_seconds is None:
+    def _attempt_timeout(self, ends_at: float | None) -> float:
+        """Per-attempt timeout: the client's, cut to what is left of the attempt."""
+        if ends_at is None:
             return self._timeout_seconds
-        left = self._deadline_seconds - (time.monotonic() - started)
+        left = ends_at - time.monotonic()
         # Never zero, which httpx reads as an immediate timeout on connect.
         return max(min(self._timeout_seconds, left), 0.1)
 
@@ -518,9 +565,23 @@ class XaiStt:
                 # so a retry can otherwise fall due past the deadline.
                 if ends_at is not None and time.monotonic() >= ends_at:
                     raise ExternalServiceError("xAI did not answer before the deadline")
-                token = _ENDS_AT.set(ends_at)
+                attempt_ends = ends_at
+                if (
+                    attempt_ends is not None
+                    and self._attempt_seconds is not None
+                    and attempt.num < self._attempts
+                ):
+                    attempt_ends = min(attempt_ends, time.monotonic() + self._attempt_seconds)
+                token = _ENDS_AT.set(attempt_ends)
                 try:
-                    return _post(client, path, scalars, self._attempt_timeout(started), ends_at)
+                    return _post(
+                        client,
+                        path,
+                        scalars,
+                        self._attempt_timeout(attempt_ends),
+                        attempt_ends,
+                        retryable=attempt_ends != ends_at,
+                    )
                 finally:
                     _ENDS_AT.reset(token)
         raise AssertionError("unreachable: stamina re-raises the last failure")  # pragma: no cover

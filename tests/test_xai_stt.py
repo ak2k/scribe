@@ -720,6 +720,44 @@ def test_a_stalled_attempt_yields_to_a_retry_on_a_new_connection(
     assert elapsed < 1.0
 
 
+def test_a_reply_trickled_past_an_attempts_time_yields_to_a_retry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    closed: list[bool] = []
+
+    class Trickle(httpx.SyncByteStream):
+        @override
+        def __iter__(self) -> Iterator[bytes]:
+            for _ in range(100):
+                time.sleep(0.02)
+                yield b" "
+
+        @override
+        def close(self) -> None:
+            closed.append(True)
+
+    seen: list[httpx.Request] = []
+
+    def trickling_once(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        if len(seen) == 1:
+            return httpx.Response(200, stream=Trickle())
+        return _ok(request)
+
+    monkeypatch.setattr(serve, "XAI_DEADLINE_SECONDS", 1.0)
+    monkeypatch.setattr(serve, "XAI_ATTEMPT_SECONDS", 0.2, raising=False)
+    client = serve.dictation_client(KEY, transport=httpx.MockTransport(trickling_once))
+
+    try:
+        reply: object = client.transcribe(_clip(tmp_path))
+    except ExternalServiceError as exc:
+        reply = exc
+
+    assert reply == xai_payload()
+    assert len(seen) == 2
+    assert closed == [True]
+
+
 def test_a_normal_dictation_is_one_request_on_the_kept_connection(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
