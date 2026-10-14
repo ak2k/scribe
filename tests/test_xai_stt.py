@@ -5,6 +5,7 @@ import json
 import mimetypes
 import os
 import re
+import threading
 import time
 from typing import TYPE_CHECKING, cast, override
 
@@ -847,3 +848,48 @@ def test_a_connection_idle_through_a_sleep_carries_no_dictation(
     assert wire.requests == [1, 2]
     assert wire.closed == 1
     client.close()
+
+
+def test_a_replacement_never_closes_a_connection_a_call_is_using(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    now = [1_000_000.0]
+    monkeypatch.setattr(xai_stt, "_wall_clock", lambda: now[0])
+    wire = _Wire()
+    in_read = threading.Event()
+    release = threading.Event()
+
+    class Held(_Replying):
+        """Holds the reply to the second request on the first connection until released."""
+
+        @override
+        def read(self, max_bytes: int, timeout: float | None = None) -> bytes:
+            if wire.requests == [1, 1]:
+                in_read.set()
+                assert release.wait(5)
+            return super().read(max_bytes, timeout)
+
+    client = XaiStt(
+        KEY,
+        network_backend=_ReplyingBackend(wire, stream=Held),
+        deadline_seconds=8,
+        keep_alive=True,
+    )
+    clip = _clip(tmp_path)
+    client.transcribe(clip)
+    replies: list[dict[str, object]] = []
+    held = threading.Thread(target=lambda: replies.append(client.transcribe(clip)))
+    held.start()
+    try:
+        assert in_read.wait(5)
+        # A call that arrives after a sleep while the one before it is still running.
+        now[0] += KEPT_ALIVE_SECONDS + 1
+        client.transcribe(clip)
+        closed_while_held = wire.closed
+    finally:
+        release.set()
+        held.join(5)
+    client.close()
+
+    assert closed_while_held == 0
+    assert replies == [xai_payload()]
