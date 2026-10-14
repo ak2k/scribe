@@ -847,6 +847,34 @@ async def test_an_xai_outage_is_tried_twice_then_a_502_naming_the_cause(tmp_path
     assert "503" in str(result["cause"])
 
 
+async def test_a_dictation_whose_first_attempt_stalls_is_delivered(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("scribe.serve.XAI_DEADLINE_SECONDS", 1.0)
+    monkeypatch.setattr("scribe.serve.XAI_ATTEMPT_SECONDS", 0.2, raising=False)
+
+    class Stalling(Xai):
+        """An endpoint that holds its first request until the read times out."""
+
+        @override
+        def __call__(self, request: httpx.Request) -> httpx.Response:
+            reply = super().__call__(request)
+            if len(self.seen) == 1:
+                timeouts = cast("dict[str, float]", request.extensions["timeout"])
+                time.sleep(timeouts["read"])
+                raise httpx.ReadTimeout("stalled", request=request)
+            return reply
+
+    xai = Stalling()
+    async with _client(xai, tmp_path) as client:
+        response = await _post(client)
+
+    assert response.status_code == 200
+    assert len(xai.seen) == 2
+    (kept,) = _kept(tmp_path)
+    assert _json(kept / "result.json")["outcome"] == "ok"
+
+
 async def test_a_request_xai_refuses_is_not_retried(tmp_path: Path) -> None:
     xai = Xai(httpx.Response(400, text="bad audio"))
     async with _client(xai, tmp_path) as client:

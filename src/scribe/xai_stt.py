@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import re
 import stat
+import threading
 import time
 import unicodedata
 from contextlib import contextmanager
@@ -38,6 +39,14 @@ _RETRYABLE_STATUSES = frozenset({408, 429, 500, 502, 503, 504})
 _PER_CALL_LIMITS = httpx.Limits(max_connections=100, max_keepalive_connections=20)
 # A kept client's idle connection outlives the pause between two dictations.
 KEPT_ALIVE_SECONDS = 300.0
+# httpcore expires idle connections on the monotonic clock, which on macOS stops
+# while the machine sleeps; the wall clock keeps counting through a sleep, so the
+# wall clock pulling ahead of the monotonic one is a sleep.
+_wall_clock = time.time
+_monotonic = time.monotonic
+# Awake, the two clocks drift apart by far less than this; a false trigger costs
+# one new connection, while a missed sleep costs a dictation.
+_SLEEP_TOLERANCE_SECONDS = 1.0
 _BODY_EXCERPT_CHARS = 300
 _SAFE_FILENAME_CHARS = re.compile(r"[^A-Za-z0-9._-]+")
 _MAX_UPLOAD_NAME_CHARS = 96
@@ -375,6 +384,7 @@ class XaiStt:
         deadline_seconds: float | None = None,
         keep_alive: bool = False,
         network_backend: httpcore.NetworkBackend | None = None,
+        attempt_seconds: float | None = None,
     ) -> None:
         """Hold request settings; no connection is opened until `transcribe`.
 
@@ -391,9 +401,16 @@ class XaiStt:
                 connect, write and read waits at most until it, so no request
                 is in flight once it passes. None for no bound.
             keep_alive: Hold one client, and its connections, across calls
-                until `close`, rather than one client per call.
+                until `close`, rather than one client per call. After the
+                machine sleeps, the client is replaced before the next call
+                that no other call overlaps. A retry runs on a client of its
+                own, never on a kept connection.
             network_backend: Socket layer under a deadline, when `transport`
                 is not given; tests inject an in-memory one.
+            attempt_seconds: Longest single connect, write or read wait of an
+                attempt that is not the last; past it the attempt ends as a
+                transport timeout, and the retry gets the rest of the
+                deadline on a new connection. None for no cap.
 
         """
         self._api_key = api_key
@@ -403,12 +420,17 @@ class XaiStt:
         self._max_bytes = max_bytes
         self._attempts = attempts
         self._deadline_seconds = deadline_seconds
+        self._attempt_seconds = attempt_seconds
         self._network_backend = network_backend or httpcore.SyncBackend()
-        self._shared = (
-            self._new_client(httpx.Limits(keepalive_expiry=KEPT_ALIVE_SECONDS))
-            if keep_alive
-            else None
-        )
+        self._shared = self._kept_client() if keep_alive else None
+        # Threads share the kept client, so it is replaced only while no call is using it.
+        self._lock = threading.Lock()
+        self._in_flight = 0
+        self._clocks_seen: tuple[float, float] | None = None
+        self._slept = False
+
+    def _kept_client(self) -> httpx.Client:
+        return self._new_client(httpx.Limits(keepalive_expiry=KEPT_ALIVE_SECONDS))
 
     def _new_client(self, limits: httpx.Limits = _PER_CALL_LIMITS) -> httpx.Client:
         transport = self._transport
@@ -424,11 +446,36 @@ class XaiStt:
 
     @contextmanager
     def _client(self) -> Generator[httpx.Client]:
-        if self._shared is not None:
-            yield self._shared
+        if self._shared is None:
+            with self._new_client() as client:
+                yield client
             return
-        with self._new_client() as client:
+        with self._lock:
+            self._watch_for_sleep()
+            # An injected transport holds its own connections, so a new client
+            # over it would reuse them; only a client that owns its pool is replaced.
+            if self._slept and self._in_flight == 0 and self._transport is None:
+                self._shared.close()
+                self._shared = self._kept_client()
+                self._slept = False
+            self._in_flight += 1
+            client = self._shared
+        try:
             yield client
+        finally:
+            with self._lock:
+                self._in_flight -= 1
+                self._watch_for_sleep()
+
+    def _watch_for_sleep(self) -> None:
+        """Latch a sleep since the last look; only a replacement of the pool clears it."""
+        seen = (_wall_clock(), _monotonic())
+        if self._clocks_seen is not None:
+            wall = seen[0] - self._clocks_seen[0]
+            awake = seen[1] - self._clocks_seen[1]
+            if wall - awake > _SLEEP_TOLERANCE_SECONDS:
+                self._slept = True
+        self._clocks_seen = seen
 
     def close(self) -> None:
         """Close the kept-alive client, if there is one."""
@@ -518,9 +565,17 @@ class XaiStt:
                 # so a retry can otherwise fall due past the deadline.
                 if ends_at is not None and time.monotonic() >= ends_at:
                     raise ExternalServiceError("xAI did not answer before the deadline")
+                timeout = self._attempt_timeout(started)
+                if self._attempt_seconds is not None and attempt.num < self._attempts:
+                    timeout = min(timeout, self._attempt_seconds)
                 token = _ENDS_AT.set(ends_at)
                 try:
-                    return _post(client, path, scalars, self._attempt_timeout(started), ends_at)
+                    if attempt.num > 1 and self._shared is not None and self._transport is None:
+                        # The kept pool can hold connections that slept through, and
+                        # a retry there would stall as the first attempt did.
+                        with self._new_client() as fresh:
+                            return _post(fresh, path, scalars, timeout, ends_at)
+                    return _post(client, path, scalars, timeout, ends_at)
                 finally:
                     _ENDS_AT.reset(token)
         raise AssertionError("unreachable: stamina re-raises the last failure")  # pragma: no cover
