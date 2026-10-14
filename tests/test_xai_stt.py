@@ -1113,3 +1113,17 @@ def test_a_call_whose_wait_spans_a_sleep_retries_on_a_new_connection(
 
     assert wire.requests == [1, 2, 1, 3]
     assert outcomes[2] == xai_payload()
+
+
+def test_a_retry_leaves_an_injected_transport_open(tmp_path: Path) -> None:
+    replies = iter([httpx.Response(503, text="upstream unavailable")])
+
+    def outage_once(request: httpx.Request) -> httpx.Response:
+        return next(replies, None) or _ok(request)
+
+    transport = _ClosingTransport(outage_once)
+    client = XaiStt(KEY, transport=transport, attempts=2, deadline_seconds=8, keep_alive=True)
+
+    assert client.transcribe(_clip(tmp_path)) == xai_payload()
+    assert transport.closed == 0
+    client.close()
