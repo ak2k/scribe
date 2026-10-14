@@ -272,6 +272,7 @@ async def test_health_counts_each_source_without_terms_or_session_ids(tmp_path: 
         ],
         "focus": None,
         "voiceink_dictionary": None,
+        "override_terms": None,
     }
     for secret in ("local_a", "kbx25", "b_term", "a-s", "b-s", "local-s", "A tab", "/w"):
         assert secret not in response.text
