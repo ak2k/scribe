@@ -403,7 +403,8 @@ class XaiStt:
             keep_alive: Hold one client, and its connections, across calls
                 until `close`, rather than one client per call. After the
                 machine sleeps, the client is replaced before the next call
-                that no other call overlaps.
+                that no other call overlaps. A retry runs on a client of its
+                own, never on a kept connection.
             network_backend: Socket layer under a deadline, when `transport`
                 is not given; tests inject an in-memory one.
             attempt_seconds: Longest single connect, write or read wait of an
@@ -569,6 +570,11 @@ class XaiStt:
                     timeout = min(timeout, self._attempt_seconds)
                 token = _ENDS_AT.set(ends_at)
                 try:
+                    if attempt.num > 1 and self._shared is not None and self._transport is None:
+                        # The kept pool can hold connections that slept through, and
+                        # a retry there would stall as the first attempt did.
+                        with self._new_client() as fresh:
+                            return _post(fresh, path, scalars, timeout, ends_at)
                     return _post(client, path, scalars, timeout, ends_at)
                 finally:
                     _ENDS_AT.reset(token)
