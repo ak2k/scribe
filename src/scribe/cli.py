@@ -2204,6 +2204,12 @@ def serve_command(
         metavar="FILE",
         help="Terms file. Default: $XDG_CONFIG_HOME/scribe/terms.txt, if it exists.",
     ),
+    override_terms: Path | None = typer.Option(
+        None,
+        "--override-terms",
+        metavar="FILE",
+        help="Your own terms file, ahead of --terms; never fatal, re-read when it changes.",
+    ),
     keep: Path | None = typer.Option(
         None,
         "--keep",
@@ -2249,6 +2255,11 @@ def serve_command(
     The words in VoiceInk's Dictionary, read afresh for each dictation, follow
     the file's terms and come before any session's. VoiceInk sends them to its
     built-in providers only, never to a custom model such as this one.
+
+    An --override-terms file, in the same format, comes before the terms file:
+    its aliases are tried first and its terms are sent first. A missing or bad
+    one never stops the server; a bad edit keeps its last good read, and
+    GET /health shows its state.
     """
     # Imported here so no other command pays for loading the server stack.
     from scribe import focus, session_sources, voiceink  # noqa: PLC0415  # see above
@@ -2301,4 +2312,7 @@ def serve_command(
         keep=None if no_keep else keep or state / "serve",
         host=host,
         port=port,
+        override_terms=None
+        if override_terms is None
+        else TermsFile(override_terms, required=False, lenient=True),
     )

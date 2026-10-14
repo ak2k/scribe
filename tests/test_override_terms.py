@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import threading
+from contextlib import suppress
 from typing import TYPE_CHECKING, cast
 
 import anyio
@@ -20,8 +21,8 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
     from pathlib import Path
 
-    from click.testing import Result
     from starlette.types import ASGIApp
+    from typer.testing import Result
 
     from scribe.xai_stt import XaiStt
 
@@ -129,7 +130,7 @@ def _replace(path: Path, text: str) -> None:
     """Write `text` beside `path`, then rename it over `path`, as an editor saving atomically."""
     staged = path.with_name(path.name + ".new")
     staged.write_text(text, encoding="utf-8")
-    os.replace(staged, path)
+    staged.replace(path)
 
 
 def _override(served: Served) -> dict[str, object]:
@@ -202,13 +203,12 @@ def _fifo(path: Path) -> None:
 
 def _unblock(path: Path) -> None:
     """Give a reader blocked on the FIFO `path` an end of file."""
-    try:
+    # No reader waiting means nothing is blocked, and the open fails.
+    with suppress(OSError):
         os.close(os.open(path, os.O_WRONLY | os.O_NONBLOCK))
-    except OSError:
-        pass
 
 
-PERSON_STATES: dict[str, Callable[[Path], None]] = {
+PERSON_STATES: dict[str, Callable[[Path], object]] = {
     "malformed": lambda path: path.write_text("ok\nbad =>\n", encoding="utf-8"),
     "over the limit": lambda path: path.write_text(
         "".join(f"t{n}\n" for n in range(101)), encoding="utf-8"
@@ -329,26 +329,22 @@ def test_a_bad_reread_is_logged_once(served: Served) -> None:
     assert f"{served.person}:2" in str(errors[0]["error"])  # pyright: ignore[reportAny]  # captured log values are Any
 
 
-@pytest.mark.parametrize(
-    "edit",
-    [
-        pytest.param(
-            lambda path: path.write_text(GOOD + "Omega\nOmicron => Omega\n", encoding="utf-8"),
-            id="rewrite",
-        ),
-        pytest.param(
-            lambda path: _replace(path, GOOD + "Omega\nOmicron => Omega\n"), id="atomic replace"
-        ),
-    ],
-)
+EDITED = GOOD + "Omega\nOmicron => Omega\n"
+PERSON_EDITS: dict[str, Callable[[Path], object]] = {
+    "rewrite": lambda path: path.write_text(EDITED, encoding="utf-8"),
+    "atomic replace": lambda path: _replace(path, EDITED),
+}
+
+
+@pytest.mark.parametrize("edit", list(PERSON_EDITS))
 def test_an_edit_to_the_person_file_is_in_effect_on_the_next_dictation(
-    served: Served, edit: Callable[[Path], None]
+    served: Served, edit: str
 ) -> None:
     served.person.write_text(GOOD, encoding="utf-8")
     assert served.start().exit_code == 0
     served.dictate()
 
-    edit(served.person)
+    PERSON_EDITS[edit](served.person)
     served.dictate()
 
     assert served.keyterms() == ["Zeta", "Omega", "herdr", "Alpha"]
