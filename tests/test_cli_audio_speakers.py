@@ -538,7 +538,10 @@ def test_a_run_directory_that_cannot_be_removed_keeps_the_answer_already_read(
     refused: list[str] = []
 
     def refuse(
-        path: str, *, onexc: Callable[[Callable[..., object], str, BaseException], object]
+        path: str,
+        *,
+        onexc: Callable[[Callable[..., object], str, BaseException], object],
+        **_ignored: object,  # newer tempfile releases also pass dir_fd and _onexc_kwargs
     ) -> None:
         # The directory still holds the run's files, so this fails as a removal can;
         # rmtree reports such a failure to `onexc`, inside the handler.
