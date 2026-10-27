@@ -187,29 +187,29 @@ Record your microphone and the call app to two files, and `scribe merge` puts
 the two transcripts back together. Every word from your microphone is labeled
 as yours (`Me`, or the name `--me` gives), and the call app's speakers keep
 their own labels. Sound from your speakers can reach the microphone, so a
-microphone word is dropped as a copy when the call app has the same word
-starting within 0.25 s of it (rule `bleed-1`). Nothing is retimed.
+microphone word is dropped when a call app word with the same text, not
+already matched to another, starts within 0.25 s of it (rule `bleed-1`).
 
 Audio Hijack, a paid macOS app from Rogue Amoeba for macOS 14.4 or later,
-records the two files. On first launch it asks for System Audio Access, and it
-asks for Microphone Access the first time a session records from an input
-device. Make one session per call app (Zoom, Microsoft Teams, or Google Chrome
-for Google Meet), with two chains:
+records the two files. Make one session per call app (Zoom, Microsoft Teams,
+or Google Chrome for Google Meet), with two chains:
 
-- an Application block set to the call app, with Include audio input
-  unchecked, into a Recorder block: the far side;
-- an Input Device block set to the built-in microphone, into a second Recorder
-  block: your side.
+- an Application block set to the call app, with Include audio input and Split
+  between channels off, into a Recorder block and then an Output Device block,
+  so you still hear the call: the far side;
+- an Input Device block set to the microphone you speak into, built in or a
+  headset, into a second Recorder block: your side.
 
-In each Recorder, under Advanced Format Options, pick Apple Lossless with the
-.mp4 container: it is lossless, and Rogue Amoeba's formats page says the .mp4
-container saves audio continuously, so a crash keeps what was recorded; .m4a
-does not. Save both to one folder, and give the two Recorders file names that
-tell the sides apart (both default to the session's name and the time). Run
-starts both recordings and Stop ends both, so the files cover the same span.
-A browser's tabs cannot be captured one at a time, so for Meet in Chrome,
-close the other tabs that play sound; Safari's Add to Dock instead makes a site
-its own app, which an Application block can capture alone.
+In each Recorder's Quality menu or Advanced Format Options, pick AAC at a high
+bitrate with the .mp4 container. An hour of AAC stays far under the 500 MB
+that `transcribe` accepts, and speech to text is no more accurate on a
+lossless recording. Rogue Amoeba's formats page says the .mp4 container saves
+audio continuously, so a crash does not lose the recording, and .m4a does less
+to protect against one. Give the two Recorders file names that tell the sides
+apart. Run starts both recordings and Stop ends both, so the files cover the
+same span. A browser's tabs cannot be captured one at a time, so for Meet in
+Chrome, close the other tabs that play sound; Safari's Add to Dock instead
+makes a site its own app, which an Application block can capture alone.
 
 ```bash
 scribe transcribe call-mic.mp4 --no-diarize   # writes call-mic.transcript.json
@@ -220,8 +220,7 @@ scribe turns call-mic.merged.json
 
 `merge` gives every microphone word one speaker, so that side needs no
 diarization; the call app side keeps it, since its speakers are the ones
-`merge` keeps apart. `transcribe` uploads each file to xAI as it is, and
-refuses one over 500 MB.
+`merge` keeps apart. `transcribe` uploads each file to xAI as it is.
 
 `merge` takes the microphone's transcript first. It refuses two transcripts
 whose durations differ by more than 2 s, as not two sides of one call. Files
