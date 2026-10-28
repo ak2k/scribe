@@ -1,15 +1,16 @@
 // Run by an Audio Hijack session automation on the Session Stop event.
-// Transcribes the newest "mic" and "app" recordings of this session and merges them.
+// Transcribes the newest "mic" recording of this session and its "app" partner and merges them.
 // #needsSession
 const log = '"$HOME/Library/Logs/scribe-call.log"';
 const q = (s) => app.shellEscapeArgument(s);
 const stem = (r) => r.fileName.replace(/\.[^.]*$/, "");
-const newest = (suffix) =>
-  event.session.recordings
-    .filter((r) => stem(r).endsWith(suffix))
-    .sort((a, b) => new Date(b.creationDate) - new Date(a.creationDate))[0];
-const mic = newest("mic");
-const far = newest("app");
+// A second run in the same minute is named "... mic 2" and "... app 2".
+const MIC = / mic( \d+)?$/;
+const recs = event.session.recordings;
+const mic = recs
+  .filter((r) => MIC.test(stem(r)))
+  .sort((a, b) => new Date(b.creationDate) - new Date(a.creationDate))[0];
+const far = mic && recs.find((r) => stem(r) === stem(mic).replace(MIC, " app$1"));
 app.runShellCommand(
   "echo \"$(date) stop: mic=\"" + q(mic ? mic.filePath : "none") + "\" app=\"" + q(far ? far.filePath : "none") +
     " >> " + log
