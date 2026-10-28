@@ -251,7 +251,7 @@
 		<key>geDocumentVersion</key>
 		<string>0.1.0</string>
 		<key>manualConnectionMode</key>
-		<false/>
+		<true/>
 		<key>sampleRate</key>
 		<integer>0</integer>
 	</dict>
