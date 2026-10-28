@@ -1,0 +1,37 @@
+// Run by an Audio Hijack session automation on the Session Stop event.
+// Transcribes the newest "mic" recording of this session and its "app" partner, merges them and
+// writes the merged transcript as speaker turns.
+// #needsSession
+const log = '"$HOME/Library/Logs/scribe-call.log"';
+const q = (s) => app.shellEscapeArgument(s);
+const stem = (r) => r.fileName.replace(/\.[^.]*$/, "");
+// A second run in the same minute is named "... mic 2" and "... app 2".
+const MIC = / mic( \d+)?$/;
+const recs = event.session.recordings;
+const mic = recs
+  .filter((r) => MIC.test(stem(r)))
+  .sort((a, b) => new Date(b.creationDate) - new Date(a.creationDate))[0];
+const far = mic && recs.find((r) => stem(r) === stem(mic).replace(MIC, " app$1"));
+app.runShellCommand(
+  "printf '%s stop: mic=%s app=%s\\n' \"$(date)\" " + q(mic ? mic.filePath : "none") + " " +
+    q(far ? far.filePath : "none") + " >> " + log
+);
+if (mic && far) {
+  // runShellCommand blocks Audio Hijack until it returns, so the work runs detached. It skips a
+  // pair already merged: a stop that made no new mic recording picks the previous call again.
+  // An app's PATH lacks the directories a login shell adds, where scribe and the tools it runs
+  // (claude, uvx) are installed. No shell profile is read either, so the scribe found here must
+  // supply XAI_API_KEY itself, such as a wrapper script that reads the key from a file and runs
+  // scribe.
+  const work =
+    "[ -e \"${1%.*}.merged.json\" ] && { printf '%s skip: %s is already merged\\n' \"$(date)\" \"$1\"; exit 0; }; " +
+    "PATH=\"$HOME/.local/bin:/etc/profiles/per-user/$USER/bin:$HOME/.nix-profile/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin\"; export PATH; " +
+    "scribe transcribe \"$1\" --no-diarize && scribe transcribe \"$2\" && " +
+    "scribe merge \"${1%.*}.transcript.json\" \"${2%.*}.transcript.json\" && " +
+    "scribe turns \"${1%.*}.merged.json\"; " +
+    "s=$?; printf '%s end %s: %s\\n' \"$(date)\" \"$s\" \"$1\"";
+  app.runShellCommand(
+    "nohup /bin/sh -c " + q(work) + " sh " + q(mic.filePath) + " " + q(far.filePath) +
+      " < /dev/null >> " + log + " 2>&1 &"
+  );
+}
