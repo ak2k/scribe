@@ -1,5 +1,6 @@
 // Run by an Audio Hijack session automation on the Session Stop event.
-// Transcribes the newest "mic" recording of this session and its "app" partner and merges them.
+// Transcribes the newest "mic" recording of this session and its "app" partner, merges them and
+// writes the merged transcript as speaker turns.
 // #needsSession
 const log = '"$HOME/Library/Logs/scribe-call.log"';
 const q = (s) => app.shellEscapeArgument(s);
@@ -12,18 +13,23 @@ const mic = recs
   .sort((a, b) => new Date(b.creationDate) - new Date(a.creationDate))[0];
 const far = mic && recs.find((r) => stem(r) === stem(mic).replace(MIC, " app$1"));
 app.runShellCommand(
-  "echo \"$(date) stop: mic=\"" + q(mic ? mic.filePath : "none") + "\" app=\"" + q(far ? far.filePath : "none") +
-    " >> " + log
+  "printf '%s stop: mic=%s app=%s\\n' \"$(date)\" " + q(mic ? mic.filePath : "none") + " " +
+    q(far ? far.filePath : "none") + " >> " + log
 );
 if (mic && far) {
-  // runShellCommand blocks Audio Hijack until it returns, so the work runs detached. An app's
-  // PATH lacks the user's profile, where transcribe finds the claude CLI it picks with. No shell
-  // profile is read either, so the scribe found here must supply XAI_API_KEY itself, for
-  // example a wrapper script that reads the key from a file and runs scribe.
+  // runShellCommand blocks Audio Hijack until it returns, so the work runs detached. A stop that
+  // made no new mic recording picks the previous call again, so a pair already merged is skipped.
+  // An app's PATH lacks the directories a login shell adds, where scribe and the tools it runs
+  // (claude, uvx) are installed. No shell profile is read either, so the scribe found here must
+  // supply XAI_API_KEY itself, for example a wrapper script that reads the key from a file and
+  // runs scribe.
   const work =
+    "[ -e \"${1%.*}.merged.json\" ] && { printf '%s skip: %s is already merged\\n' \"$(date)\" \"$1\"; exit 0; }; " +
     "PATH=\"$HOME/.local/bin:/etc/profiles/per-user/$USER/bin:$HOME/.nix-profile/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin\"; export PATH; " +
     "scribe transcribe \"$1\" --no-diarize && scribe transcribe \"$2\" && " +
-    "scribe merge \"${1%.*}.transcript.json\" \"${2%.*}.transcript.json\"";
+    "scribe merge \"${1%.*}.transcript.json\" \"${2%.*}.transcript.json\" && " +
+    "scribe turns \"${1%.*}.merged.json\"; " +
+    "s=$?; printf '%s end %s: %s\\n' \"$(date)\" \"$s\" \"$1\"";
   app.runShellCommand(
     "nohup /bin/sh -c " + q(work) + " sh " + q(mic.filePath) + " " + q(far.filePath) +
       " < /dev/null >> " + log + " 2>&1 &"
