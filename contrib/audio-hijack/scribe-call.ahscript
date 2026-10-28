@@ -1,4 +1,4 @@
-// Audio Hijack, session Automations: Session Stop -> Run this script.
+// Run by an Audio Hijack session automation on the Session Stop event.
 // Transcribes the newest "mic" and "app" recordings of this session and merges them.
 // #needsSession
 const log = '"$HOME/Library/Logs/scribe-call.log"';
