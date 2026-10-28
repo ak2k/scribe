@@ -17,12 +17,12 @@ app.runShellCommand(
     q(far ? far.filePath : "none") + " >> " + log
 );
 if (mic && far) {
-  // runShellCommand blocks Audio Hijack until it returns, so the work runs detached. A stop that
-  // made no new mic recording picks the previous call again, so a pair already merged is skipped.
+  // runShellCommand blocks Audio Hijack until it returns, so the work runs detached. It skips a
+  // pair already merged: a stop that made no new mic recording picks the previous call again.
   // An app's PATH lacks the directories a login shell adds, where scribe and the tools it runs
   // (claude, uvx) are installed. No shell profile is read either, so the scribe found here must
-  // supply XAI_API_KEY itself, for example a wrapper script that reads the key from a file and
-  // runs scribe.
+  // supply XAI_API_KEY itself, such as a wrapper script that reads the key from a file and runs
+  // scribe.
   const work =
     "[ -e \"${1%.*}.merged.json\" ] && { printf '%s skip: %s is already merged\\n' \"$(date)\" \"$1\"; exit 0; }; " +
     "PATH=\"$HOME/.local/bin:/etc/profiles/per-user/$USER/bin:$HOME/.nix-profile/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin\"; export PATH; " +
