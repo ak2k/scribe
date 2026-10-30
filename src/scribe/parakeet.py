@@ -613,9 +613,18 @@ class ParakeetCpp:
         return _Tools(cli=cli, model=model, ffmpeg=ffmpeg, threads=_threads())
 
     def inputs(self) -> dict[str, Path]:
-        """The model file, once `resolve` has found it."""
+        """The file the model setting names, whether or not `resolve` has checked it."""
         setting = os.environ.get(MODEL_SETTING)
-        return {"the Parakeet model": Path(setting)} if setting else {}
+        if not setting:
+            return {}
+        model = Path(setting)
+        try:
+            model.resolve().exists()
+        # A link that loops or a name too long is no file an output can land on;
+        # planning against it would raise, where `resolve` reports it properly.
+        except (OSError, RuntimeError):
+            return {}
+        return {"the Parakeet model": model}
 
     def _check_length(self, seconds: int, pieces: int) -> None:
         heard = seconds + (pieces - 1) * _OVERLAP_SECONDS

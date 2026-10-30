@@ -387,6 +387,9 @@ def transcribe(
         inputs = {"the audio file": audio_path}
         if keyterm_file is not None:
             inputs["the --keyterm-file"] = keyterm_file
+        # Parakeet reads these later, so every output's plan has to see them first.
+        if cross_check or vote_engines:
+            inputs |= parakeet_backend().inputs()
     except AppError as exc:
         _fail(exc)
 
@@ -484,7 +487,7 @@ def _cross_check(
     try:
         kept: Path | None = plan_outputs(
             {label: sibling(out, ".parakeet.json")},
-            {"--out": out, **inputs, **backend.inputs()},
+            {"--out": out, **inputs},
         )[label]
     # OSError and RuntimeError too: a name too long to look up, or a link that loops.
     except (AppError, OSError, RuntimeError) as exc:
