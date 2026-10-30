@@ -117,7 +117,7 @@ def _merged(tmp_path: Path) -> Path:
     [
         pytest.param("missing", "cannot read transcript", id="missing"),
         pytest.param("not-a-transcript", "is not a transcript", id="not-a-transcript"),
-        pytest.param("no-words", "has no words", id="no-words"),
+        pytest.param("no-words", "neither has words", id="no-words"),
         pytest.param("merged", "merges two tracks already", id="merged"),
         pytest.param("same-file", "are one transcript", id="same-file"),
         pytest.param("skew", "30.0 s and APP", id="skew"),
@@ -142,6 +142,7 @@ def test_a_refused_merge_exits_two_and_writes_nothing(
     elif case == "not-a-transcript":
         app_path.write_text('{"text": "hi"}', encoding="utf-8")
     elif case == "no-words":
+        _write(mic)
         _write(app_path)
     elif case == "merged":
         shutil.copy(_merged(tmp_path), app_path)
@@ -166,6 +167,82 @@ def test_a_refused_merge_exits_two_and_writes_nothing(
     assert result.stderr.count("\n") == 1
     assert result.stdout == ""
     assert _snapshot(tmp_path) == before
+
+
+def test_a_wordless_app_side_keeps_every_mic_word_as_the_operators(tmp_path: Path) -> None:
+    said = [("Hello", 0.2), ("anyone", 1.0), ("there?", 1.4)]
+    mic = _write(tmp_path / "call.mic.json", *said, speaker=1)
+    app_path = _write(tmp_path / "call.app.json")
+    out = tmp_path / "merged.json"
+
+    result = runner.invoke(app, ["merge", str(mic), str(app_path), "--out", str(out)])
+
+    assert result.exit_code == 0, result.output
+    assert result.stdout == f"{out}\n"
+    assert f"APP {app_path} has no words" in result.stderr
+    assert result.stderr.count("\n") == 2
+    merged = Transcript.load(out)
+    assert merged.tracks is not None
+    assert merged.tracks[0].label == "Me"
+    assert [(w.text, w.start, w.speaker, w.track) for w in merged.words] == [
+        (text, start, 0, 0) for text, start in said
+    ]
+    assert merged.engine.params["merge_mic_words"] == len(said)
+    assert merged.engine.params["merge_app_words"] == 0
+
+
+def test_a_wordless_mic_side_keeps_every_app_word_with_its_speaker(tmp_path: Path) -> None:
+    said = [("we", 1.0), ("can", 1.3), ("ship", 1.6)]
+    mic = _write(tmp_path / "call.mic.json", speaker=1)
+    app_path = _write(tmp_path / "call.app.json", *said, speaker=4)
+    out = tmp_path / "merged.json"
+
+    result = runner.invoke(app, ["merge", str(mic), str(app_path), "--out", str(out)])
+
+    assert result.exit_code == 0, result.output
+    assert result.stdout == f"{out}\n"
+    assert f"MIC {mic} has no words" in result.stderr
+    assert result.stderr.count("\n") == 2
+    merged = Transcript.load(out)
+    assert merged.tracks is not None
+    assert [(w.text, w.start, w.speaker, w.track) for w in merged.words] == [
+        (text, start, 4, 1) for text, start in said
+    ]
+    assert merged.engine.params["merge_mic_words"] == 0
+    assert merged.engine.params["merge_app_words"] == len(said)
+
+
+def test_two_wordless_sides_exit_two_naming_both(tmp_path: Path) -> None:
+    mic = _write(tmp_path / "call.mic.json")
+    app_path = _write(tmp_path / "call.app.json")
+    # Bytes that differ, so the one-transcript refusal cannot be the one answering.
+    assert mic.read_bytes() != app_path.read_bytes()
+    before = _snapshot(tmp_path)
+
+    result = runner.invoke(app, ["merge", str(mic), str(app_path)])
+
+    assert result.exit_code == 2
+    assert f"MIC {mic} and APP {app_path}" in result.stderr
+    assert "neither has words" in result.stderr
+    assert result.stderr.count("\n") == 1
+    assert result.stdout == ""
+    assert _snapshot(tmp_path) == before
+
+
+def test_turns_holds_every_word_of_a_call_with_one_wordless_side(tmp_path: Path) -> None:
+    said = [("Hello", 0.2), ("anyone", 1.0), ("there?", 1.4), ("Guess", 5.0), ("not.", 5.3)]
+    mic = _write(tmp_path / "call.mic.json", *said, speaker=1)
+    app_path = _write(tmp_path / "call.app.json")
+    out = tmp_path / "merged.json"
+    merged = runner.invoke(app, ["merge", str(mic), str(app_path), "--out", str(out)])
+    assert merged.exit_code == 0, merged.output
+
+    result = runner.invoke(
+        app, ["turns", str(out), "--no-llm-speakers", "--no-audio-speakers", "--stdout"]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert all(text in result.stdout for text, _ in said)
 
 
 @pytest.mark.parametrize(
