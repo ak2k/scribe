@@ -56,7 +56,7 @@ from scribe.fidelity import check_fidelity
 from scribe.gaps import check_gaps, clock, format_gap
 from scribe.log import configure
 from scribe.outputs import plan_outputs, prove_writable, sibling
-from scribe.parakeet import ParakeetMlx
+from scribe.parakeet import parakeet_backend
 from scribe.pick import (
     DEFAULT_PICK_MODEL,
     GUARDED_DROP,
@@ -319,15 +319,19 @@ def transcribe(
     each engine's own is written beside it as soon as that engine finishes, as
     BASE.parakeet.json, BASE.xai.json and BASE.gemini.json, where BASE is --out
     less .transcript.json or .json. A failed engine exits 2 and keeps those
-    already written. --vote needs Apple silicon, uvx, ffmpeg and ffprobe on PATH,
+    already written. --vote needs what `scribe parakeet` needs (uvx on Apple
+    silicon, parakeet-cli and its model elsewhere), ffmpeg and ffprobe on PATH,
     and GEMINI_API_KEY besides XAI_API_KEY; the audio goes to xAI and to Google.
     It costs xAI about $0.10 and Gemini about $0.55 per audio hour, Gemini's part
-    capped by --max-usd. A first Parakeet run downloads a ~1.2 GB model.
+    capped by --max-usd. A first Parakeet run on Apple silicon downloads a
+    ~1.2 GB model.
 
     Unless --no-cross-check is given, Parakeet TDT v3 then transcribes the
-    audio locally, about 45 s per audio hour on Apple silicon (a first run
-    downloads a ~1.2 GB model), and its transcript goes beside --out as
-    BASE.parakeet.json. Where 3 or more of xAI's words in a row are each more
+    audio locally: on Apple silicon with parakeet-mlx, about 45 s per audio
+    hour (a first run downloads a ~1.2 GB model); elsewhere with parakeet-cli,
+    6 to 28 min per audio hour on 8 CPU threads, as `scribe parakeet`
+    describes. Its transcript goes beside --out as BASE.parakeet.json.
+    Where 3 or more of xAI's words in a row are each more
     than 2 s from where Parakeet heard them, they first move to Parakeet's
     times, and each run moved is printed. Where xAI's words then have a hole
     of 2 s or more in which Parakeet heard at least 3 words xAI has nowhere
@@ -383,6 +387,9 @@ def transcribe(
         inputs = {"the audio file": audio_path}
         if keyterm_file is not None:
             inputs["the --keyterm-file"] = keyterm_file
+        # Parakeet reads these later, so every output's plan has to see them first.
+        if cross_check or vote_engines:
+            inputs |= parakeet_backend().inputs()
     except AppError as exc:
         _fail(exc)
 
@@ -409,7 +416,7 @@ def transcribe(
                     destination,
                     inputs,
                     xai=xai,
-                    parakeet=ParakeetMlx(),
+                    parakeet=parakeet_backend(),
                     max_usd=gemini_stt.DEFAULT_MAX_USD if max_usd is None else max_usd,
                     report=_progress,
                     fill=cross_check,
@@ -476,21 +483,19 @@ def _cross_check(
 
     """
     label = "the Parakeet transcript"
+    backend = parakeet_backend()
     try:
         kept: Path | None = plan_outputs(
-            {label: sibling(out, ".parakeet.json")}, {"--out": out, **inputs}
+            {label: sibling(out, ".parakeet.json")},
+            {"--out": out, **inputs},
         )[label]
     # OSError and RuntimeError too: a name too long to look up, or a link that loops.
     except (AppError, OSError, RuntimeError) as exc:
         _warn(f"not keeping Parakeet's transcript: {exc}")
         kept = None
     try:
-        backend = ParakeetMlx()
         backend.resolve()
-        _warn(
-            "cross-checking against Parakeet, run locally "
-            "(about 45 s per audio hour; a first run downloads a ~1.2 GB model)"
-        )
+        _warn(f"cross-checking against Parakeet, run locally ({backend.pace})")
         reference = backend.transcribe(audio, source=transcript.source)
         # Filled from no words, every hole would be reported clear without being checked.
         if transcript.words and not reference.words:
@@ -2042,31 +2047,40 @@ def parakeet(
         help="Where to write the transcript. Default: AUDIO's stem plus .parakeet.json, beside it.",
     ),
 ) -> None:
-    """Transcribe an audio file locally with Parakeet TDT v3, on Apple silicon.
+    """Transcribe an audio file locally with Parakeet TDT v3.
 
-    Runs parakeet-mlx 0.5.2 through `uvx`, which must be on PATH; nothing is
-    uploaded and no key is needed. The first run downloads the package and a
-    ~1.2 GB model and can take minutes. A run is stopped after 60 minutes.
-    The words carry timings but no speakers.
+    On Apple silicon, runs parakeet-mlx 0.5.2 through `uvx`, which must be on
+    PATH; the first run downloads the package and a ~1.2 GB model and can take
+    minutes. Elsewhere, runs whisper.cpp's parakeet-cli, found on PATH or at
+    SCRIBE_PARAKEET_CLI, on the ggml model file SCRIBE_PARAKEET_MODEL names
+    (an absolute path; nothing is downloaded), after ffmpeg, which must be on
+    PATH, converts the audio. It takes 6 to 28 min per audio hour on 8 CPU
+    threads, by the machine's load, and more per hour under 11 min of audio
+    (5 min of audio took 1.5 to 5 min); SCRIBE_PARAKEET_THREADS sets the
+    count, which is at most 8 unless set. parakeet-cli holds all the audio it
+    is given in memory, about 15 GB for 31 min, and heard no words in an hour
+    of audio, so audio over 31 min goes to it in overlapping pieces of at most
+    30 min, one at a time. Audio it could not finish within the run's limit at
+    its slow pace, about 2.1 h, is refused before it runs. Either way nothing
+    is uploaded and no key is needed. A run is stopped after 60 minutes. The
+    words carry timings but no speakers.
     """
     started = time.monotonic()
     try:
-        backend = ParakeetMlx()
+        backend = parakeet_backend()
         backend.resolve()
         # Before the hash opens it: reading a FIFO or a character device blocks.
         check_input(audio_path, sys.maxsize)
         destination = (
             audio_path.with_name(f"{audio_path.stem}.parakeet.json") if out is None else out
         )
-        plan = plan_outputs({"--out": destination}, {"the audio file": audio_path})
+        plan = plan_outputs(
+            {"--out": destination}, {"the audio file": audio_path, **backend.inputs()}
+        )
         # A first run can take minutes, and an unwritable output would discard it.
         prove_writable(plan)
         source = Source(kind="audio", ref=str(audio_path), sha256=_sha256(audio_path))
-        typer.echo(
-            "running parakeet-mlx locally; a first run downloads a ~1.2 GB model "
-            "and can take minutes",
-            err=True,
-        )
+        typer.echo(backend.notice, err=True)
         transcript = backend.transcribe(audio_path, source=source)
         try:
             transcript.dump(plan["--out"])

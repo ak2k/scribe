@@ -25,7 +25,7 @@ if TYPE_CHECKING:
     import httpx
 
     from scribe.gemini_stt import Runner
-    from scribe.parakeet import ParakeetMlx
+    from scribe.parakeet import ParakeetBackend
     from scribe.schema import Source, Transcript
 
 _OUT = "--out"
@@ -60,7 +60,7 @@ def transcribe_voted(
     inputs: Mapping[str, Path],
     *,
     xai: Callable[[Source], Transcript],
-    parakeet: ParakeetMlx,
+    parakeet: ParakeetBackend,
     max_usd: float,
     report: Callable[[str], None],
     run: Runner = subprocess.run,
@@ -108,7 +108,7 @@ def transcribe_voted(
         if (which or shutil.which)(tool) is None:
             raise ExternalServiceError(f"{tool} is not on PATH; Gemini's audio is cut with it")
     outputs = {_OUT: out} | {label: sibling(out, suffix) for label, suffix in _SUFFIXES.items()}
-    plan = plan_outputs(outputs, inputs)
+    plan = plan_outputs(outputs, {**inputs, **parakeet.inputs()})
     prove_writable(plan)
     planned = gemini_stt.preflight(audio, max_usd, run)
     kept: list[Path] = []

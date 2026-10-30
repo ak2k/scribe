@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import errno
 import json
+import os
 import stat
 import subprocess
 import tempfile
@@ -15,7 +16,7 @@ from typing import TYPE_CHECKING, NoReturn
 import pytest
 from typer.testing import CliRunner
 
-from scribe import gaps
+from scribe import gaps, parakeet
 from scribe.cli import app
 from scribe.errors import InputValidationError
 from scribe.parakeet import ParakeetMlx
@@ -95,7 +96,7 @@ def _setup(
         run=run_parakeet, which=lambda name: f"/opt/bin/{name}", host=lambda: host
     )
     monkeypatch.setattr("scribe.cli.XaiStt", Xai)
-    monkeypatch.setattr("scribe.cli.ParakeetMlx", lambda: backend)
+    monkeypatch.setattr("scribe.cli.parakeet_backend", lambda: backend)
     found = "/usr/bin/ffmpeg" if ffmpeg else None
     checked = partial(gaps.check_gaps, run=run_ffmpeg, which=lambda _name: found)
     monkeypatch.setattr("scribe.cli.check_gaps", checked)
@@ -143,6 +144,178 @@ def test_the_cross_check_fills_the_hole_xai_left_with_parakeets_words(
         *("clip.parakeet.json", "clip.transcript.json", "clip.wav")
     ]
     assert (len(calls.parakeet), calls.ffmpeg) == (1, [])
+
+
+def _linux_cpp(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, seconds: int = 9) -> list[str]:
+    """Run the real chooser as on Linux, its parakeet-cli and ffmpeg faked; return what ran."""
+    _setup(monkeypatch)
+    model = tmp_path / "parakeet.bin"
+    model.write_bytes(b"pretend this is a model")
+    monkeypatch.setenv("SCRIBE_PARAKEET_MODEL", str(model))
+    monkeypatch.delenv("SCRIBE_PARAKEET_CLI", raising=False)
+    monkeypatch.delenv("SCRIBE_PARAKEET_THREADS", raising=False)
+    heard = [*SAID[:2], *((text.strip(), start, end) for text, start, end in HEARD), SAID[2]]
+    tokens = [
+        f"  [{i:2d}] id= 1 frame=  1 dur_idx= 1 dur_val= 1 p=0.9 plog=-0.1 "
+        f't0={round(start * 100):4d} t1={round(end * 100):4d} word_start=true "▁{text}"'
+        for i, (text, start, end) in enumerate(heard)
+    ]
+    report = "\n".join(["Segments (1):", 'Segment 0: [0 -> 900] ""', "Tokens [6]:", *tokens])
+    ran: list[str] = []
+
+    def run(
+        argv: list[str], *, env: dict[str, str], timeout: float
+    ) -> subprocess.CompletedProcess[str]:
+        ran.append(Path(argv[0]).name)
+        if argv[0].endswith("ffmpeg"):
+            # Sparse: the clip as 16 kHz mono 16-bit audio.
+            with Path(argv[-1]).open("wb") as wav:
+                wav.truncate(44 + seconds * 32000)
+        return subprocess.CompletedProcess(argv, 0, "", report)
+
+    def refuse() -> NoReturn:
+        raise AssertionError("chose parakeet-mlx on Linux")
+
+    backend = parakeet.ParakeetCpp(run=run, which=lambda name: f"/opt/bin/{name}")
+    monkeypatch.setattr("scribe.parakeet.ParakeetCpp", lambda: backend)
+    monkeypatch.setattr("scribe.parakeet.ParakeetMlx", refuse)
+    chooser = partial(parakeet.parakeet_backend, host=lambda: LINUX)
+    monkeypatch.setattr("scribe.cli.parakeet_backend", chooser)
+    return ran
+
+
+def test_a_linux_host_cross_checks_with_parakeet_cli(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ran = _linux_cpp(tmp_path, monkeypatch)
+
+    result = _transcribe(tmp_path)
+
+    assert result.exit_code == 0, result.output
+    assert ran == ["ffmpeg", "parakeet-cli"]
+    announced = next(line for line in result.stderr.splitlines() if "cross-checking" in line)
+    assert "parakeet-cli, 6 to 28 min per audio hour" in announced
+    assert "1.2 GB" not in announced
+    filled = Transcript.load(tmp_path / "clip.transcript.json")
+    assert [word.text for word in filled.words] == ["Hello", "there.", "we", "lost", "this", "Bye."]
+    assert Transcript.load(tmp_path / "clip.parakeet.json").engine.name == "parakeet-cpp"
+
+
+def _the_model(_tmp_path: Path, model: Path, _monkeypatch: pytest.MonkeyPatch) -> Path:
+    return model
+
+
+def _a_symlink_to_the_model(tmp_path: Path, model: Path, _monkeypatch: pytest.MonkeyPatch) -> Path:
+    alias = tmp_path / "alias.json"
+    alias.symlink_to(model)
+    return alias
+
+
+def _a_hard_link_to_the_model(
+    tmp_path: Path, model: Path, _monkeypatch: pytest.MonkeyPatch
+) -> Path:
+    alias = tmp_path / "alias.json"
+    os.link(model, alias)
+    return alias
+
+
+def _what_the_setting_links_to(
+    tmp_path: Path, model: Path, monkeypatch: pytest.MonkeyPatch
+) -> Path:
+    alias = tmp_path / "alias.bin"
+    alias.symlink_to(model)
+    monkeypatch.setenv("SCRIBE_PARAKEET_MODEL", str(alias))
+    return model
+
+
+@pytest.mark.parametrize(
+    "out_at",
+    [_the_model, _a_symlink_to_the_model, _a_hard_link_to_the_model, _what_the_setting_links_to],
+)
+def test_out_on_the_model_is_refused_at_the_first_plan_with_nothing_written(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    out_at: Callable[[Path, Path, pytest.MonkeyPatch], Path],
+) -> None:
+    ran = _linux_cpp(tmp_path, monkeypatch)
+    model = tmp_path / "parakeet.bin"
+    out = out_at(tmp_path, model, monkeypatch)
+    before = sorted(path.name for path in tmp_path.iterdir())
+
+    result = _transcribe(tmp_path, "--out", str(out))
+
+    assert model.read_bytes() == b"pretend this is a model"
+    assert result.exit_code == 2, result.output
+    assert f"--out {out} is the Parakeet model" in result.stderr
+    assert "transcribed" not in result.stderr
+    assert ran == []
+    assert sorted(path.name for path in tmp_path.iterdir()) == sorted({*before, "clip.wav"})
+
+
+def test_with_no_cross_check_the_model_is_not_an_input(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ran = _linux_cpp(tmp_path, monkeypatch)
+    model = tmp_path / "parakeet.bin"
+
+    result = _transcribe(tmp_path, "--out", str(model), "--no-cross-check")
+
+    assert result.exit_code == 0, result.output
+    assert Transcript.load(model).text == "Hello there. Bye."
+    assert ran == []
+
+
+def test_a_link_to_the_model_at_parakeets_transcript_path_is_not_written_through(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _linux_cpp(tmp_path, monkeypatch)
+    model = tmp_path / "parakeet.bin"
+    kept = tmp_path / "clip.parakeet.json"
+    kept.symlink_to(model)
+
+    result = _transcribe(tmp_path)
+
+    assert result.exit_code == 0, result.output
+    assert model.read_bytes() == b"pretend this is a model"
+    assert f"the Parakeet transcript {kept} is the Parakeet model" in result.stderr
+
+
+def _a_link_that_loops(tmp_path: Path) -> Path:
+    loop = tmp_path / "loop.bin"
+    loop.symlink_to(loop)
+    return loop
+
+
+def _a_name_too_long(tmp_path: Path) -> Path:
+    return tmp_path / ("x" * 300)
+
+
+@pytest.mark.parametrize("named", [_a_link_that_loops, _a_name_too_long])
+def test_a_model_setting_naming_no_file_still_falls_back_to_loudness(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, named: Callable[[Path], Path]
+) -> None:
+    _linux_cpp(tmp_path, monkeypatch)
+    monkeypatch.setenv("SCRIBE_PARAKEET_MODEL", str(named(tmp_path)))
+
+    result = _transcribe(tmp_path)
+
+    assert result.exit_code == 0, result.output
+    assert "which is not a file; checking the holes by loudness instead" in result.stderr
+
+
+def test_audio_parakeet_cli_could_not_finish_in_time_is_checked_by_loudness(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ran = _linux_cpp(tmp_path, monkeypatch, seconds=4 * 3600)
+
+    result = _transcribe(tmp_path)
+
+    assert result.exit_code == 0, result.output
+    assert ran == ["ffmpeg"]
+    refused = [line for line in result.stderr.splitlines() if "would not finish within" in line]
+    assert len(refused) == 1, result.stderr
+    assert refused[0].endswith("checking the holes by loudness instead")
+    assert result.stderr.splitlines()[-len(LOUDNESS) :] == LOUDNESS
 
 
 def test_no_cross_check_writes_xais_transcript_and_runs_nothing_else(

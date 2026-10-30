@@ -58,12 +58,19 @@ def no_real_claude(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture(autouse=True)
 def no_real_parakeet(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Fail a CLI test that reaches the real parakeet backend, rather than let it spawn uvx."""
+    """Fail a CLI test that uses a real parakeet backend, of either kind, rather than spawn.
 
-    def refuse() -> NoReturn:
-        raise AssertionError("reached the real parakeet backend; swap it in")
+    Only `inputs` answers: `transcribe` plans its outputs against it before anything runs.
+    """
 
-    monkeypatch.setattr("scribe.cli.ParakeetMlx", refuse)
+    class Refused:
+        def inputs(self) -> dict[str, Path]:
+            return {}
+
+        def __getattr__(self, _name: str) -> NoReturn:
+            raise AssertionError("reached the real parakeet backend; swap it in")
+
+    monkeypatch.setattr("scribe.cli.parakeet_backend", Refused)
 
 
 @pytest.fixture(autouse=True)

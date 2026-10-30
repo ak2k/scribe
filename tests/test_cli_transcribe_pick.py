@@ -102,7 +102,7 @@ def _setup(
         run=run_parakeet, which=lambda name: f"/opt/bin/{name}", host=lambda: host
     )
     monkeypatch.setattr("scribe.cli.XaiStt", Xai)
-    monkeypatch.setattr("scribe.cli.ParakeetMlx", lambda: backend)
+    monkeypatch.setattr("scribe.cli.parakeet_backend", lambda: backend)
     monkeypatch.setenv("XAI_API_KEY", "xai-key")
 
 
@@ -778,6 +778,79 @@ def test_the_audio_at_the_lists_path_is_never_written_or_removed(
     assert result.stderr.splitlines()[-1] == (
         f"scribe: {refused.format(path=audio)}the disputes list {audio} is the audio file"
     )
+
+
+def _model_at(monkeypatch: pytest.MonkeyPatch, model: Path) -> None:
+    model.write_bytes(b"pretend this is a model")
+
+    def inputs(_self: ParakeetMlx) -> dict[str, Path]:
+        return {"the Parakeet model": model}
+
+    monkeypatch.setattr(ParakeetMlx, "inputs", inputs)
+
+
+@pytest.mark.parametrize(
+    ("arrange", "flags", "refused"),
+    [
+        (_patch, [], "not listing the disputes: "),
+        (_patch, ["--no-pick"], "not removing {path}: "),
+        (_voting, ["--vote"], "not removing {path}: "),
+        (_voting, ["--vote", "--no-cross-check"], "not removing {path}: "),
+    ],
+    ids=["pick", "no-pick", "vote", "vote-no-cross-check"],
+)
+def test_the_model_at_the_lists_path_is_never_written_or_removed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    arrange: Callable[[pytest.MonkeyPatch], list[FakeSpeakerBackend]],
+    flags: list[str],
+    refused: str,
+) -> None:
+    _setup(monkeypatch)
+    arrange(monkeypatch)
+    model = tmp_path / "clip.disputes.md"
+    _model_at(monkeypatch, model)
+
+    result = _transcribe(tmp_path, *flags)
+
+    assert model.read_bytes() == b"pretend this is a model"
+    assert result.exit_code == 0, result.output
+    assert result.stderr.splitlines()[-1] == (
+        f"scribe: {refused.format(path=model)}the disputes list {model} is the Parakeet model"
+    )
+
+
+def test_a_link_to_the_model_at_the_lists_path_is_not_written_through(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _setup(monkeypatch)
+    _patch(monkeypatch)
+    model = tmp_path / "parakeet.bin"
+    _model_at(monkeypatch, model)
+    listed = tmp_path / "clip.disputes.md"
+    listed.symlink_to(model)
+
+    result = _transcribe(tmp_path)
+
+    assert model.read_bytes() == b"pretend this is a model"
+    assert result.exit_code == 0, result.output
+    assert result.stderr.splitlines()[-1] == (
+        f"scribe: not listing the disputes: the disputes list {listed} is the Parakeet model"
+    )
+
+
+def test_with_no_cross_check_a_file_at_the_lists_path_is_a_stale_list_even_if_a_model(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _setup(monkeypatch)
+    _patch(monkeypatch)
+    model = tmp_path / "clip.disputes.md"
+    _model_at(monkeypatch, model)
+
+    result = _transcribe(tmp_path, "--no-cross-check")
+
+    assert result.exit_code == 0, result.output
+    assert not model.exists()
 
 
 def test_a_link_to_out_at_the_lists_path_is_not_written_through(
