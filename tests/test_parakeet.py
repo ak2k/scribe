@@ -1170,7 +1170,9 @@ def test_audio_the_timeout_cannot_cover_is_refused_before_any_piece_is_cut(
     _model(tmp_path, monkeypatch)
     fake = FakeCpp(seconds=7655)
 
-    with pytest.raises(ExternalServiceError, match="at up to 28 min per audio hour.*within 3600 s"):
+    with pytest.raises(
+        ExternalServiceError, match=r"at up to 28 min per audio hour.*within 3600 s"
+    ):
         _cpp(fake).transcribe(_audio(tmp_path), source=SOURCE)
 
     assert [Path(argv[0]).name for argv in fake.calls] == ["ffmpeg"]
