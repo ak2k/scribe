@@ -224,9 +224,9 @@ diarization; the call app side keeps it, since its speakers are the ones
 
 `merge` takes the microphone's transcript first. It refuses two transcripts
 whose durations differ by more than 2 s, as not two sides of one call, and two
-transcripts that both have no words. When only one side has no words, such as
-a far side that never speaks or a muted microphone, `merge` keeps the other
-side's words and prints a line naming the side that had none. Files
+wordless transcripts. When one side is wordless, as from a muted far side or
+microphone, `merge` keeps the other side's words and prints a line naming the
+wordless side. Files
 from one Audio Hijack session need no offset; for files recorded apart,
 `--offset SECONDS` gives how much later the microphone runs. It writes
 `call-mic.merged.json` beside the microphone's transcript, or the path `--out`

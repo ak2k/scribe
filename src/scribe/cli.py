@@ -1559,9 +1559,9 @@ def merge(
     `cleanup --curated`, but not their pick records: each input's own
     disputes list stays the place to read those.
 
-    One side with no words, a far side that stays silent or a muted
-    microphone, still merges: the result holds the other side's words, and
-    stderr says which side had none, on a line before the summary.
+    A wordless side, as from a muted far side or microphone, still merges:
+    the result is the other side's words, and a line before the summary
+    names the wordless side.
 
     stdout is the path written; stderr is one summary line, naming the offset
     applied. Exit 2, before anything is written: an --offset that is not a
@@ -1610,7 +1610,7 @@ def merge(
 
     for role, side in (("MIC", mic_file), ("APP", app_file)):
         if not side.transcript.words:
-            _warn(f"{role} {side.path} has no words; the result holds the other side's alone")
+            _warn(f"{role} {side.path} has no words; merged the other side's words alone")
     _report_merge(merged)
     typer.echo(str(plan["--out"]))
 
