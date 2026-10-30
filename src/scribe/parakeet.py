@@ -387,7 +387,7 @@ THREADS_SETTING = "SCRIBE_PARAKEET_THREADS"
 _WHOLE_SECONDS = 31 * 60
 _PIECE_SECONDS = 30 * 60
 # Heard by both pieces. The boundary sits in its middle, so each piece's cut is
-# 7.5 s from any word it owns: the words beside a cut are the ones it mishears.
+# 7.5 s from any word it owns: a word beside a cut is heard with one side missing.
 _OVERLAP_SECONDS = 15
 # The slow end of the measured pace, in minutes of running per minute of audio.
 _SLOW_PACE = 17 / 60
