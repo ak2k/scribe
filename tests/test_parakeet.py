@@ -976,12 +976,10 @@ def test_a_piece_is_cut_exactly_from_the_converted_audio_and_is_what_the_tool_he
 
     wav = fake.calls[0][-1]
     first, _, second, _ = fake.calls[1:]
-    assert first[:-1] == [FFMPEG, "-nostdin", "-v", "error", "-ss", "0", "-t", "1508"] + (
-        ["-i", wav, "-c:a", "pcm_s16le"]
-    )
-    assert second[:-1] == [FFMPEG, "-nostdin", "-v", "error", "-ss", "1493"] + (
-        ["-i", wav, "-c:a", "pcm_s16le"]
-    )
+    opening = [FFMPEG, "-nostdin", "-v", "error", "-ss"]
+    closing = ["-i", wav, "-c:a", "pcm_s16le"]
+    assert first[:-1] == [*opening, "0", "-t", "1508", *closing]
+    assert second[:-1] == [*opening, "1493", *closing]
     assert [_flag(argv, "-f") for argv in fake.calls[2::2]] == [first[-1], second[-1]]
     assert first[-1] != second[-1]
 
