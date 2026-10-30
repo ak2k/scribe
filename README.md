@@ -224,14 +224,14 @@ diarization; the call app side keeps it, since its speakers are the ones
 
 `merge` takes the microphone's transcript first. It refuses two transcripts
 whose durations differ by more than 2 s, as not two sides of one call, and two
-wordless transcripts. When one side is wordless, as from a muted far side or
-microphone, `merge` keeps the other side's words and prints a line naming the
-wordless side. Files
-from one Audio Hijack session need no offset; for files recorded apart,
-`--offset SECONDS` gives how much later the microphone runs. It writes
-`call-mic.merged.json` beside the microphone's transcript, or the path `--out`
-gives, and prints a line counting the words kept and dropped. On a merged
-transcript, `turns` skips its speaker pass and its audio naming.
+wordless transcripts. When one side is wordless, `merge` keeps the other
+side's words and prints a line naming the wordless side. Read that line: the
+side was muted or missed by the recording, as when the Application block names
+the wrong app. Files from one Audio Hijack session need no offset; for files
+recorded apart, `--offset SECONDS` gives how much later the microphone runs.
+It writes `call-mic.merged.json` beside the microphone's transcript, or the
+path `--out` gives, and prints a line counting the words kept and dropped. On
+a merged transcript, `turns` skips its speaker pass and its audio naming.
 
 ## Dictate with scribe serve
 

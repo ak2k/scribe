@@ -1559,9 +1559,9 @@ def merge(
     `cleanup --curated`, but not their pick records: each input's own
     disputes list stays the place to read those.
 
-    A wordless side, as from a muted far side or microphone, still merges:
-    the result is the other side's words, and a line before the summary
-    names the wordless side.
+    When one side is wordless, the result is the other side's words, and a
+    line before the summary names the wordless side. That side was muted or
+    missed by the recording, as when the call app's audio was not captured.
 
     stdout is the path written; stderr is one summary line, naming the offset
     applied. Exit 2, before anything is written: an --offset that is not a
