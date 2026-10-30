@@ -207,7 +207,8 @@ def merge_tracks(
         engine=Engine(
             name=app.transcript.engine.name, model=app.transcript.engine.model, params=params
         ),
-        language=app.transcript.language,
+        # A wordless side's transcriber may report no language, or a wrong one, for silence.
+        language=(app if app.transcript.words else mic).transcript.language,
         duration=max(durations, default=None),
         text=" ".join(word.text for word in words),
         words=words,
