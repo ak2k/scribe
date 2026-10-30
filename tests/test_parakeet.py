@@ -8,7 +8,8 @@ import signal
 import subprocess
 from itertools import accumulate
 from pathlib import Path
-from typing import TYPE_CHECKING
+from types import SimpleNamespace
+from typing import TYPE_CHECKING, Any
 
 import pytest
 import typer
@@ -19,7 +20,6 @@ from typer.testing import CliRunner
 from scribe.cli import app
 from scribe.errors import ExternalServiceError
 from scribe.parakeet import (
-    DEFAULT_MAX_MINUTES,
     DEFAULT_TIMEOUT_S,
     ParakeetBackend,
     ParakeetCpp,
@@ -572,23 +572,30 @@ SPOKEN_WORDS = [
 
 
 class FakeCpp:
-    """Stands in for ffmpeg, which writes its output, and parakeet-cli, which prints `report`."""
+    """Stands in for ffmpeg, which writes its output, and parakeet-cli, which prints `report`.
+
+    A list of reports is one per parakeet-cli run. `failing_run` limits `returncode`
+    and `error` to that run, counted from 0.
+    """
 
     def __init__(
         self,
-        report: str | None = None,
+        report: str | list[str] | None = None,
         *,
         returncode: int = 0,
         ffmpeg_exit: int = 0,
         error: Exception | None = None,
         seconds: float = 3.0,
+        failing_run: int | None = None,
     ) -> None:
         self.report = _segments(SPOKEN) if report is None else report
         self.returncode, self.ffmpeg_exit, self.error = returncode, ffmpeg_exit, error
         self.seconds = seconds
+        self.failing_run = failing_run
         self.calls: list[list[str]] = []
         self.envs: list[dict[str, str]] = []
         self.timeouts: list[float] = []
+        self.on_disk: list[list[str]] = []
 
     def run(
         self, argv: list[str], *, env: dict[str, str], timeout: float
@@ -602,9 +609,14 @@ class FakeCpp:
                 with Path(argv[-1]).open("wb") as wav:
                     wav.truncate(44 + int(self.seconds * 32000))
             return subprocess.CompletedProcess(argv, self.ffmpeg_exit, "", "Invalid data found")
-        if self.error is not None:
+        number = len(self.on_disk)
+        self.on_disk.append(sorted(path.name for path in Path(argv[-1]).parent.iterdir()))
+        failing = self.failing_run in (None, number)
+        if failing and self.error is not None:
             raise self.error
-        return subprocess.CompletedProcess(argv, self.returncode, "And so, fellow\n", self.report)
+        report = self.report if isinstance(self.report, str) else self.report[number]
+        returncode = self.returncode if failing else 0
+        return subprocess.CompletedProcess(argv, returncode, "And so, fellow\n", report)
 
 
 def _model(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
@@ -613,7 +625,6 @@ def _model(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("SCRIBE_PARAKEET_MODEL", str(model))
     monkeypatch.delenv("SCRIBE_PARAKEET_CLI", raising=False)
     monkeypatch.delenv("SCRIBE_PARAKEET_THREADS", raising=False)
-    monkeypatch.delenv("SCRIBE_PARAKEET_MAX_MINUTES", raising=False)
     return model
 
 
@@ -902,61 +913,287 @@ def test_the_help_says_what_each_platform_runs_and_where_the_model_comes_from() 
     shown = " ".join(result.stdout.split())
     for needed in ["Apple silicon", "parakeet-mlx", "parakeet-cli", "SCRIBE_PARAKEET_MODEL"]:
         assert needed in shown, needed
-    assert f"{DEFAULT_MAX_MINUTES:g} min" in shown
-    assert "SCRIBE_PARAKEET_MAX_MINUTES" in shown
+    assert "overlapping pieces" in shown
 
 
-def test_audio_longer_than_the_cap_is_refused_before_the_tool_runs(
+def _piece(word: str, seconds: float) -> _Piece:
+    tick = round(seconds * 100)
+    return (f"▁{word}", tick, tick + 30, True)
+
+
+def _cuts(fake: FakeCpp) -> list[list[str]]:
+    return [argv for argv in fake.calls if "-ss" in argv]
+
+
+def _flag(argv: list[str], name: str) -> str | None:
+    return argv[argv.index(name) + 1] if name in argv else None
+
+
+def test_audio_of_exactly_the_whole_limit_makes_the_same_two_calls(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _model(tmp_path, monkeypatch)
-    monkeypatch.delenv("SCRIBE_PARAKEET_MAX_MINUTES", raising=False)
-    fake = FakeCpp(seconds=DEFAULT_MAX_MINUTES * 60 + 30)
+    fake = FakeCpp(seconds=31 * 60)
 
-    with pytest.raises(ExternalServiceError) as caught:
+    transcript = _cpp(fake).transcribe(_audio(tmp_path), source=SOURCE)
+
+    assert transcript.words == SPOKEN_WORDS
+    assert [Path(argv[0]).name for argv in fake.calls] == ["ffmpeg", "parakeet-cli"]
+    assert _flag(fake.calls[1], "-f") == fake.calls[0][-1]
+
+
+@pytest.mark.parametrize(
+    ("seconds", "starts", "span"),
+    [
+        (31 * 60 + 1, ["0", "923"], "938"),
+        (2 * 1800 - 15, ["0", "1785"], "1800"),
+        (2 * 1800 - 14, ["0", "1191", "2382"], "1206"),
+    ],
+)
+def test_audio_over_the_whole_limit_is_cut_into_pieces(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, seconds: int, starts: list[str], span: str
+) -> None:
+    _model(tmp_path, monkeypatch)
+    fake = FakeCpp(seconds=seconds)
+
+    _cpp(fake).transcribe(_audio(tmp_path), source=SOURCE)
+
+    cuts = _cuts(fake)
+    assert [_flag(argv, "-ss") for argv in cuts] == starts
+    assert [_flag(argv, "-t") for argv in cuts] == [span] * (len(starts) - 1) + [None]
+    assert [Path(argv[0]).name for argv in fake.calls] == ["ffmpeg"] + (
+        ["ffmpeg", "parakeet-cli"] * len(starts)
+    )
+
+
+def test_a_piece_is_cut_exactly_from_the_converted_audio_and_is_what_the_tool_hears(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _model(tmp_path, monkeypatch)
+    fake = FakeCpp(seconds=3000)
+
+    _cpp(fake).transcribe(_audio(tmp_path), source=SOURCE)
+
+    wav = fake.calls[0][-1]
+    first, _, second, _ = fake.calls[1:]
+    assert first[:-1] == [FFMPEG, "-nostdin", "-v", "error", "-ss", "0", "-t", "1508"] + (
+        ["-i", wav, "-c:a", "pcm_s16le"]
+    )
+    assert second[:-1] == [FFMPEG, "-nostdin", "-v", "error", "-ss", "1493"] + (
+        ["-i", wav, "-c:a", "pcm_s16le"]
+    )
+    assert [_flag(argv, "-f") for argv in fake.calls[2::2]] == [first[-1], second[-1]]
+    assert first[-1] != second[-1]
+
+
+@pytest.mark.parametrize("seconds", [1861, 3000, 3585, 3586, 5370, 5371, 7200, 12007])
+def test_every_piece_stays_in_the_measured_range_and_overlaps_the_next(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, seconds: int
+) -> None:
+    _model(tmp_path, monkeypatch)
+    fake = FakeCpp(seconds=seconds)
+
+    _cpp(fake).transcribe(_audio(tmp_path), source=SOURCE)
+
+    cuts = _cuts(fake)
+    starts = [int(_flag(argv, "-ss") or "") for argv in cuts]
+    spans = [int(_flag(argv, "-t") or "") for argv in cuts[:-1]]
+    assert starts[0] == 0
+    assert [start + span - 15 for start, span in zip(starts, spans, strict=False)] == starts[1:]
+    assert all(span <= 1800 for span in spans)
+    assert seconds - starts[-1] <= spans[0]
+    # Under about 11 min of audio the tool costs more per hour.
+    assert seconds - starts[-1] > 11 * 60
+
+
+def test_only_one_piece_is_on_disk_when_the_tool_hears_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _model(tmp_path, monkeypatch)
+    fake = FakeCpp(seconds=5000)
+
+    _cpp(fake).transcribe(_audio(tmp_path), source=SOURCE)
+
+    assert len(fake.on_disk) == 3
+    assert all(len(names) == 2 and "audio.wav" in names for names in fake.on_disk)
+
+
+def test_each_pieces_words_are_timed_from_the_start_of_the_recording(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _model(tmp_path, monkeypatch)
+    pieces = [
+        _segments([_piece("opening", 1.0)]),
+        _segments([_piece("closing", 10.12)]),
+    ]
+
+    transcript = _cpp(FakeCpp(pieces, seconds=3000)).transcribe(_audio(tmp_path), source=SOURCE)
+
+    assert transcript.words == [
+        Word(text="opening", start=1.0, end=1.3),
+        Word(text="closing", start=1503.12, end=1503.42),
+    ]
+    assert transcript.text == "opening closing"
+
+
+def test_the_boundary_in_the_overlap_gives_each_seam_word_to_one_piece(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # 3000 s cuts at 1493 s, so the overlap's boundary is at 1500.5 s, 7.5 s into the second piece.
+    _model(tmp_path, monkeypatch)
+    pieces = [
+        _segments([_piece("a0", 1500.4), _piece("b0", 1500.5), _piece("c0", 1500.6)]),
+        _segments([_piece("a1", 7.4), _piece("b1", 7.5), _piece("c1", 7.6), _piece("d1", 9.0)]),
+    ]
+
+    transcript = _cpp(FakeCpp(pieces, seconds=3000)).transcribe(_audio(tmp_path), source=SOURCE)
+
+    assert [(word.text, word.start) for word in transcript.words] == [
+        ("a0", 1500.4),
+        ("b1", 1500.5),
+        ("c1", 1500.6),
+        ("d1", 1502.0),
+    ]
+
+
+def test_starts_stay_monotone_over_the_whole_transcript(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # 5000 s cuts at 0, 1662 and 3324 s, with boundaries at 1669.5 and 3331.5 s.
+    _model(tmp_path, monkeypatch)
+    pieces = [
+        _segments([_piece("a", 5.0), _piece("late", 1669.4)]),
+        _segments([_piece("heard-twice", 7.4), _piece("b", 7.6), _piece("c", 1669.4)]),
+        _segments([_piece("heard-twice", 7.4), _piece("d", 7.6), _piece("e", 1600.0)]),
+    ]
+
+    transcript = _cpp(FakeCpp(pieces, seconds=5000)).transcribe(_audio(tmp_path), source=SOURCE)
+
+    assert [word.text for word in transcript.words] == ["a", "late", "b", "c", "d", "e"]
+    starts = [word.start for word in transcript.words]
+    assert starts == sorted(starts)
+    assert starts[-1] == 4924.0
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"returncode": 3}, "parakeet-cli exited 3"),
+        ({"error": subprocess.TimeoutExpired("parakeet-cli", 1.0)}, "did not finish within"),
+        ({"error": OSError("gone")}, "cannot run parakeet-cli"),
+    ],
+)
+def test_a_second_piece_that_fails_fails_the_whole_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kwargs: dict[str, Any], message: str
+) -> None:
+    _model(tmp_path, monkeypatch)
+    fake = FakeCpp(seconds=5000, failing_run=1, **kwargs)
+
+    with pytest.raises(ExternalServiceError, match=message):
         _cpp(fake).transcribe(_audio(tmp_path), source=SOURCE)
 
-    message = str(caught.value)
-    assert f"over the {DEFAULT_MAX_MINUTES:g} min cap" in message
-    assert "SCRIBE_PARAKEET_MAX_MINUTES" in message
-    assert "memory" in message
-    assert [Path(argv[0]).name for argv in fake.calls] == ["ffmpeg"]
-    assert not Path(fake.calls[0][-1]).parent.exists()
+    assert [Path(argv[0]).name for argv in fake.calls].count("parakeet-cli") == 2
 
 
-def test_audio_just_under_the_cap_runs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize(
+    ("report", "message"),
+    [
+        ("error: failed to read audio file", "finished without printing its segments"),
+        ('Segments (1):\nSegment 0: [0 -> 1] "x"\nTokens [2]:\n', "printed 0 of 2 tokens"),
+    ],
+)
+def test_a_second_piece_with_an_unreadable_report_fails_the_whole_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, report: str, message: str
+) -> None:
     _model(tmp_path, monkeypatch)
-    monkeypatch.delenv("SCRIBE_PARAKEET_MAX_MINUTES", raising=False)
-    fake = FakeCpp(seconds=DEFAULT_MAX_MINUTES * 60 - 1)
+    fake = FakeCpp([_segments(SPOKEN), report], seconds=3000)
+
+    with pytest.raises(ExternalServiceError, match=message):
+        _cpp(fake).transcribe(_audio(tmp_path), source=SOURCE)
+
+
+def test_a_silent_piece_adds_no_words_and_does_not_fail_the_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # What the tool prints for a minute of digital silence, with exit 0.
+    _model(tmp_path, monkeypatch)
+    silent = "Segments (0):\n"
+    fake = FakeCpp([_segments(SPOKEN), silent], seconds=3000)
 
     transcript = _cpp(fake).transcribe(_audio(tmp_path), source=SOURCE)
 
     assert transcript.words == SPOKEN_WORDS
 
 
-def test_the_cap_is_set_by_the_environment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_failed_cut_fails_the_whole_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _model(tmp_path, monkeypatch)
-    monkeypatch.setenv("SCRIBE_PARAKEET_MAX_MINUTES", "2")
-    with pytest.raises(ExternalServiceError, match="over the 2 min cap"):
-        _cpp(FakeCpp(seconds=150)).transcribe(_audio(tmp_path), source=SOURCE)
+    fake = FakeCpp(seconds=3000)
 
-    monkeypatch.setenv("SCRIBE_PARAKEET_MAX_MINUTES", str(DEFAULT_MAX_MINUTES * 2))
-    fake = FakeCpp(seconds=DEFAULT_MAX_MINUTES * 90)
-    assert _cpp(fake).transcribe(_audio(tmp_path), source=SOURCE).words == SPOKEN_WORDS
+    def run(
+        argv: list[str], *, env: dict[str, str], timeout: float
+    ) -> subprocess.CompletedProcess[str]:
+        if _flag(argv, "-ss") == "1493":
+            return subprocess.CompletedProcess(argv, 1, "", "Invalid data found")
+        return fake.run(argv, env=env, timeout=timeout)
+
+    with pytest.raises(ExternalServiceError, match="ffmpeg exited 1"):
+        ParakeetCpp(run=run, which=_tools).transcribe(_audio(tmp_path), source=SOURCE)
 
 
-@pytest.mark.parametrize("setting", ["0", "-5", "an hour", "nan", "inf"])
-def test_a_cap_that_is_not_a_positive_number_is_refused_up_front(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, setting: str
+def test_the_pieces_share_one_deadline(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _model(tmp_path, monkeypatch)
+    now = [0.0]
+    monkeypatch.setattr("scribe.parakeet.time", SimpleNamespace(monotonic=lambda: now[0]))
+    fake = FakeCpp(seconds=3000)
+
+    def run(
+        argv: list[str], *, env: dict[str, str], timeout: float
+    ) -> subprocess.CompletedProcess[str]:
+        now[0] += 100.0
+        return fake.run(argv, env=env, timeout=timeout)
+
+    ParakeetCpp(run=run, which=_tools, timeout_s=1000).transcribe(_audio(tmp_path), source=SOURCE)
+
+    assert fake.timeouts == [1000.0, 900.0, 800.0, 700.0, 600.0]
+
+
+def test_audio_the_timeout_cannot_cover_is_refused_before_any_piece_is_cut(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # At 17 min per audio hour, the default 60 min of running holds about 3.53 h of audio.
+    _model(tmp_path, monkeypatch)
+    fake = FakeCpp(seconds=3.6 * 3600)
+
+    with pytest.raises(ExternalServiceError, match="would not finish within 3600 s"):
+        _cpp(fake).transcribe(_audio(tmp_path), source=SOURCE)
+
+    assert [Path(argv[0]).name for argv in fake.calls] == ["ffmpeg"]
+    assert not Path(fake.calls[0][-1]).parent.exists()
+
+
+def test_audio_just_under_what_the_timeout_covers_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _model(tmp_path, monkeypatch)
-    monkeypatch.setenv("SCRIBE_PARAKEET_MAX_MINUTES", setting)
-    fake = FakeCpp()
+    fake = FakeCpp(seconds=3.5 * 3600)
 
-    with pytest.raises(ExternalServiceError, match="SCRIBE_PARAKEET_MAX_MINUTES must be"):
-        _cpp(fake).resolve()
+    _cpp(fake).transcribe(_audio(tmp_path), source=SOURCE)
 
-    assert fake.calls == []
+    assert len(_cuts(fake)) == 8
+
+
+def test_the_timeout_check_counts_the_overlaps_heard_twice(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # 3586 s fits 1020 s at the slow pace; with its two overlaps, 3616 s does not.
+    _model(tmp_path, monkeypatch)
+    fake = FakeCpp(seconds=3586)
+    backend = ParakeetCpp(run=fake.run, which=_tools, timeout_s=1020)
+
+    with pytest.raises(ExternalServiceError, match="would not finish within 1020 s"):
+        backend.transcribe(_audio(tmp_path), source=SOURCE)
+
+    assert len(fake.calls) == 1
 
 
 @pytest.mark.parametrize(("minutes", "refused"), [(30, False), (40, True)])
@@ -965,7 +1202,6 @@ def test_audio_the_slow_pace_cannot_finish_within_the_timeout_is_refused(
 ) -> None:
     # At 17 min per audio hour, 10 min of running holds about 35 min of audio.
     _model(tmp_path, monkeypatch)
-    monkeypatch.setenv("SCRIBE_PARAKEET_MAX_MINUTES", "1000")
     fake = FakeCpp(seconds=minutes * 60)
     backend = ParakeetCpp(run=fake.run, which=_tools, timeout_s=600)
 

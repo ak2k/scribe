@@ -145,7 +145,7 @@ def test_the_cross_check_fills_the_hole_xai_left_with_parakeets_words(
     assert (len(calls.parakeet), calls.ffmpeg) == (1, [])
 
 
-def _linux_cpp(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> list[str]:
+def _linux_cpp(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, seconds: int = 9) -> list[str]:
     """Run the real chooser as on Linux, its parakeet-cli and ffmpeg faked; return what ran."""
     _setup(monkeypatch)
     model = tmp_path / "parakeet.bin"
@@ -153,7 +153,6 @@ def _linux_cpp(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> list[str]:
     monkeypatch.setenv("SCRIBE_PARAKEET_MODEL", str(model))
     monkeypatch.delenv("SCRIBE_PARAKEET_CLI", raising=False)
     monkeypatch.delenv("SCRIBE_PARAKEET_THREADS", raising=False)
-    monkeypatch.delenv("SCRIBE_PARAKEET_MAX_MINUTES", raising=False)
     heard = [*SAID[:2], *((text.strip(), start, end) for text, start, end in HEARD), SAID[2]]
     tokens = [
         f"  [{i:2d}] id= 1 frame=  1 dur_idx= 1 dur_val= 1 p=0.9 plog=-0.1 "
@@ -168,9 +167,9 @@ def _linux_cpp(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> list[str]:
     ) -> subprocess.CompletedProcess[str]:
         ran.append(Path(argv[0]).name)
         if argv[0].endswith("ffmpeg"):
-            # Sparse: the clip's 9 s as 16 kHz mono 16-bit audio.
+            # Sparse: the clip as 16 kHz mono 16-bit audio.
             with Path(argv[-1]).open("wb") as wav:
-                wav.truncate(44 + 9 * 32000)
+                wav.truncate(44 + seconds * 32000)
         return subprocess.CompletedProcess(argv, 0, "", report)
 
     def refuse() -> NoReturn:
@@ -201,17 +200,16 @@ def test_a_linux_host_cross_checks_with_parakeet_cli(
     assert Transcript.load(tmp_path / "clip.parakeet.json").engine.name == "parakeet-cpp"
 
 
-def test_audio_over_the_parakeet_cli_cap_is_checked_by_loudness(
+def test_audio_parakeet_cli_could_not_finish_in_time_is_checked_by_loudness(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    ran = _linux_cpp(tmp_path, monkeypatch)
-    monkeypatch.setenv("SCRIBE_PARAKEET_MAX_MINUTES", "0.1")
+    ran = _linux_cpp(tmp_path, monkeypatch, seconds=4 * 3600)
 
     result = _transcribe(tmp_path)
 
     assert result.exit_code == 0, result.output
     assert ran == ["ffmpeg"]
-    refused = [line for line in result.stderr.splitlines() if "over the 0.1 min cap" in line]
+    refused = [line for line in result.stderr.splitlines() if "would not finish within" in line]
     assert len(refused) == 1, result.stderr
     assert refused[0].endswith("checking the holes by loudness instead")
     assert result.stderr.splitlines()[-len(LOUDNESS) :] == LOUDNESS
