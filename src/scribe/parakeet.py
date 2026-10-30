@@ -381,12 +381,14 @@ CPP_TOOL = "parakeet-cli"
 CLI_SETTING = "SCRIBE_PARAKEET_CLI"
 MODEL_SETTING = "SCRIBE_PARAKEET_MODEL"
 THREADS_SETTING = "SCRIBE_PARAKEET_THREADS"
-MAX_MINUTES_SETTING = "SCRIBE_PARAKEET_MAX_MINUTES"
-# The tool holds the whole recording in memory at once: with the f16 model it
-# peaked at 15 GB for 31 min of audio and 29 GB for 62 min, and on the 62 min
-# it printed no words at all. The cap stays at the longest length seen to work.
-DEFAULT_MAX_MINUTES = 32.0
-_GB_PER_AUDIO_HOUR = 28
+# The tool holds all the audio it is given in memory: with the f16 model it
+# peaked at 15 GB for 31 min and 29 GB for 62 min, and on the 62 min it printed
+# no words and exited 0. So nothing past the length seen to work reaches it.
+_WHOLE_SECONDS = 31 * 60
+_PIECE_SECONDS = 30 * 60
+# Heard by both pieces. The boundary sits in its middle, so each piece's cut is
+# 7.5 s from any word it owns: the words beside a cut are the ones it mishears.
+_OVERLAP_SECONDS = 15
 # The slow end of the measured pace, in minutes of running per minute of audio.
 _SLOW_PACE = 17 / 60
 # What 16 kHz mono 16-bit audio takes per second.
@@ -493,22 +495,21 @@ class _Tools:
     model: Path
     ffmpeg: str
     threads: int
-    max_minutes: float
 
 
-def _max_minutes() -> float:
-    setting = os.environ.get(MAX_MINUTES_SETTING)
-    if setting is None:
-        return DEFAULT_MAX_MINUTES
-    try:
-        minutes = float(setting)
-    except ValueError:
-        minutes = math.nan
-    if not (math.isfinite(minutes) and minutes > 0):
-        raise ExternalServiceError(
-            f"{MAX_MINUTES_SETTING} must be a number of minutes above 0, not {setting!r}"
-        )
-    return minutes
+def _piece_starts(seconds: int) -> list[int]:
+    """Where each piece opens, in seconds: one piece for audio that can go whole.
+
+    The pieces are equal rather than full ones and a remainder: a short last
+    piece would cost the most per hour, or be too short to hear anything in.
+    """
+    if seconds <= _WHOLE_SECONDS:
+        return [0]
+    # Past the first piece, each adds only what it does not share with the one before.
+    span = seconds - _OVERLAP_SECONDS
+    count = math.ceil(span / (_PIECE_SECONDS - _OVERLAP_SECONDS))
+    step = math.ceil(span / count)
+    return [index * step for index in range(count)]
 
 
 def _cpp_env() -> dict[str, str]:
@@ -609,26 +610,18 @@ class ParakeetCpp:
         ffmpeg = which("ffmpeg")
         if ffmpeg is None:
             raise ToolMissingError("ffmpeg is not on PATH; the audio is converted with it")
-        threads, max_minutes = _threads(), _max_minutes()
-        return _Tools(cli=cli, model=model, ffmpeg=ffmpeg, threads=threads, max_minutes=max_minutes)
+        return _Tools(cli=cli, model=model, ffmpeg=ffmpeg, threads=_threads())
 
     def inputs(self) -> dict[str, Path]:
         """The model file, once `resolve` has found it."""
         setting = os.environ.get(MODEL_SETTING)
         return {"the Parakeet model": Path(setting)} if setting else {}
 
-    def _check_length(self, wav: Path, tools: _Tools) -> None:
-        minutes = wav.stat().st_size / _WAV_BYTES_PER_SECOND / 60
-        if minutes > tools.max_minutes:
+    def _check_length(self, seconds: int, pieces: int) -> None:
+        heard = seconds + (pieces - 1) * _OVERLAP_SECONDS
+        if heard * _SLOW_PACE > self.timeout_s:
             raise ExternalServiceError(
-                f"the audio is {minutes:.1f} min long, over the {tools.max_minutes:g} min cap"
-                f" on parakeet-cli ({MAX_MINUTES_SETTING} sets it): the tool holds the whole"
-                f" recording in memory, about {_GB_PER_AUDIO_HOUR} GB per audio hour, and heard"
-                " no words in an hour of audio"
-            )
-        if minutes * _SLOW_PACE * 60 > self.timeout_s:
-            raise ExternalServiceError(
-                f"the audio is {minutes:.1f} min long; at up to 17 min per audio hour,"
+                f"the audio is {seconds / 60:.1f} min long; at up to 17 min per audio hour,"
                 f" parakeet-cli would not finish within {self.timeout_s:g} s"
             )
 
@@ -650,12 +643,45 @@ class ParakeetCpp:
             )
         return completed
 
+    def _hear(self, wav: Path, tools: _Tools, deadline: float) -> list[Word]:
+        argv = [tools.cli, "-m", str(tools.model), "-t", str(tools.threads)]
+        completed = self._call([*argv, "--print-segments", "-f", str(wav)], deadline)
+        return parse_segments(completed.stderr)
+
+    def _hear_pieces(
+        self, wav: Path, starts: list[int], tools: _Tools, deadline: float
+    ) -> list[Word]:
+        span = starts[1] + _OVERLAP_SECONDS
+        boundaries = [start + _OVERLAP_SECONDS / 2 for start in starts[1:]]
+        owned_from = [-math.inf, *boundaries]
+        owned_until = [*boundaries, math.inf]
+        words: list[Word] = []
+        for index, start in enumerate(starts):
+            piece = wav.with_name(f"piece{index}.wav")
+            argv = [tools.ffmpeg, "-nostdin", "-v", "error", "-ss", str(start)]
+            # The last runs to the end, which the file's size gives only to the second.
+            argv += ["-t", str(span)] if index < len(starts) - 1 else []
+            self._call([*argv, "-i", str(wav), "-c:a", "pcm_s16le", str(piece)], deadline)
+            heard = self._hear(piece, tools, deadline)
+            # Temporary space can be memory, and the pieces together outweigh the audio.
+            piece.unlink()
+            for word in heard:
+                # Rounded to the tool's ticks, so the sum carries no float noise.
+                at = round(word.start + start, 2)
+                if owned_from[index] <= at < owned_until[index]:
+                    words.append(Word(text=word.text, start=at, end=round(word.end + start, 2)))
+        return words
+
     def transcribe(self, audio: Path, *, source: Source) -> Transcript:
         """Transcribe `audio` and return its words as a transcript.
 
+        Audio too long for the tool to hear whole goes to it in overlapping
+        pieces, one at a time, and any piece that fails fails the whole run.
+
         Raises:
-            ExternalServiceError: `resolve` failed, or the conversion or the run
-                failed, timed out, or printed no readable segments.
+            ExternalServiceError: `resolve` failed, the audio could not finish
+                within `timeout_s`, or a conversion, cut or run failed, timed
+                out, or printed no readable segments.
 
         """
         tools = self.resolve()
@@ -668,10 +694,14 @@ class ParakeetCpp:
             argv = [tools.ffmpeg, "-nostdin", "-v", "error", "-i", str(audio.absolute())]
             argv += ["-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", str(wav)]
             self._call(argv, deadline)
-            self._check_length(wav, tools)
-            argv = [tools.cli, "-m", str(tools.model), "-t", str(tools.threads)]
-            completed = self._call([*argv, "--print-segments", "-f", str(wav)], deadline)
-        words = parse_segments(completed.stderr)
+            # Whole seconds: the wav's header, tags included, is under one.
+            seconds = wav.stat().st_size // _WAV_BYTES_PER_SECOND
+            starts = _piece_starts(seconds)
+            self._check_length(seconds, len(starts))
+            if len(starts) == 1:
+                words = self._hear(wav, tools, deadline)
+            else:
+                words = self._hear_pieces(wav, starts, tools, deadline)
         return Transcript(
             source=source,
             engine=Engine(name=CPP_NAME, model=tools.model.name),

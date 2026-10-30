@@ -2054,13 +2054,13 @@ def parakeet(
     PATH, converts the audio. It takes 6 to 17 min per audio hour on 8 CPU
     threads, by the machine's load, and more per hour under 11 min of audio
     (5 min of audio took 1.5 to 5 min); SCRIBE_PARAKEET_THREADS sets the
-    count, which is at most 8 unless set. parakeet-cli holds the whole
-    recording in memory, about 28 GB per audio hour, and heard no words in
-    an hour of audio, so audio over 32 min is refused before it runs;
-    SCRIBE_PARAKEET_MAX_MINUTES sets that cap. So is audio it could not
-    finish within the run's limit at its slow pace. Either way nothing is
-    uploaded and no key is needed. A run is stopped after 60 minutes. The
-    words carry timings but no speakers.
+    count, which is at most 8 unless set. parakeet-cli holds all the audio it
+    is given in memory, about 15 GB for 31 min, and heard no words in an hour
+    of audio, so audio over 31 min goes to it in overlapping pieces of at most
+    30 min, one at a time. Audio it could not finish within the run's limit at
+    its slow pace is refused before it runs. Either way nothing is uploaded
+    and no key is needed. A run is stopped after 60 minutes. The words carry
+    timings but no speakers.
     """
     started = time.monotonic()
     try:
