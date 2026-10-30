@@ -108,7 +108,7 @@ def transcribe_voted(
         if (which or shutil.which)(tool) is None:
             raise ExternalServiceError(f"{tool} is not on PATH; Gemini's audio is cut with it")
     outputs = {_OUT: out} | {label: sibling(out, suffix) for label, suffix in _SUFFIXES.items()}
-    plan = plan_outputs(outputs, inputs)
+    plan = plan_outputs(outputs, {**inputs, **parakeet.inputs()})
     prove_writable(plan)
     planned = gemini_stt.preflight(audio, max_usd, run)
     kept: list[Path] = []

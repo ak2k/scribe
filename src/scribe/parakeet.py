@@ -10,6 +10,7 @@ host provides, as it does the program.
 from __future__ import annotations
 
 import contextlib
+import math
 import os
 import platform
 import re
@@ -263,6 +264,10 @@ class ParakeetBackend(Protocol):
         """Check this machine can run the backend, before anything is spawned."""
         ...
 
+    def inputs(self) -> dict[str, Path]:
+        """Files the run reads besides the audio, keyed by how a refusal describes them."""
+        ...
+
     def transcribe(self, audio: Path, *, source: Source) -> Transcript:
         """Transcribe `audio` and return its words as a transcript."""
         ...
@@ -297,6 +302,10 @@ class ParakeetMlx:
         self._which = which
         self._host = host
         self.timeout_s = timeout_s
+
+    def inputs(self) -> dict[str, Path]:
+        """None: the model lives in Hugging Face's cache, which no output names."""
+        return {}
 
     def resolve(self) -> str:
         """Check this machine can run the tool, before anything is spawned.
@@ -372,6 +381,20 @@ CPP_TOOL = "parakeet-cli"
 CLI_SETTING = "SCRIBE_PARAKEET_CLI"
 MODEL_SETTING = "SCRIBE_PARAKEET_MODEL"
 THREADS_SETTING = "SCRIBE_PARAKEET_THREADS"
+MAX_MINUTES_SETTING = "SCRIBE_PARAKEET_MAX_MINUTES"
+# The tool holds the whole recording in memory at once: with the f16 model it
+# peaked at 15 GB for 31 min of audio and 29 GB for 62 min, and on the 62 min
+# it printed no words at all. The cap stays at the longest length seen to work.
+DEFAULT_MAX_MINUTES = 32.0
+_GB_PER_AUDIO_HOUR = 28
+# The slow end of the measured pace, in minutes of running per minute of audio.
+_SLOW_PACE = 17 / 60
+# What 16 kHz mono 16-bit audio takes per second.
+_WAV_BYTES_PER_SECOND = 32_000
+# The ggml runtime's own settings, the GPUs it may use, and where its backend
+# libraries load from; the uvx children need none of them.
+_GGML_PREFIX = "GGML_"
+_GGML_NAMES = frozenset({"CUDA_VISIBLE_DEVICES", "LD_LIBRARY_PATH"})
 # The hosts it runs on are shared.
 _MAX_THREADS = 8
 # Token times count the model's 10 ms mel frames, from the start of the audio.
@@ -470,6 +493,27 @@ class _Tools:
     model: Path
     ffmpeg: str
     threads: int
+    max_minutes: float
+
+
+def _max_minutes() -> float:
+    setting = os.environ.get(MAX_MINUTES_SETTING)
+    if setting is None:
+        return DEFAULT_MAX_MINUTES
+    try:
+        minutes = float(setting)
+    except ValueError:
+        minutes = math.nan
+    if not (math.isfinite(minutes) and minutes > 0):
+        raise ExternalServiceError(
+            f"{MAX_MINUTES_SETTING} must be a number of minutes above 0, not {setting!r}"
+        )
+    return minutes
+
+
+def _cpp_env() -> dict[str, str]:
+    granted = [name for name in os.environ if name.startswith(_GGML_PREFIX) or name in _GGML_NAMES]
+    return child_env(*granted)
 
 
 def _threads() -> int:
@@ -565,13 +609,34 @@ class ParakeetCpp:
         ffmpeg = which("ffmpeg")
         if ffmpeg is None:
             raise ToolMissingError("ffmpeg is not on PATH; the audio is converted with it")
-        return _Tools(cli=cli, model=model, ffmpeg=ffmpeg, threads=_threads())
+        threads, max_minutes = _threads(), _max_minutes()
+        return _Tools(cli=cli, model=model, ffmpeg=ffmpeg, threads=threads, max_minutes=max_minutes)
+
+    def inputs(self) -> dict[str, Path]:
+        """The model file, once `resolve` has found it."""
+        setting = os.environ.get(MODEL_SETTING)
+        return {"the Parakeet model": Path(setting)} if setting else {}
+
+    def _check_length(self, wav: Path, tools: _Tools) -> None:
+        minutes = wav.stat().st_size / _WAV_BYTES_PER_SECOND / 60
+        if minutes > tools.max_minutes:
+            raise ExternalServiceError(
+                f"the audio is {minutes:.1f} min long, over the {tools.max_minutes:g} min cap"
+                f" on parakeet-cli ({MAX_MINUTES_SETTING} sets it): the tool holds the whole"
+                f" recording in memory, about {_GB_PER_AUDIO_HOUR} GB per audio hour, and heard"
+                " no words in an hour of audio"
+            )
+        if minutes * _SLOW_PACE * 60 > self.timeout_s:
+            raise ExternalServiceError(
+                f"the audio is {minutes:.1f} min long; at up to 17 min per audio hour,"
+                f" parakeet-cli would not finish within {self.timeout_s:g} s"
+            )
 
     def _call(self, argv: list[str], deadline: float) -> subprocess.CompletedProcess[str]:
         name = Path(argv[0]).name
         try:
             completed = self._run(
-                argv, env=child_env(), timeout=max(deadline - time.monotonic(), 0.0)
+                argv, env=_cpp_env(), timeout=max(deadline - time.monotonic(), 0.0)
             )
         except subprocess.TimeoutExpired as exc:
             raise ExternalServiceError(
@@ -603,6 +668,7 @@ class ParakeetCpp:
             argv = [tools.ffmpeg, "-nostdin", "-v", "error", "-i", str(audio.absolute())]
             argv += ["-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", str(wav)]
             self._call(argv, deadline)
+            self._check_length(wav, tools)
             argv = [tools.cli, "-m", str(tools.model), "-t", str(tools.threads)]
             completed = self._call([*argv, "--print-segments", "-f", str(wav)], deadline)
         words = parse_segments(completed.stderr)

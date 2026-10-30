@@ -37,7 +37,11 @@ file `SCRIBE_PARAKEET_MODEL` names by absolute path (scribe downloads nothing;
 the host provides both), with `ffmpeg` on `PATH` to convert the audio. That
 takes 6 to 17 min per audio hour on 8 CPU threads, by the machine's load, and
 more per hour under 11 min of audio (5 min of audio took 1.5 to 5 min).
-`SCRIBE_PARAKEET_THREADS` sets the count, at most 8 unless set. `scribe
+`SCRIBE_PARAKEET_THREADS` sets the count, at most 8 unless set.
+`parakeet-cli` holds the whole recording in memory, about 28 GB per audio hour,
+and heard no words in an hour of audio, so audio over 32 min is refused before
+it runs (`SCRIBE_PARAKEET_MAX_MINUTES` sets the cap), and the cross-check checks
+it by loudness instead. `scribe
 parakeet AUDIO` runs it alone.
 
 xAI can drop a passage of speech and return no words for it. So `transcribe`

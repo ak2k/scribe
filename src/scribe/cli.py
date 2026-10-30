@@ -480,16 +480,17 @@ def _cross_check(
 
     """
     label = "the Parakeet transcript"
+    backend = parakeet_backend()
     try:
         kept: Path | None = plan_outputs(
-            {label: sibling(out, ".parakeet.json")}, {"--out": out, **inputs}
+            {label: sibling(out, ".parakeet.json")},
+            {"--out": out, **inputs, **backend.inputs()},
         )[label]
     # OSError and RuntimeError too: a name too long to look up, or a link that loops.
     except (AppError, OSError, RuntimeError) as exc:
         _warn(f"not keeping Parakeet's transcript: {exc}")
         kept = None
     try:
-        backend = parakeet_backend()
         backend.resolve()
         _warn(f"cross-checking against Parakeet, run locally ({backend.pace})")
         reference = backend.transcribe(audio, source=transcript.source)
@@ -2053,9 +2054,13 @@ def parakeet(
     PATH, converts the audio. It takes 6 to 17 min per audio hour on 8 CPU
     threads, by the machine's load, and more per hour under 11 min of audio
     (5 min of audio took 1.5 to 5 min); SCRIBE_PARAKEET_THREADS sets the
-    count, which is at most 8 unless set. Either way nothing is uploaded and
-    no key is needed. A run is stopped after 60 minutes. The words carry
-    timings but no speakers.
+    count, which is at most 8 unless set. parakeet-cli holds the whole
+    recording in memory, about 28 GB per audio hour, and heard no words in
+    an hour of audio, so audio over 32 min is refused before it runs;
+    SCRIBE_PARAKEET_MAX_MINUTES sets that cap. So is audio it could not
+    finish within the run's limit at its slow pace. Either way nothing is
+    uploaded and no key is needed. A run is stopped after 60 minutes. The
+    words carry timings but no speakers.
     """
     started = time.monotonic()
     try:
@@ -2066,7 +2071,9 @@ def parakeet(
         destination = (
             audio_path.with_name(f"{audio_path.stem}.parakeet.json") if out is None else out
         )
-        plan = plan_outputs({"--out": destination}, {"the audio file": audio_path})
+        plan = plan_outputs(
+            {"--out": destination}, {"the audio file": audio_path, **backend.inputs()}
+        )
         # A first run can take minutes, and an unwritable output would discard it.
         prove_writable(plan)
         source = Source(kind="audio", ref=str(audio_path), sha256=_sha256(audio_path))
