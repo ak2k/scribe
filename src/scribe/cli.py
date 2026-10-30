@@ -1518,15 +1518,13 @@ def vote(
 
 
 def _track_file(path: Path, role: str) -> TrackFile:
-    """Load one of `merge`'s inputs, insisting on words and on one track, and hash it."""
+    """Load one of `merge`'s inputs, insisting on one track, and hash it."""
     # One read, so the hash is of the bytes parsed even if the file is replaced.
     try:
         raw = path.read_bytes()
     except OSError as exc:
         raise InputValidationError(f"cannot read transcript {path}: {exc}") from exc
     transcript = Transcript.parse(raw, path)
-    if not transcript.words:
-        raise InputValidationError(f"{role} {path} has no words")
     if transcript.tracks is not None:
         raise InputValidationError(f"{role} {path} merges two tracks already")
     return TrackFile(transcript, path, hashlib.sha256(raw).hexdigest())
@@ -1561,12 +1559,17 @@ def merge(
     `cleanup --curated`, but not their pick records: each input's own
     disputes list stays the place to read those.
 
+    One side with no words, a far side that stays silent or a muted
+    microphone, still merges: the result holds the other side's words, and
+    stderr says which side had none, on a line before the summary.
+
     stdout is the path written; stderr is one summary line, naming the offset
     applied. Exit 2, before anything is written: an --offset that is not a
     finite number; a --me that reads like a speaker label; an input that is
-    unreadable, not a transcript, wordless, merged already or without a
-    duration; MIC and APP holding one transcript; durations more than 2 s
-    apart; or an --out that cannot be written. Run `scribe turns` on the result next.
+    unreadable, not a transcript, merged already or without a duration; MIC
+    and APP both without words; MIC and APP holding one transcript; durations
+    more than 2 s apart; or an --out that cannot be written. Run `scribe turns`
+    on the result next.
     """
     try:
         if not math.isfinite(offset):
@@ -1576,6 +1579,8 @@ def merge(
         if looks_like_label(me.strip(" \t*:")):
             raise InputValidationError(f"--me {me!r} looks like a speaker label")
         mic_file, app_file = _track_file(mic_path, "MIC"), _track_file(app_path, "APP")
+        if not mic_file.transcript.words and not app_file.transcript.words:
+            raise InputValidationError(f"MIC {mic_path} and APP {app_path}: neither has words")
         # A transcript merged with its own copy would lose every keyed mic word as bleed.
         if mic_file.sha256 == app_file.sha256:
             raise InputValidationError(f"MIC {mic_path} and APP {app_path} are one transcript")
@@ -1603,6 +1608,9 @@ def merge(
     except AppError as exc:
         _fail(exc)
 
+    for role, side in (("MIC", mic_file), ("APP", app_file)):
+        if not side.transcript.words:
+            _warn(f"{role} {side.path} has no words; the result holds the other side's alone")
     _report_merge(merged)
     typer.echo(str(plan["--out"]))
 
