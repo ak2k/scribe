@@ -163,7 +163,9 @@ def test_a_linux_host_cross_checks_with_parakeet_cli(
     report = "\n".join(["Segments (1):", 'Segment 0: [0 -> 900] ""', "Tokens [6]:", *tokens])
     ran: list[str] = []
 
-    def run(argv: list[str], *, env: dict[str, str], timeout: float) -> subprocess.CompletedProcess[str]:
+    def run(
+        argv: list[str], *, env: dict[str, str], timeout: float
+    ) -> subprocess.CompletedProcess[str]:
         ran.append(Path(argv[0]).name)
         if argv[0].endswith("ffmpeg"):
             Path(argv[-1]).write_bytes(b"RIFF")

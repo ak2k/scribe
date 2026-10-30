@@ -679,8 +679,9 @@ def test_a_run_that_heard_nothing_has_no_words() -> None:
         (_segments(SPOKEN).replace("Tokens [10]:", "Tokens [11]:"), "10 of 11 tokens"),
         (_segments(SPOKEN).replace("Segments (1):", "Segments (2):"), "1 of 2 segments"),
         (_segments(SPOKEN).replace("Segment 0: [0", "Segment 0 [0"), "Segment 0 [0 -> 1101]"),
+        (_segments(SPOKEN).replace("Tokens [10]:", "Tokens: 10"), "Tokens: 10"),
     ],
-    ids=["no-segments", "bad-token", "short-tokens", "short-segments", "bad-segment"],
+    ids=["no-segments", "bad-token", "short-tokens", "short-segments", "bad-segment", "bad-count"],
 )
 def test_output_of_another_shape_is_refused_naming_the_line(report: str, expected: str) -> None:
     with pytest.raises(ExternalServiceError, match="parakeet-cli") as caught:
@@ -783,8 +784,16 @@ def _named_cli_missing(_tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None
     monkeypatch.setenv("SCRIBE_PARAKEET_CLI", "/opt/gone/parakeet-cli")
 
 
+def _too_long_a_model_name(_tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SCRIBE_PARAKEET_MODEL", "/" + "m" * 300)
+
+
 def _bad_threads(_tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SCRIBE_PARAKEET_THREADS", "0")
+
+
+def _wordy_threads(_tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SCRIBE_PARAKEET_THREADS", "eight")
 
 
 def _as_is(_tmp_path: Path, _monkeypatch: pytest.MonkeyPatch) -> None:
@@ -799,8 +808,10 @@ def _as_is(_tmp_path: Path, _monkeypatch: pytest.MonkeyPatch) -> None:
         (_no_model, None, "SCRIBE_PARAKEET_MODEL is not set"),
         (_relative_model, None, "SCRIBE_PARAKEET_MODEL must be an absolute path"),
         (_absent_model, None, "which is not a file"),
+        (_too_long_a_model_name, None, "which is not a file"),
         (_as_is, "ffmpeg", "ffmpeg is not on PATH"),
         (_bad_threads, None, "SCRIBE_PARAKEET_THREADS must be a whole number above 0"),
+        (_wordy_threads, None, "above 0, not 'eight'"),
     ],
 )
 def test_a_host_without_what_parakeet_cli_needs_exits_2_before_spawning(

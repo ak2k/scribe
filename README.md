@@ -24,15 +24,24 @@ or adds a word of xAI's only where both agree. Three or more words added in a
 row inside a pause of 2 s or more in xAI's words get no speaker (`turns` labels
 them `Speaker ?`), since xAI may have dropped another speaker's turn there.
 `--out` holds the voted transcript, and each engine's own goes beside it
-(`talk.parakeet.json`, `talk.xai.json`, `talk.gemini.json`). It needs Apple
-silicon, `uvx`, `ffmpeg` and `GEMINI_API_KEY` as well, sends the audio to
+(`talk.parakeet.json`, `talk.xai.json`, `talk.gemini.json`). It needs local
+Parakeet (below), `ffmpeg` and `GEMINI_API_KEY` as well, sends the audio to
 Google too, and adds about $0.55 per audio hour, capped by `--max-usd`
 (default $3).
 
+Parakeet TDT v3 runs locally and uploads nothing. On Apple silicon it runs
+through `uvx` as `parakeet-mlx`, about 45 s per audio hour, and a first run
+downloads a ~1.2 GB model. Elsewhere, Linux included, it runs as whisper.cpp's
+`parakeet-cli`, found on `PATH` or at `SCRIBE_PARAKEET_CLI`, on the ggml model
+file `SCRIBE_PARAKEET_MODEL` names by absolute path (scribe downloads nothing;
+the host provides both), with `ffmpeg` on `PATH` to convert the audio. That
+takes 6 to 17 min per audio hour on 8 CPU threads, by the machine's load, and
+more per hour under 11 min of audio (5 min of audio took 1.5 to 5 min).
+`SCRIBE_PARAKEET_THREADS` sets the count, at most 8 unless set. `scribe
+parakeet AUDIO` runs it alone.
+
 xAI can drop a passage of speech and return no words for it. So `transcribe`
-then cross-checks its words against Parakeet TDT v3, run locally on Apple
-silicon through `uvx`: nothing is uploaded, it takes about 45 s per audio
-hour, and a first run downloads a ~1.2 GB model. Parakeet's transcript goes
+then cross-checks its words against Parakeet. Parakeet's transcript goes
 beside `--out` (`talk.parakeet.json`). Where xAI's words leave a hole of 2 s or
 more in which Parakeet heard at least 3 words xAI has nowhere near, those
 words are inserted without a speaker (`turns` labels them `Speaker ?`), and

@@ -1,8 +1,10 @@
-"""A local Parakeet TDT v3 transcript, from the pinned `parakeet-mlx` CLI.
+"""A local Parakeet TDT v3 transcript: `parakeet-mlx` on Apple silicon, `parakeet-cli` elsewhere.
 
-Run through `uvx` rather than imported: its ML stack (mlx, numba, scipy,
-scikit-learn) would join the project's own dependencies, which have to build
-on every platform the flake targets, Linux included.
+parakeet-mlx runs through `uvx` rather than imported: its ML stack (mlx,
+numba, scipy, scikit-learn) would join the project's own dependencies, which
+have to build on every platform the flake targets, Linux included. Elsewhere
+whisper.cpp's `parakeet-cli` runs the same model converted to ggml, which the
+host provides, as it does the program.
 """
 
 from __future__ import annotations
@@ -10,16 +12,19 @@ from __future__ import annotations
 import contextlib
 import os
 import platform
+import re
 import shutil
 import signal
 import subprocess
 import tempfile
+import time
+from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 
 from pydantic import BaseModel, ConfigDict, ValidationError
 
-from scribe.errors import ExternalServiceError
+from scribe.errors import ExternalServiceError, ToolMissingError
 from scribe.schema import Engine, FiniteFloat, Transcript, Word
 
 if TYPE_CHECKING:
@@ -231,14 +236,45 @@ def _excerpt(completed: subprocess.CompletedProcess[str]) -> str:
     shown = completed.stdout if completed.stdout.strip() else completed.stderr
     # Its closing line reports completion even after a failure.
     kept = [line for line in shown.splitlines() if " transcription complete. " not in line]
-    excerpt = " ".join(" ".join(kept).split())
+    return _shorten(" ".join(kept))
+
+
+def _shorten(text: str) -> str:
+    excerpt = " ".join(text.split())
     if len(excerpt) > 2 * _EXCERPT_CHARS:
         excerpt = f"{excerpt[:_EXCERPT_CHARS]} ... {excerpt[-_EXCERPT_CHARS:]}"
     return f": {excerpt}" if excerpt else ""
 
 
+class ParakeetBackend(Protocol):
+    """A local Parakeet run, as the commands use it, whichever program makes it."""
+
+    @property
+    def pace(self) -> str:
+        """How long a run takes and what a first run fetches, for a progress line."""
+        ...
+
+    @property
+    def notice(self) -> str:
+        """The line `scribe parakeet` prints before the run."""
+        ...
+
+    def resolve(self) -> object:
+        """Check this machine can run the backend, before anything is spawned."""
+        ...
+
+    def transcribe(self, audio: Path, *, source: Source) -> Transcript:
+        """Transcribe `audio` and return its words as a transcript."""
+        ...
+
+
 class ParakeetMlx:
     """Transcription by `parakeet-mlx` on this machine, nothing uploaded."""
+
+    pace = "about 45 s per audio hour; a first run downloads a ~1.2 GB model"
+    notice = (
+        "running parakeet-mlx locally; a first run downloads a ~1.2 GB model and can take minutes"
+    )
 
     def __init__(
         self,
@@ -329,3 +365,257 @@ class ParakeetMlx:
             text=" ".join(word.text for word in words),
             words=words,
         )
+
+
+CPP_NAME = "parakeet-cpp"
+CPP_TOOL = "parakeet-cli"
+CLI_SETTING = "SCRIBE_PARAKEET_CLI"
+MODEL_SETTING = "SCRIBE_PARAKEET_MODEL"
+THREADS_SETTING = "SCRIBE_PARAKEET_THREADS"
+# The hosts it runs on are shared.
+_MAX_THREADS = 8
+# Token times count the model's 10 ms mel frames, from the start of the audio.
+_TICKS_PER_SECOND = 100
+_WORD_START = "\N{LOWER ONE EIGHTH BLOCK}"
+
+_SEGMENTS = re.compile(r"Segments \((\d+)\):")
+_SEGMENT = re.compile(r'Segment \d+: \[\d+ -> \d+\] ".*"')
+_TOKENS = re.compile(r"Tokens \[(\d+)\]:")
+# The text is the last field and quoted unescaped, so it runs to the line's final quote.
+_TOKEN = re.compile(
+    r" *\[ *\d+\] id= *\d+ frame= *\d+ dur_idx= *\d+ dur_val= *\d+ p=\S+ plog=\S+ "
+    r't0= *(\d+) t1= *(\d+) word_start=(true|false) "(.*)"'
+)
+
+
+def _report_excerpt(report: str) -> str:
+    # The model's parameters and timings go to stderr as well; its own error lines name the cause.
+    lines = [line for line in report.split("\n") if line.strip()]
+    errors = [line for line in lines if line.startswith("error:")]
+    return _shorten(" ".join(errors or lines[-1:]))
+
+
+def _unexpected(line: str) -> ExternalServiceError:
+    return ExternalServiceError(f"parakeet-cli printed an unexpected line{_shorten(repr(line))}")
+
+
+def _segment_words(rows: list[tuple[int, int, bool, str]]) -> list[Word]:
+    spans: list[tuple[str, int, int]] = []
+    for t0, t1, starts, text in rows:
+        # A piece that opens no word, punctuation included, joins the word before it.
+        if starts or not spans:
+            spans.append((text.removeprefix(_WORD_START), t0, t1))
+        else:
+            joined, start, _ = spans[-1]
+            spans[-1] = (joined + text, start, t1)
+    return [
+        Word(text=text, start=t0 / _TICKS_PER_SECOND, end=t1 / _TICKS_PER_SECOND)
+        for text, t0, t1 in spans
+        if text
+    ]
+
+
+def parse_segments(report: str) -> list[Word]:
+    """Rebuild words from the segments `parakeet-cli --print-segments` writes to stderr.
+
+    Raises:
+        ExternalServiceError: `report` holds no segments, or they are not the
+            shape the tool prints.
+
+    """
+    # Split on newlines alone: a token's text may hold any other line separator.
+    lines = report.split("\n")
+    rows = iter(lines)
+    opening = next((found for line in rows if (found := _SEGMENTS.fullmatch(line))), None)
+    if opening is None:
+        # It exits 0 after failing to read the audio, too.
+        raise ExternalServiceError(
+            f"parakeet-cli finished without printing its segments{_report_excerpt(report)}"
+        )
+    segments = int(opening.group(1))
+    words: list[Word] = []
+    for number in range(segments):
+        header = next(rows, "")
+        if not header.strip():
+            raise ExternalServiceError(f"parakeet-cli printed {number} of {segments} segments")
+        if not _SEGMENT.fullmatch(header):
+            raise _unexpected(header)
+        line = next(rows, "")
+        counted = _TOKENS.fullmatch(line)
+        if counted is None:
+            raise _unexpected(line)
+        tokens = int(counted.group(1))
+        pieces: list[tuple[int, int, bool, str]] = []
+        for index in range(tokens):
+            line = next(rows, "")
+            if not line.strip():
+                raise ExternalServiceError(f"parakeet-cli printed {index} of {tokens} tokens")
+            token = _TOKEN.fullmatch(line)
+            if token is None:
+                raise _unexpected(line)
+            t0, t1, starts, text = token.groups()
+            pieces.append((int(t0), int(t1), starts == "true", text))
+        words += _segment_words(pieces)
+    clamped: list[Word] = []
+    for word in words:
+        # As in parse_output: a word timed early keeps its place, its start clamped.
+        start = max(word.start, clamped[-1].start) if clamped else word.start
+        clamped.append(Word(text=word.text, start=start, end=max(word.end, start)))
+    return clamped
+
+
+@dataclass(frozen=True)
+class _Tools:
+    cli: str
+    model: Path
+    ffmpeg: str
+    threads: int
+
+
+def _threads() -> int:
+    setting = os.environ.get(THREADS_SETTING)
+    if setting is None:
+        return min(_MAX_THREADS, os.cpu_count() or 1)
+    try:
+        threads = int(setting)
+    except ValueError:
+        threads = 0
+    if threads < 1:
+        raise ExternalServiceError(
+            f"{THREADS_SETTING} must be a whole number above 0, not {setting!r}"
+        )
+    return threads
+
+
+def _model() -> Path:
+    setting = os.environ.get(MODEL_SETTING)
+    if not setting:
+        raise ExternalServiceError(
+            f"{MODEL_SETTING} is not set; it names the ggml Parakeet TDT v3 model {CPP_TOOL} reads"
+        )
+    model = Path(setting)
+    if not model.is_absolute():
+        raise ExternalServiceError(f"{MODEL_SETTING} must be an absolute path, not {setting}")
+    try:
+        found = model.is_file()
+    # A name too long to look up.
+    except OSError:
+        found = False
+    if not found:
+        raise ExternalServiceError(f"{MODEL_SETTING} names {setting}, which is not a file")
+    return model
+
+
+class ParakeetCpp:
+    """Transcription by whisper.cpp's `parakeet-cli` on this machine, nothing uploaded."""
+
+    # Measured on a busy shared 32-thread host: 31 min of audio in 3 to 9 min.
+    # Under about 11 min of audio the tool attends over all of it at once, which
+    # costs more per hour: 5 min of audio took 1.5 to 5 min.
+    pace = (
+        "with parakeet-cli, 6 to 17 min per audio hour on 8 CPU threads and more per hour"
+        " under 11 min of audio; nothing is downloaded"
+    )
+    notice = (
+        "running parakeet-cli locally, 6 to 17 min per audio hour on 8 CPU threads"
+        " and more per hour under 11 min of audio"
+    )
+
+    def __init__(
+        self,
+        run: Callable[..., subprocess.CompletedProcess[str]] = run_in_own_group,
+        *,
+        which: Callable[[str], str | None] | None = None,
+        timeout_s: float = DEFAULT_TIMEOUT_S,
+    ) -> None:
+        """Hold the run settings; nothing is probed or spawned until called.
+
+        Args:
+            run: Process runner, injectable so tests never spawn anything.
+            which: PATH lookup. Default: `shutil.which`.
+            timeout_s: Ceiling for the whole run, the audio's conversion included.
+
+        """
+        self._run = run
+        self._which = which
+        self.timeout_s = timeout_s
+
+    def resolve(self) -> _Tools:
+        """Check this machine has all the run needs, before anything is spawned.
+
+        Returns:
+            The programs, model and thread count the run uses.
+
+        Raises:
+            ExternalServiceError: `parakeet-cli`, the model or `ffmpeg` cannot be
+                found, or the thread count set is not a number above 0.
+
+        """
+        # Resolved at call time, so a patched `shutil.which` is used.
+        which = self._which or shutil.which
+        named = os.environ.get(CLI_SETTING)
+        cli = which(named or CPP_TOOL)
+        if cli is None and named:
+            raise ToolMissingError(f"{CLI_SETTING} names {named}, which is not a program")
+        if cli is None:
+            raise ToolMissingError(
+                f"{CPP_TOOL} is not on PATH; it comes with whisper.cpp, or set {CLI_SETTING}"
+            )
+        model = _model()
+        ffmpeg = which("ffmpeg")
+        if ffmpeg is None:
+            raise ToolMissingError("ffmpeg is not on PATH; the audio is converted with it")
+        return _Tools(cli=cli, model=model, ffmpeg=ffmpeg, threads=_threads())
+
+    def _call(self, argv: list[str], deadline: float) -> subprocess.CompletedProcess[str]:
+        name = Path(argv[0]).name
+        try:
+            completed = self._run(
+                argv, env=child_env(), timeout=max(deadline - time.monotonic(), 0.0)
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise ExternalServiceError(
+                f"{name} did not finish within {self.timeout_s:g} s"
+            ) from exc
+        except OSError as exc:
+            raise ExternalServiceError(f"cannot run {name} at {argv[0]}: {exc}") from exc
+        if completed.returncode != 0:
+            raise ExternalServiceError(
+                f"{name} exited {completed.returncode}{_report_excerpt(completed.stderr)}"
+            )
+        return completed
+
+    def transcribe(self, audio: Path, *, source: Source) -> Transcript:
+        """Transcribe `audio` and return its words as a transcript.
+
+        Raises:
+            ExternalServiceError: `resolve` failed, or the conversion or the run
+                failed, timed out, or printed no readable segments.
+
+        """
+        tools = self.resolve()
+        deadline = time.monotonic() + self.timeout_s
+        with tempfile.TemporaryDirectory(prefix="scribe-parakeet-") as workdir:
+            wav = Path(workdir) / "audio.wav"
+            # The tool reads flac, mp3, ogg and wav only; every input is converted,
+            # so all of them reach it the same way, as the 16 kHz mono it hears.
+            # Absolute, so an audio name that begins with "-" is not read as an option.
+            argv = [tools.ffmpeg, "-nostdin", "-v", "error", "-i", str(audio.absolute())]
+            argv += ["-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", str(wav)]
+            self._call(argv, deadline)
+            argv = [tools.cli, "-m", str(tools.model), "-t", str(tools.threads)]
+            completed = self._call([*argv, "--print-segments", "-f", str(wav)], deadline)
+        words = parse_segments(completed.stderr)
+        return Transcript(
+            source=source,
+            engine=Engine(name=CPP_NAME, model=tools.model.name),
+            text=" ".join(word.text for word in words),
+            words=words,
+        )
+
+
+def parakeet_backend(host: Callable[[], tuple[str, str]] = _host) -> ParakeetBackend:
+    """Return this machine's backend: parakeet-mlx on Apple silicon, parakeet-cli elsewhere."""
+    if host() == ("Darwin", "arm64"):
+        return ParakeetMlx()
+    return ParakeetCpp()

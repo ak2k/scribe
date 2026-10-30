@@ -25,7 +25,7 @@ if TYPE_CHECKING:
     import httpx
 
     from scribe.gemini_stt import Runner
-    from scribe.parakeet import ParakeetMlx
+    from scribe.parakeet import ParakeetBackend
     from scribe.schema import Source, Transcript
 
 _OUT = "--out"
@@ -60,7 +60,7 @@ def transcribe_voted(
     inputs: Mapping[str, Path],
     *,
     xai: Callable[[Source], Transcript],
-    parakeet: ParakeetMlx,
+    parakeet: ParakeetBackend,
     max_usd: float,
     report: Callable[[str], None],
     run: Runner = subprocess.run,
