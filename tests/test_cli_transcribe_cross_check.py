@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import errno
 import json
+import os
 import stat
 import subprocess
 import tempfile
@@ -198,6 +199,108 @@ def test_a_linux_host_cross_checks_with_parakeet_cli(
     filled = Transcript.load(tmp_path / "clip.transcript.json")
     assert [word.text for word in filled.words] == ["Hello", "there.", "we", "lost", "this", "Bye."]
     assert Transcript.load(tmp_path / "clip.parakeet.json").engine.name == "parakeet-cpp"
+
+
+def _the_model(_tmp_path: Path, model: Path, _monkeypatch: pytest.MonkeyPatch) -> Path:
+    return model
+
+
+def _a_symlink_to_the_model(tmp_path: Path, model: Path, _monkeypatch: pytest.MonkeyPatch) -> Path:
+    alias = tmp_path / "alias.json"
+    alias.symlink_to(model)
+    return alias
+
+
+def _a_hard_link_to_the_model(
+    tmp_path: Path, model: Path, _monkeypatch: pytest.MonkeyPatch
+) -> Path:
+    alias = tmp_path / "alias.json"
+    os.link(model, alias)
+    return alias
+
+
+def _what_the_setting_links_to(
+    tmp_path: Path, model: Path, monkeypatch: pytest.MonkeyPatch
+) -> Path:
+    alias = tmp_path / "alias.bin"
+    alias.symlink_to(model)
+    monkeypatch.setenv("SCRIBE_PARAKEET_MODEL", str(alias))
+    return model
+
+
+@pytest.mark.parametrize(
+    "out_at",
+    [_the_model, _a_symlink_to_the_model, _a_hard_link_to_the_model, _what_the_setting_links_to],
+)
+def test_out_on_the_model_is_refused_at_the_first_plan_with_nothing_written(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    out_at: Callable[[Path, Path, pytest.MonkeyPatch], Path],
+) -> None:
+    ran = _linux_cpp(tmp_path, monkeypatch)
+    model = tmp_path / "parakeet.bin"
+    out = out_at(tmp_path, model, monkeypatch)
+    before = sorted(path.name for path in tmp_path.iterdir())
+
+    result = _transcribe(tmp_path, "--out", str(out))
+
+    assert model.read_bytes() == b"pretend this is a model"
+    assert result.exit_code == 2, result.output
+    assert f"--out {out} is the Parakeet model" in result.stderr
+    assert "transcribed" not in result.stderr
+    assert ran == []
+    assert sorted(path.name for path in tmp_path.iterdir()) == sorted({*before, "clip.wav"})
+
+
+def test_with_no_cross_check_the_model_is_not_an_input(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ran = _linux_cpp(tmp_path, monkeypatch)
+    model = tmp_path / "parakeet.bin"
+
+    result = _transcribe(tmp_path, "--out", str(model), "--no-cross-check")
+
+    assert result.exit_code == 0, result.output
+    assert Transcript.load(model).text == "Hello there. Bye."
+    assert ran == []
+
+
+def test_a_link_to_the_model_at_parakeets_transcript_path_is_not_written_through(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _linux_cpp(tmp_path, monkeypatch)
+    model = tmp_path / "parakeet.bin"
+    kept = tmp_path / "clip.parakeet.json"
+    kept.symlink_to(model)
+
+    result = _transcribe(tmp_path)
+
+    assert result.exit_code == 0, result.output
+    assert model.read_bytes() == b"pretend this is a model"
+    assert f"the Parakeet transcript {kept} is the Parakeet model" in result.stderr
+
+
+def _a_link_that_loops(tmp_path: Path) -> Path:
+    loop = tmp_path / "loop.bin"
+    loop.symlink_to(loop)
+    return loop
+
+
+def _a_name_too_long(tmp_path: Path) -> Path:
+    return tmp_path / ("x" * 300)
+
+
+@pytest.mark.parametrize("named", [_a_link_that_loops, _a_name_too_long])
+def test_a_model_setting_naming_no_file_still_falls_back_to_loudness(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, named: Callable[[Path], Path]
+) -> None:
+    _linux_cpp(tmp_path, monkeypatch)
+    monkeypatch.setenv("SCRIBE_PARAKEET_MODEL", str(named(tmp_path)))
+
+    result = _transcribe(tmp_path)
+
+    assert result.exit_code == 0, result.output
+    assert "which is not a file; checking the holes by loudness instead" in result.stderr
 
 
 def test_audio_parakeet_cli_could_not_finish_in_time_is_checked_by_loudness(

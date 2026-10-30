@@ -9,7 +9,7 @@ import subprocess
 from itertools import accumulate
 from pathlib import Path
 from types import SimpleNamespace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NoReturn
 
 import pytest
 import typer
@@ -1249,6 +1249,41 @@ def test_the_parakeet_mlx_child_does_not_get_them(
 
     names = set(fake.env)
     assert name not in names
+
+
+def test_choosing_a_backend_and_asking_its_inputs_spawn_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _model(tmp_path, monkeypatch)
+
+    def refuse(*_args: object, **_kwargs: object) -> NoReturn:
+        raise AssertionError("spawned a process")
+
+    monkeypatch.setattr("subprocess.Popen", refuse)
+    monkeypatch.setattr("os.posix_spawn", refuse)
+
+    parakeet_backend(lambda: ("Linux", "x86_64")).inputs()
+    parakeet_backend(lambda: ("Darwin", "arm64")).inputs()
+    parakeet_backend().inputs()
+
+
+def test_a_model_setting_that_names_a_loop_or_too_long_a_name_is_no_input(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    loop = tmp_path / "loop.bin"
+    loop.symlink_to(loop)
+    for named in [loop, tmp_path / ("x" * 300)]:
+        monkeypatch.setenv("SCRIBE_PARAKEET_MODEL", str(named))
+        assert ParakeetCpp().inputs() == {}
+
+
+def test_the_model_setting_is_an_input_before_the_file_exists(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    missing = tmp_path / "not-yet.bin"
+    monkeypatch.setenv("SCRIBE_PARAKEET_MODEL", str(missing))
+
+    assert ParakeetCpp().inputs() == {"the Parakeet model": missing}
 
 
 def test_out_cannot_be_the_model(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
