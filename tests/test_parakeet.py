@@ -9,7 +9,7 @@ import subprocess
 from itertools import accumulate
 from pathlib import Path
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import pytest
 import typer
@@ -1074,18 +1074,22 @@ def test_starts_stay_monotone_over_the_whole_transcript(
 
 
 @pytest.mark.parametrize(
-    ("kwargs", "message"),
+    ("returncode", "error", "message"),
     [
-        ({"returncode": 3}, "parakeet-cli exited 3"),
-        ({"error": subprocess.TimeoutExpired("parakeet-cli", 1.0)}, "did not finish within"),
-        ({"error": OSError("gone")}, "cannot run parakeet-cli"),
+        (3, None, "parakeet-cli exited 3"),
+        (0, subprocess.TimeoutExpired("parakeet-cli", 1.0), "did not finish within"),
+        (0, OSError("gone"), "cannot run parakeet-cli"),
     ],
 )
 def test_a_second_piece_that_fails_fails_the_whole_run(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kwargs: dict[str, Any], message: str
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    returncode: int,
+    error: Exception | None,
+    message: str,
 ) -> None:
     _model(tmp_path, monkeypatch)
-    fake = FakeCpp(seconds=5000, failing_run=1, **kwargs)
+    fake = FakeCpp(seconds=5000, failing_run=1, returncode=returncode, error=error)
 
     with pytest.raises(ExternalServiceError, match=message):
         _cpp(fake).transcribe(_audio(tmp_path), source=SOURCE)
