@@ -193,7 +193,7 @@ def test_a_linux_host_cross_checks_with_parakeet_cli(
     assert result.exit_code == 0, result.output
     assert ran == ["ffmpeg", "parakeet-cli"]
     announced = next(line for line in result.stderr.splitlines() if "cross-checking" in line)
-    assert "parakeet-cli" in announced
+    assert "parakeet-cli, 6 to 28 min per audio hour" in announced
     assert "1.2 GB" not in announced
     filled = Transcript.load(tmp_path / "clip.transcript.json")
     assert [word.text for word in filled.words] == ["Hello", "there.", "we", "lost", "this", "Bye."]

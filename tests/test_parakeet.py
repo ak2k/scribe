@@ -902,7 +902,7 @@ def test_the_command_on_linux_runs_parakeet_cli_and_says_so(
     result = runner.invoke(app, ["parakeet", str(_audio(tmp_path))])
 
     assert result.exit_code == 0, result.output
-    assert "running parakeet-cli locally" in result.stderr
+    assert "running parakeet-cli locally, 6 to 28 min per audio hour" in result.stderr
     assert "download" not in result.stderr
     assert Transcript.load(tmp_path / "clip.parakeet.json").words == SPOKEN_WORDS
 
@@ -914,6 +914,7 @@ def test_the_help_says_what_each_platform_runs_and_where_the_model_comes_from() 
     for needed in ["Apple silicon", "parakeet-mlx", "parakeet-cli", "SCRIBE_PARAKEET_MODEL"]:
         assert needed in shown, needed
     assert "overlapping pieces" in shown
+    assert "6 to 28 min per audio hour" in shown
 
 
 def _piece(word: str, seconds: float) -> _Piece:
@@ -991,7 +992,9 @@ def test_every_piece_stays_in_the_measured_range_and_overlaps_the_next(
     _model(tmp_path, monkeypatch)
     fake = FakeCpp(seconds=seconds)
 
-    _cpp(fake).transcribe(_audio(tmp_path), source=SOURCE)
+    # A limit that lets the longest row past the timeout check.
+    backend = ParakeetCpp(run=fake.run, which=_tools, timeout_s=36000)
+    backend.transcribe(_audio(tmp_path), source=SOURCE)
 
     cuts = _cuts(fake)
     starts = [int(_flag(argv, "-ss") or "") for argv in cuts]
@@ -1154,19 +1157,20 @@ def test_the_pieces_share_one_deadline(tmp_path: Path, monkeypatch: pytest.Monke
         now[0] += 100.0
         return fake.run(argv, env=env, timeout=timeout)
 
-    ParakeetCpp(run=run, which=_tools, timeout_s=1000).transcribe(_audio(tmp_path), source=SOURCE)
+    ParakeetCpp(run=run, which=_tools, timeout_s=2000).transcribe(_audio(tmp_path), source=SOURCE)
 
-    assert fake.timeouts == [1000.0, 900.0, 800.0, 700.0, 600.0]
+    assert fake.timeouts == [2000.0, 1900.0, 1800.0, 1700.0, 1600.0]
 
 
 def test_audio_the_timeout_cannot_cover_is_refused_before_any_piece_is_cut(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # At 17 min per audio hour, the default 60 min of running holds about 3.53 h of audio.
+    # At 28 min per audio hour, the default 60 min of running holds 7714 s of audio
+    # heard. 7655 s is cut into 5 pieces, so its 4 overlaps bring it to 7715 s.
     _model(tmp_path, monkeypatch)
-    fake = FakeCpp(seconds=3.6 * 3600)
+    fake = FakeCpp(seconds=7655)
 
-    with pytest.raises(ExternalServiceError, match="would not finish within 3600 s"):
+    with pytest.raises(ExternalServiceError, match="at up to 28 min per audio hour.*within 3600 s"):
         _cpp(fake).transcribe(_audio(tmp_path), source=SOURCE)
 
     assert [Path(argv[0]).name for argv in fake.calls] == ["ffmpeg"]
@@ -1177,32 +1181,32 @@ def test_audio_just_under_what_the_timeout_covers_runs(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _model(tmp_path, monkeypatch)
-    fake = FakeCpp(seconds=3.5 * 3600)
+    fake = FakeCpp(seconds=7654)
 
     _cpp(fake).transcribe(_audio(tmp_path), source=SOURCE)
 
-    assert len(_cuts(fake)) == 8
+    assert len(_cuts(fake)) == 5
 
 
 def test_the_timeout_check_counts_the_overlaps_heard_twice(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # 3586 s fits 1020 s at the slow pace; with its two overlaps, 3616 s does not.
+    # 3586 s fits 1680 s at the slow pace; with its two overlaps, 3616 s does not.
     _model(tmp_path, monkeypatch)
     fake = FakeCpp(seconds=3586)
-    backend = ParakeetCpp(run=fake.run, which=_tools, timeout_s=1020)
+    backend = ParakeetCpp(run=fake.run, which=_tools, timeout_s=1680)
 
-    with pytest.raises(ExternalServiceError, match="would not finish within 1020 s"):
+    with pytest.raises(ExternalServiceError, match="would not finish within 1680 s"):
         backend.transcribe(_audio(tmp_path), source=SOURCE)
 
     assert len(fake.calls) == 1
 
 
-@pytest.mark.parametrize(("minutes", "refused"), [(30, False), (40, True)])
+@pytest.mark.parametrize(("minutes", "refused"), [(20, False), (25, True)])
 def test_audio_the_slow_pace_cannot_finish_within_the_timeout_is_refused(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, minutes: int, refused: bool
 ) -> None:
-    # At 17 min per audio hour, 10 min of running holds about 35 min of audio.
+    # At 28 min per audio hour, 10 min of running holds about 21 min of audio.
     _model(tmp_path, monkeypatch)
     fake = FakeCpp(seconds=minutes * 60)
     backend = ParakeetCpp(run=fake.run, which=_tools, timeout_s=600)
