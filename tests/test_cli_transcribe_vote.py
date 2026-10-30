@@ -128,7 +128,7 @@ def _engines(
 
     backend = ParakeetMlx(run=run_parakeet, which=which, host=lambda: host)
     monkeypatch.setattr("scribe.cli.XaiStt", Xai)
-    monkeypatch.setattr("scribe.cli.ParakeetMlx", lambda: backend)
+    monkeypatch.setattr("scribe.cli.parakeet_backend", lambda: backend)
     voted = partial(
         ensemble.transcribe_voted,
         run=run_tool,
@@ -560,7 +560,7 @@ def test_without_vote_none_of_its_code_runs(
         (gemini_stt, "resolve_api_key"),
     ]:
         monkeypatch.setattr(owner, name, refuse)
-    monkeypatch.setattr("scribe.cli.ParakeetMlx", refuse)
+    monkeypatch.setattr("scribe.cli.parakeet_backend", refuse)
     monkeypatch.setattr("scribe.cli.configure", refuse)
     clip = _clip(tmp_path)
 

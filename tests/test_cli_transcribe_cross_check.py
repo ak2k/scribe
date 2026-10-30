@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, NoReturn
 import pytest
 from typer.testing import CliRunner
 
-from scribe import gaps
+from scribe import gaps, parakeet
 from scribe.cli import app
 from scribe.errors import InputValidationError
 from scribe.parakeet import ParakeetMlx
@@ -95,7 +95,7 @@ def _setup(
         run=run_parakeet, which=lambda name: f"/opt/bin/{name}", host=lambda: host
     )
     monkeypatch.setattr("scribe.cli.XaiStt", Xai)
-    monkeypatch.setattr("scribe.cli.ParakeetMlx", lambda: backend)
+    monkeypatch.setattr("scribe.cli.parakeet_backend", lambda: backend)
     found = "/usr/bin/ffmpeg" if ffmpeg else None
     checked = partial(gaps.check_gaps, run=run_ffmpeg, which=lambda _name: found)
     monkeypatch.setattr("scribe.cli.check_gaps", checked)
@@ -143,6 +143,51 @@ def test_the_cross_check_fills_the_hole_xai_left_with_parakeets_words(
         *("clip.parakeet.json", "clip.transcript.json", "clip.wav")
     ]
     assert (len(calls.parakeet), calls.ffmpeg) == (1, [])
+
+
+def test_a_linux_host_cross_checks_with_parakeet_cli(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _setup(monkeypatch)
+    model = tmp_path / "parakeet.bin"
+    model.write_bytes(b"pretend this is a model")
+    monkeypatch.setenv("SCRIBE_PARAKEET_MODEL", str(model))
+    monkeypatch.delenv("SCRIBE_PARAKEET_CLI", raising=False)
+    monkeypatch.delenv("SCRIBE_PARAKEET_THREADS", raising=False)
+    heard = [*SAID[:2], *((text.strip(), start, end) for text, start, end in HEARD), SAID[2]]
+    tokens = [
+        f"  [{i:2d}] id= 1 frame=  1 dur_idx= 1 dur_val= 1 p=0.9 plog=-0.1 "
+        f't0={round(start * 100):4d} t1={round(end * 100):4d} word_start=true "▁{text}"'
+        for i, (text, start, end) in enumerate(heard)
+    ]
+    report = "\n".join(["Segments (1):", 'Segment 0: [0 -> 900] ""', "Tokens [6]:", *tokens])
+    ran: list[str] = []
+
+    def run(argv: list[str], *, env: dict[str, str], timeout: float) -> subprocess.CompletedProcess[str]:
+        ran.append(Path(argv[0]).name)
+        if argv[0].endswith("ffmpeg"):
+            Path(argv[-1]).write_bytes(b"RIFF")
+        return subprocess.CompletedProcess(argv, 0, "", report)
+
+    def refuse() -> NoReturn:
+        raise AssertionError("chose parakeet-mlx on Linux")
+
+    backend = parakeet.ParakeetCpp(run=run, which=lambda name: f"/opt/bin/{name}")
+    monkeypatch.setattr("scribe.parakeet.ParakeetCpp", lambda: backend)
+    monkeypatch.setattr("scribe.parakeet.ParakeetMlx", refuse)
+    chooser = partial(parakeet.parakeet_backend, host=lambda: LINUX)
+    monkeypatch.setattr("scribe.cli.parakeet_backend", chooser)
+
+    result = _transcribe(tmp_path)
+
+    assert result.exit_code == 0, result.output
+    assert ran == ["ffmpeg", "parakeet-cli"]
+    announced = next(line for line in result.stderr.splitlines() if "cross-checking" in line)
+    assert "parakeet-cli" in announced
+    assert "1.2 GB" not in announced
+    filled = Transcript.load(tmp_path / "clip.transcript.json")
+    assert [word.text for word in filled.words] == ["Hello", "there.", "we", "lost", "this", "Bye."]
+    assert Transcript.load(tmp_path / "clip.parakeet.json").engine.name == "parakeet-cpp"
 
 
 def test_no_cross_check_writes_xais_transcript_and_runs_nothing_else(

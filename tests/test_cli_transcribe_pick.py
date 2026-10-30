@@ -102,7 +102,7 @@ def _setup(
         run=run_parakeet, which=lambda name: f"/opt/bin/{name}", host=lambda: host
     )
     monkeypatch.setattr("scribe.cli.XaiStt", Xai)
-    monkeypatch.setattr("scribe.cli.ParakeetMlx", lambda: backend)
+    monkeypatch.setattr("scribe.cli.parakeet_backend", lambda: backend)
     monkeypatch.setenv("XAI_API_KEY", "xai-key")
 
 

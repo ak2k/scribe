@@ -58,12 +58,12 @@ def no_real_claude(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture(autouse=True)
 def no_real_parakeet(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Fail a CLI test that reaches the real parakeet backend, rather than let it spawn uvx."""
+    """Fail a CLI test that reaches a real parakeet backend, of either kind, rather than spawn."""
 
     def refuse() -> NoReturn:
         raise AssertionError("reached the real parakeet backend; swap it in")
 
-    monkeypatch.setattr("scribe.cli.ParakeetMlx", refuse)
+    monkeypatch.setattr("scribe.cli.parakeet_backend", refuse)
 
 
 @pytest.fixture(autouse=True)
