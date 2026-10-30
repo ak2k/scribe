@@ -1277,6 +1277,16 @@ def test_a_model_setting_that_names_a_loop_or_too_long_a_name_is_no_input(
         assert ParakeetCpp().inputs() == {}
 
 
+@pytest.mark.parametrize("setting", [None, ""])
+def test_no_model_setting_is_no_input(monkeypatch: pytest.MonkeyPatch, setting: str | None) -> None:
+    if setting is None:
+        monkeypatch.delenv("SCRIBE_PARAKEET_MODEL", raising=False)
+    else:
+        monkeypatch.setenv("SCRIBE_PARAKEET_MODEL", setting)
+
+    assert ParakeetCpp().inputs() == {}
+
+
 def test_the_model_setting_is_an_input_before_the_file_exists(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
