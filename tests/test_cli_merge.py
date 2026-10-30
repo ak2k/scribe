@@ -21,10 +21,12 @@ def _write(
     speaker: int = 0,
     duration: float | None = 30.0,
     params: dict[str, float | int | bool | str] | None = None,
+    language: str | None = None,
 ) -> Path:
     Transcript(
         source=Source(kind="audio", ref=f"{path.stem}.wav"),
         engine=Engine(name="xai-stt", params=params or {}),
+        language=language,
         duration=duration,
         text=" ".join(text for text, _ in said),
         words=[
@@ -179,7 +181,9 @@ def test_a_wordless_app_side_keeps_every_mic_word_as_the_operators(tmp_path: Pat
 
     assert result.exit_code == 0, result.output
     assert result.stdout == f"{out}\n"
-    assert f"APP {app_path} has no words" in result.stderr
+    assert result.stderr.splitlines()[0] == (
+        f"scribe: APP {app_path} has no words; merged the other side's words alone"
+    )
     assert result.stderr.count("\n") == 2
     merged = Transcript.load(out)
     assert merged.tracks is not None
@@ -201,7 +205,9 @@ def test_a_wordless_mic_side_keeps_every_app_word_with_its_speaker(tmp_path: Pat
 
     assert result.exit_code == 0, result.output
     assert result.stdout == f"{out}\n"
-    assert f"MIC {mic} has no words" in result.stderr
+    assert result.stderr.splitlines()[0] == (
+        f"scribe: MIC {mic} has no words; merged the other side's words alone"
+    )
     assert result.stderr.count("\n") == 2
     merged = Transcript.load(out)
     assert merged.tracks is not None
@@ -227,6 +233,37 @@ def test_two_wordless_sides_exit_two_naming_both(tmp_path: Path) -> None:
     assert result.stderr.count("\n") == 1
     assert result.stdout == ""
     assert _snapshot(tmp_path) == before
+
+
+def test_one_wordless_transcript_given_twice_is_refused_as_wordless(tmp_path: Path) -> None:
+    mic = _write(tmp_path / "call.mic.json")
+    app_path = tmp_path / "call.app.json"
+    shutil.copy(mic, app_path)
+
+    result = runner.invoke(app, ["merge", str(mic), str(app_path)])
+
+    assert result.exit_code == 2
+    assert "neither has words" in result.stderr
+
+
+@pytest.mark.parametrize("wordless", ["MIC", "APP"])
+def test_a_one_sided_merge_takes_the_language_of_the_side_with_words(
+    tmp_path: Path, wordless: str
+) -> None:
+    said = [("we", 1.0), ("can", 1.3)]
+    sides = {
+        role: _write(tmp_path / f"call.{role}.json", language="")
+        if role == wordless
+        else _write(tmp_path / f"call.{role}.json", *said, language="en")
+        for role in ("MIC", "APP")
+    }
+    mic, app_path = sides["MIC"], sides["APP"]
+    out = tmp_path / "merged.json"
+
+    result = runner.invoke(app, ["merge", str(mic), str(app_path), "--out", str(out)])
+
+    assert result.exit_code == 0, result.output
+    assert Transcript.load(out).language == "en"
 
 
 def test_turns_holds_every_word_of_a_call_with_one_wordless_side(tmp_path: Path) -> None:
