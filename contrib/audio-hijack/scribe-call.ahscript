@@ -6,10 +6,12 @@ const log = '"$HOME/Library/Logs/scribe-call.log"';
 const q = (s) => app.shellEscapeArgument(s);
 const stem = (r) => r.fileName.replace(/\.[^.]*$/, "");
 // Audio Hijack runs each command as /bin/sh -c from / with no environment variables, so every
-// command first sets HOME (unless given), USER and PATH and exports them to what it starts.
+// command first sets HOME and USER (unless given) and PATH and exports them to what it starts.
+// With no HOME passed, the home comes from the user database through ~user.
 // The PATH holds the directories where scribe and the tools it runs (claude, uvx) are installed.
 const env =
-  "HOME=~; USER=\"${USER:-$(/usr/bin/id -un)}\"; " +
+  "[ -n \"${HOME:-}\" ] || eval \"HOME=~$(/usr/bin/id -un)\"; " +
+  "USER=\"${USER:-$(/usr/bin/id -un)}\"; " +
   "PATH=\"$HOME/.local/bin:/etc/profiles/per-user/$USER/bin:$HOME/.nix-profile/bin:" +
   "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin\"; export HOME USER PATH; ";
 // A second run in the same minute is named "... mic 2" and "... app 2".
