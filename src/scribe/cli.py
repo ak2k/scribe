@@ -329,7 +329,7 @@ def transcribe(
     Unless --no-cross-check is given, Parakeet TDT v3 then transcribes the
     audio locally: on Apple silicon with parakeet-mlx, about 45 s per audio
     hour (a first run downloads a ~1.2 GB model); elsewhere with parakeet-cli,
-    6 to 17 min per audio hour on 8 CPU threads, as `scribe parakeet`
+    6 to 28 min per audio hour on 8 CPU threads, as `scribe parakeet`
     describes. Its transcript goes beside --out as BASE.parakeet.json.
     Where 3 or more of xAI's words in a row are each more
     than 2 s from where Parakeet heard them, they first move to Parakeet's
@@ -2051,16 +2051,16 @@ def parakeet(
     minutes. Elsewhere, runs whisper.cpp's parakeet-cli, found on PATH or at
     SCRIBE_PARAKEET_CLI, on the ggml model file SCRIBE_PARAKEET_MODEL names
     (an absolute path; nothing is downloaded), after ffmpeg, which must be on
-    PATH, converts the audio. It takes 6 to 17 min per audio hour on 8 CPU
+    PATH, converts the audio. It takes 6 to 28 min per audio hour on 8 CPU
     threads, by the machine's load, and more per hour under 11 min of audio
     (5 min of audio took 1.5 to 5 min); SCRIBE_PARAKEET_THREADS sets the
     count, which is at most 8 unless set. parakeet-cli holds all the audio it
     is given in memory, about 15 GB for 31 min, and heard no words in an hour
     of audio, so audio over 31 min goes to it in overlapping pieces of at most
     30 min, one at a time. Audio it could not finish within the run's limit at
-    its slow pace is refused before it runs. Either way nothing is uploaded
-    and no key is needed. A run is stopped after 60 minutes. The words carry
-    timings but no speakers.
+    its slow pace, about 2.1 h, is refused before it runs. Either way nothing
+    is uploaded and no key is needed. A run is stopped after 60 minutes. The
+    words carry timings but no speakers.
     """
     started = time.monotonic()
     try:

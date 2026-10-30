@@ -35,14 +35,15 @@ downloads a ~1.2 GB model. Elsewhere, Linux included, it runs as whisper.cpp's
 `parakeet-cli`, found on `PATH` or at `SCRIBE_PARAKEET_CLI`, on the ggml model
 file `SCRIBE_PARAKEET_MODEL` names by absolute path (scribe downloads nothing;
 the host provides both), with `ffmpeg` on `PATH` to convert the audio. That
-takes 6 to 17 min per audio hour on 8 CPU threads, by the machine's load, and
+takes 6 to 28 min per audio hour on 8 CPU threads, by the machine's load, and
 more per hour under 11 min of audio (5 min of audio took 1.5 to 5 min).
 `SCRIBE_PARAKEET_THREADS` sets the count, at most 8 unless set.
 `parakeet-cli` holds all the audio it is given in memory, about 15 GB for 31 min,
 and heard no words in an hour of audio, so audio over 31 min goes to it in
 overlapping pieces of at most 30 min, one at a time. Audio it could not finish
-within the run's limit at its slow pace is refused before it runs, and the
-cross-check checks that audio by loudness instead. `scribe
+within the run's limit at its slow pace, about 2.1 h with the 60-min limit, is
+refused before it runs, and the cross-check checks that audio by loudness
+instead. `scribe
 parakeet AUDIO` runs it alone.
 
 xAI can drop a passage of speech and return no words for it. So `transcribe`

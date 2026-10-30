@@ -390,7 +390,7 @@ _PIECE_SECONDS = 30 * 60
 # 7.5 s from any word it owns: a word beside a cut is heard with one side missing.
 _OVERLAP_SECONDS = 15
 # The slow end of the measured pace, in minutes of running per minute of audio.
-_SLOW_PACE = 17 / 60
+_SLOW_PACE = 28 / 60
 # What 16 kHz mono 16-bit audio takes per second.
 _WAV_BYTES_PER_SECOND = 32_000
 # The ggml runtime's own settings, the GPUs it may use, and where its backend
@@ -554,15 +554,15 @@ def _model() -> Path:
 class ParakeetCpp:
     """Transcription by whisper.cpp's `parakeet-cli` on this machine, nothing uploaded."""
 
-    # Measured on a busy shared 32-thread host: 31 min of audio in 3 to 9 min.
+    # Measured on a busy shared 32-thread host: 31 min of audio in 3 to 14 min.
     # Under about 11 min of audio the tool attends over all of it at once, which
     # costs more per hour: 5 min of audio took 1.5 to 5 min.
     pace = (
-        "with parakeet-cli, 6 to 17 min per audio hour on 8 CPU threads and more per hour"
+        "with parakeet-cli, 6 to 28 min per audio hour on 8 CPU threads and more per hour"
         " under 11 min of audio; nothing is downloaded"
     )
     notice = (
-        "running parakeet-cli locally, 6 to 17 min per audio hour on 8 CPU threads"
+        "running parakeet-cli locally, 6 to 28 min per audio hour on 8 CPU threads"
         " and more per hour under 11 min of audio"
     )
 
@@ -621,7 +621,7 @@ class ParakeetCpp:
         heard = seconds + (pieces - 1) * _OVERLAP_SECONDS
         if heard * _SLOW_PACE > self.timeout_s:
             raise ExternalServiceError(
-                f"the audio is {seconds / 60:.1f} min long; at up to 17 min per audio hour,"
+                f"the audio is {seconds / 60:.1f} min long; at up to 28 min per audio hour,"
                 f" parakeet-cli would not finish within {self.timeout_s:g} s"
             )
 
