@@ -145,15 +145,15 @@ def test_the_cross_check_fills_the_hole_xai_left_with_parakeets_words(
     assert (len(calls.parakeet), calls.ffmpeg) == (1, [])
 
 
-def test_a_linux_host_cross_checks_with_parakeet_cli(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def _linux_cpp(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Run the real chooser as on Linux, its parakeet-cli and ffmpeg faked; return what ran."""
     _setup(monkeypatch)
     model = tmp_path / "parakeet.bin"
     model.write_bytes(b"pretend this is a model")
     monkeypatch.setenv("SCRIBE_PARAKEET_MODEL", str(model))
     monkeypatch.delenv("SCRIBE_PARAKEET_CLI", raising=False)
     monkeypatch.delenv("SCRIBE_PARAKEET_THREADS", raising=False)
+    monkeypatch.delenv("SCRIBE_PARAKEET_MAX_MINUTES", raising=False)
     heard = [*SAID[:2], *((text.strip(), start, end) for text, start, end in HEARD), SAID[2]]
     tokens = [
         f"  [{i:2d}] id= 1 frame=  1 dur_idx= 1 dur_val= 1 p=0.9 plog=-0.1 "
@@ -168,7 +168,9 @@ def test_a_linux_host_cross_checks_with_parakeet_cli(
     ) -> subprocess.CompletedProcess[str]:
         ran.append(Path(argv[0]).name)
         if argv[0].endswith("ffmpeg"):
-            Path(argv[-1]).write_bytes(b"RIFF")
+            # Sparse: the clip's 9 s as 16 kHz mono 16-bit audio.
+            with Path(argv[-1]).open("wb") as wav:
+                wav.truncate(44 + 9 * 32000)
         return subprocess.CompletedProcess(argv, 0, "", report)
 
     def refuse() -> NoReturn:
@@ -179,6 +181,13 @@ def test_a_linux_host_cross_checks_with_parakeet_cli(
     monkeypatch.setattr("scribe.parakeet.ParakeetMlx", refuse)
     chooser = partial(parakeet.parakeet_backend, host=lambda: LINUX)
     monkeypatch.setattr("scribe.cli.parakeet_backend", chooser)
+    return ran
+
+
+def test_a_linux_host_cross_checks_with_parakeet_cli(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ran = _linux_cpp(tmp_path, monkeypatch)
 
     result = _transcribe(tmp_path)
 
@@ -190,6 +199,22 @@ def test_a_linux_host_cross_checks_with_parakeet_cli(
     filled = Transcript.load(tmp_path / "clip.transcript.json")
     assert [word.text for word in filled.words] == ["Hello", "there.", "we", "lost", "this", "Bye."]
     assert Transcript.load(tmp_path / "clip.parakeet.json").engine.name == "parakeet-cpp"
+
+
+def test_audio_over_the_parakeet_cli_cap_is_checked_by_loudness(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ran = _linux_cpp(tmp_path, monkeypatch)
+    monkeypatch.setenv("SCRIBE_PARAKEET_MAX_MINUTES", "0.1")
+
+    result = _transcribe(tmp_path)
+
+    assert result.exit_code == 0, result.output
+    assert ran == ["ffmpeg"]
+    refused = [line for line in result.stderr.splitlines() if "over the 0.1 min cap" in line]
+    assert len(refused) == 1, result.stderr
+    assert refused[0].endswith("checking the holes by loudness instead")
+    assert result.stderr.splitlines()[-len(LOUDNESS) :] == LOUDNESS
 
 
 def test_no_cross_check_writes_xais_transcript_and_runs_nothing_else(

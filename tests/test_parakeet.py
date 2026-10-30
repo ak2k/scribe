@@ -19,6 +19,7 @@ from typer.testing import CliRunner
 from scribe.cli import app
 from scribe.errors import ExternalServiceError
 from scribe.parakeet import (
+    DEFAULT_MAX_MINUTES,
     DEFAULT_TIMEOUT_S,
     ParakeetBackend,
     ParakeetCpp,
@@ -580,9 +581,11 @@ class FakeCpp:
         returncode: int = 0,
         ffmpeg_exit: int = 0,
         error: Exception | None = None,
+        seconds: float = 3.0,
     ) -> None:
         self.report = _segments(SPOKEN) if report is None else report
         self.returncode, self.ffmpeg_exit, self.error = returncode, ffmpeg_exit, error
+        self.seconds = seconds
         self.calls: list[list[str]] = []
         self.envs: list[dict[str, str]] = []
         self.timeouts: list[float] = []
@@ -595,7 +598,9 @@ class FakeCpp:
         self.timeouts.append(timeout)
         if argv[0] == FFMPEG:
             if self.ffmpeg_exit == 0:
-                Path(argv[-1]).write_bytes(b"RIFF")
+                # Sparse: 16 kHz mono 16-bit audio of that length, without writing it.
+                with Path(argv[-1]).open("wb") as wav:
+                    wav.truncate(44 + int(self.seconds * 32000))
             return subprocess.CompletedProcess(argv, self.ffmpeg_exit, "", "Invalid data found")
         if self.error is not None:
             raise self.error
@@ -608,6 +613,7 @@ def _model(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("SCRIBE_PARAKEET_MODEL", str(model))
     monkeypatch.delenv("SCRIBE_PARAKEET_CLI", raising=False)
     monkeypatch.delenv("SCRIBE_PARAKEET_THREADS", raising=False)
+    monkeypatch.delenv("SCRIBE_PARAKEET_MAX_MINUTES", raising=False)
     return model
 
 
@@ -896,3 +902,119 @@ def test_the_help_says_what_each_platform_runs_and_where_the_model_comes_from() 
     shown = " ".join(result.stdout.split())
     for needed in ["Apple silicon", "parakeet-mlx", "parakeet-cli", "SCRIBE_PARAKEET_MODEL"]:
         assert needed in shown, needed
+    assert f"{DEFAULT_MAX_MINUTES:g} min" in shown
+    assert "SCRIBE_PARAKEET_MAX_MINUTES" in shown
+
+
+def test_audio_longer_than_the_cap_is_refused_before_the_tool_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _model(tmp_path, monkeypatch)
+    monkeypatch.delenv("SCRIBE_PARAKEET_MAX_MINUTES", raising=False)
+    fake = FakeCpp(seconds=DEFAULT_MAX_MINUTES * 60 + 30)
+
+    with pytest.raises(ExternalServiceError) as caught:
+        _cpp(fake).transcribe(_audio(tmp_path), source=SOURCE)
+
+    message = str(caught.value)
+    assert f"over the {DEFAULT_MAX_MINUTES:g} min cap" in message
+    assert "SCRIBE_PARAKEET_MAX_MINUTES" in message
+    assert "memory" in message
+    assert [Path(argv[0]).name for argv in fake.calls] == ["ffmpeg"]
+    assert not Path(fake.calls[0][-1]).parent.exists()
+
+
+def test_audio_just_under_the_cap_runs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _model(tmp_path, monkeypatch)
+    monkeypatch.delenv("SCRIBE_PARAKEET_MAX_MINUTES", raising=False)
+    fake = FakeCpp(seconds=DEFAULT_MAX_MINUTES * 60 - 1)
+
+    transcript = _cpp(fake).transcribe(_audio(tmp_path), source=SOURCE)
+
+    assert transcript.words == SPOKEN_WORDS
+
+
+def test_the_cap_is_set_by_the_environment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _model(tmp_path, monkeypatch)
+    monkeypatch.setenv("SCRIBE_PARAKEET_MAX_MINUTES", "2")
+    with pytest.raises(ExternalServiceError, match="over the 2 min cap"):
+        _cpp(FakeCpp(seconds=150)).transcribe(_audio(tmp_path), source=SOURCE)
+
+    monkeypatch.setenv("SCRIBE_PARAKEET_MAX_MINUTES", str(DEFAULT_MAX_MINUTES * 2))
+    fake = FakeCpp(seconds=DEFAULT_MAX_MINUTES * 90)
+    assert _cpp(fake).transcribe(_audio(tmp_path), source=SOURCE).words == SPOKEN_WORDS
+
+
+@pytest.mark.parametrize("setting", ["0", "-5", "an hour", "nan", "inf"])
+def test_a_cap_that_is_not_a_positive_number_is_refused_up_front(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, setting: str
+) -> None:
+    _model(tmp_path, monkeypatch)
+    monkeypatch.setenv("SCRIBE_PARAKEET_MAX_MINUTES", setting)
+    fake = FakeCpp()
+
+    with pytest.raises(ExternalServiceError, match="SCRIBE_PARAKEET_MAX_MINUTES must be"):
+        _cpp(fake).resolve()
+
+    assert fake.calls == []
+
+
+@pytest.mark.parametrize(("minutes", "refused"), [(30, False), (40, True)])
+def test_audio_the_slow_pace_cannot_finish_within_the_timeout_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, minutes: int, refused: bool
+) -> None:
+    # At 17 min per audio hour, 10 min of running holds about 35 min of audio.
+    _model(tmp_path, monkeypatch)
+    monkeypatch.setenv("SCRIBE_PARAKEET_MAX_MINUTES", "1000")
+    fake = FakeCpp(seconds=minutes * 60)
+    backend = ParakeetCpp(run=fake.run, which=_tools, timeout_s=600)
+
+    if refused:
+        with pytest.raises(ExternalServiceError, match="would not finish within 600 s"):
+            backend.transcribe(_audio(tmp_path), source=SOURCE)
+        assert len(fake.calls) == 1
+    else:
+        assert backend.transcribe(_audio(tmp_path), source=SOURCE).words == SPOKEN_WORDS
+
+
+_GGML = ("GGML_SCHED_MAX_COPIES", "CUDA_VISIBLE_DEVICES", "LD_LIBRARY_PATH")
+
+
+@pytest.mark.parametrize("name", _GGML)
+def test_the_parakeet_cli_child_gets_the_ggml_runtime_settings(
+    name: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _model(tmp_path, monkeypatch)
+    monkeypatch.setenv(name, "1")
+    fake = FakeCpp()
+
+    _cpp(fake).transcribe(_audio(tmp_path), source=SOURCE)
+
+    given = [set(env) for env in fake.envs]
+    assert all(name in names for names in given)
+
+
+@pytest.mark.parametrize("name", _GGML)
+def test_the_parakeet_mlx_child_does_not_get_them(
+    name: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(name, "1")
+    fake = FakeParakeet()
+
+    _backend(fake).transcribe(_audio(tmp_path), source=SOURCE)
+
+    names = set(fake.env)
+    assert name not in names
+
+
+def test_out_cannot_be_the_model(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    model = _model(tmp_path, monkeypatch)
+    fake = FakeCpp()
+    _swap(monkeypatch, _cpp(fake))
+
+    result = runner.invoke(app, ["parakeet", str(_audio(tmp_path)), "--out", str(model)])
+
+    assert result.exit_code == 2
+    assert f"--out {model} is the Parakeet model" in result.stderr
+    assert fake.calls == []
+    assert model.read_bytes() == b"pretend this is a model"
