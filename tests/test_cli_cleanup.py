@@ -852,6 +852,7 @@ def test_chunk_words_model_and_budget_reach_the_backend(
     assert result.exit_code == 0, result.output
     assert made[0].model == "sonnet"
     assert made[0].max_budget_usd == 2.5
+    assert made[0].disable_tools
     # Four turns, the 14-word second one cut at a sentence into two pieces.
     assert len(made[0].calls) == 5
     assert _sidecar(tmp_path / "transcript_two_speakers.cleanup.json")["chunks"] == 5
@@ -873,8 +874,12 @@ def _patch_real_backend(
     def which(name: str) -> str | None:
         return f"/opt/nowhere/bin/{name}"
 
-    def factory(*, model: str, max_budget_usd: float) -> ClaudeCliBackend:
-        return ClaudeCliBackend(model, max_budget_usd, run=run, which=which)
+    def factory(
+        *, model: str, max_budget_usd: float, disable_tools: bool = False
+    ) -> ClaudeCliBackend:
+        return ClaudeCliBackend(
+            model, max_budget_usd, run=run, which=which, disable_tools=disable_tools
+        )
 
     monkeypatch.setattr("scribe.cli.ClaudeCliBackend", factory)
 
@@ -891,6 +896,30 @@ def test_the_real_backend_keeps_its_logs_off_stdout(
     assert result.stdout == f"{tmp_path / 'transcript_two_speakers.clean.md'}\n"
     assert "claude_cli.executable" in result.stderr
     assert "claude_route" not in _sidecar(tmp_path / "transcript_two_speakers.cleanup.json")
+
+
+def test_cleanup_runs_the_model_with_no_tools_and_no_mcp_servers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The transcript is recorded speech: text in it must not reach a model
+    # that could act on it.
+    argvs: list[list[str]] = []
+
+    def run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        argvs.append(argv)
+        return _succeed(argv, **kwargs)
+
+    _patch_real_backend(monkeypatch, run)
+    staged = _staged(tmp_path)
+
+    result = runner.invoke(app, ["cleanup", str(staged)])
+
+    assert result.exit_code == 0, result.output
+    assert argvs
+    for argv in argvs:
+        assert argv[argv.index("--tools") + 1] == ""
+        assert "--strict-mcp-config" in argv
+        assert "--mcp-config" not in argv
 
 
 def test_log_lines_carry_no_color_codes_off_a_terminal(
