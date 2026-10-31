@@ -625,6 +625,7 @@ def _model(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("SCRIBE_PARAKEET_MODEL", str(model))
     monkeypatch.delenv("SCRIBE_PARAKEET_CLI", raising=False)
     monkeypatch.delenv("SCRIBE_PARAKEET_THREADS", raising=False)
+    monkeypatch.delenv("SCRIBE_PARAKEET_PACE", raising=False)
     return model
 
 
@@ -915,6 +916,7 @@ def test_the_help_says_what_each_platform_runs_and_where_the_model_comes_from() 
         assert needed in shown, needed
     assert "overlapping pieces" in shown
     assert "6 to 28 min per audio hour" in shown
+    assert "SCRIBE_PARAKEET_PACE" in shown
 
 
 def _piece(word: str, seconds: float) -> _Piece:
@@ -1219,6 +1221,78 @@ def test_audio_the_slow_pace_cannot_finish_within_the_timeout_is_refused(
         assert len(fake.calls) == 1
     else:
         assert backend.transcribe(_audio(tmp_path), source=SOURCE).words == SPOKEN_WORDS
+
+
+@pytest.mark.parametrize(("seconds", "refused"), [(2900, False), (3100, True)])
+def test_the_pace_setting_sets_what_the_timeout_covers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, seconds: int, refused: bool
+) -> None:
+    # At 12 min per audio hour, 10 min of running holds 3000 s of audio heard; each
+    # length is cut in two, so one overlap is heard twice. At 28, neither fits.
+    _model(tmp_path, monkeypatch)
+    monkeypatch.setenv("SCRIBE_PARAKEET_PACE", "12")
+    fake = FakeCpp(seconds=seconds)
+    backend = ParakeetCpp(run=fake.run, which=_tools, timeout_s=600)
+
+    if refused:
+        with pytest.raises(
+            ExternalServiceError, match=r"at up to 12 min per audio hour.*within 600 s"
+        ):
+            backend.transcribe(_audio(tmp_path), source=SOURCE)
+        assert len(fake.calls) == 1
+    else:
+        backend.transcribe(_audio(tmp_path), source=SOURCE)
+        assert len(_cuts(fake)) == 2
+
+
+def test_a_fractional_pace_is_read_as_given(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _model(tmp_path, monkeypatch)
+    monkeypatch.setenv("SCRIBE_PARAKEET_PACE", "7.5")
+    fake = FakeCpp(seconds=5000)
+
+    with pytest.raises(ExternalServiceError, match=r"at up to 7\.5 min per audio hour"):
+        ParakeetCpp(run=fake.run, which=_tools, timeout_s=600).transcribe(
+            _audio(tmp_path), source=SOURCE
+        )
+
+
+@pytest.mark.parametrize("setting", ["", "fast", "0", "-3", "nan", "inf", "12 min"])
+def test_a_pace_that_is_no_positive_number_fails_before_anything_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, setting: str
+) -> None:
+    _model(tmp_path, monkeypatch)
+    monkeypatch.setenv("SCRIBE_PARAKEET_PACE", setting)
+    fake = FakeCpp()
+
+    with pytest.raises(ExternalServiceError, match="SCRIBE_PARAKEET_PACE") as caught:
+        _cpp(fake).resolve()
+
+    assert repr(setting) in str(caught.value)
+    assert fake.calls == []
+
+
+def test_the_pace_announced_is_the_one_set(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _model(tmp_path, monkeypatch)
+    monkeypatch.setenv("SCRIBE_PARAKEET_PACE", "12")
+    _swap(monkeypatch, _cpp(FakeCpp()))
+
+    result = runner.invoke(app, ["parakeet", str(_audio(tmp_path))])
+
+    assert result.exit_code == 0, result.output
+    assert "running parakeet-cli locally, up to 12 min per audio hour" in result.stderr
+    assert "28" not in result.stderr
+    assert "up to 12 min per audio hour" in ParakeetCpp().pace
+    assert "28" not in ParakeetCpp().pace
+
+
+def test_the_pace_setting_leaves_parakeet_mlx_as_it_was(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("SCRIBE_PARAKEET_PACE", raising=False)
+    before = (ParakeetMlx().pace, ParakeetMlx().notice)
+    monkeypatch.setenv("SCRIBE_PARAKEET_PACE", "12")
+
+    assert (ParakeetMlx().pace, ParakeetMlx().notice) == before
 
 
 _GGML = ("GGML_SCHED_MAX_COPIES", "CUDA_VISIBLE_DEVICES", "LD_LIBRARY_PATH")
