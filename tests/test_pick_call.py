@@ -19,10 +19,12 @@ from scribe.pick import (
     pick_readings,
     read_reply,
     reference_first,
+    replay_readings,
     system_prompt,
 )
 from scribe.schema import Engine, Transcript, Word
 from scribe.speakers import render
+from scribe.turns import build_turns
 from scribe.vote import norm_tokens
 from tests.pick_fakes import (
     answering,
@@ -41,7 +43,7 @@ if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
     from pathlib import Path
 
-    from scribe.pick import Picking
+    from scribe.pick import Picking, Side
 
 CAUSES = {
     "max_tokens",
@@ -390,6 +392,83 @@ def test_a_reference_reading_ten_words_longer_is_put_in_whatever_was_answered(
     assert _texts(picking.transcript) == _texts(heard if put_in else said)
     if not put_in:
         assert picking.transcript.words == said.words
+
+
+def _restorable(
+    before: Sequence[tuple[str, int]], after: Sequence[tuple[str, int]], replaced: int = 1
+) -> tuple[Transcript, Transcript]:
+    """A one-word reading by speaker `replaced`, against a reference's eleven words there."""
+    start = float(len(before))
+    resumed = [
+        Word(text=text, start=start + 11 + index, end=start + 11.4 + index, speaker=speaker)
+        for index, (text, speaker) in enumerate(after)
+    ]
+    said = [*_said(*before, ("red", replaced)), *resumed]
+    texts = [*(text for text, _ in before), *_BIRDS[:11], *(text for text, _ in after)]
+    heard = _said(*((text, None) for text in texts))
+    return transcript(said), transcript(heard, engine="parakeet-mlx")
+
+
+_AROUND = (("we", 0), ("saw", 0))
+_AFTER = (("at", 0), ("noon", 0))
+
+
+@pytest.mark.parametrize(
+    ("before", "after"),
+    [(_AROUND, _AFTER), ((), _AFTER), (_AROUND, ()), ((), ())],
+    ids=["middle", "start", "end", "whole"],
+)
+def test_a_restored_reading_carries_no_speaker_and_no_other_word_changes(
+    before: tuple[tuple[str, int], ...], after: tuple[tuple[str, int], ...]
+) -> None:
+    said, heard = _restorable(before, after)
+    backend = FakeSpeakerBackend(reply=answering(choosing({"red"})))
+
+    picking = pick_readings(said, heard, backend)
+
+    assert picking.picked == ("restored",)
+    words = picking.transcript.words
+    stop = len(before) + 11
+    assert [word.text for word in words[len(before) : stop]] == list(_BIRDS[:11])
+    assert {word.speaker for word in words[len(before) : stop]} == {None}
+    assert words[: len(before)] == said.words[: len(before)]
+    assert words[stop:] == said.words[len(before) + 1 :]
+    replayed = replay_readings(
+        said,
+        heard,
+        [
+            cast("tuple[float, float, str, str, Side]", tuple(row))
+            for row in _record(picking.transcript)
+        ],
+        model="opus",
+        version=PICK_PROMPT_VERSION,
+        context_chars=0,
+    )
+    assert replayed.transcript.words == words
+
+
+def test_a_reading_the_model_picked_still_takes_the_nearest_replaced_speaker() -> None:
+    said, heard = _restorable(_AROUND, _AFTER)
+    backend = FakeSpeakerBackend(reply=answering(choosing({" ".join(_BIRDS[:11])})))
+
+    picking = pick_readings(said, heard, backend)
+
+    assert picking.picked == ("reference",)
+    assert [word.speaker for word in picking.transcript.words] == [0, 0, *[1] * 11, 0, 0]
+
+
+@pytest.mark.parametrize("replaced", [0, 1], ids=["own-word", "another-speakers-word"])
+def test_a_restored_span_mid_turn_is_three_turns(replaced: int) -> None:
+    said, heard = _restorable(_AROUND, _AFTER, replaced)
+    backend = FakeSpeakerBackend(reply=answering(choosing({"red"})))
+
+    turns = build_turns(pick_readings(said, heard, backend).transcript.words)
+
+    assert [(turn.speaker, turn.text) for turn in turns] == [
+        ("Speaker 1", "we saw"),
+        ("Speaker ?", " ".join(_BIRDS[:11])),
+        ("Speaker 1", "at noon"),
+    ]
 
 
 def test_the_result_records_the_pick_in_its_params() -> None:

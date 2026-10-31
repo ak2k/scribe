@@ -14,9 +14,10 @@ from scribe.cli import app
 from scribe.ear import FAILED, RECOGNIZERS, LocalEars
 from scribe.pick import DEFAULT_PICK_MODEL, PICK_PROMPT_VERSION, system_prompt
 from scribe.schema import Transcript, Word
+from tests.cleanup_fakes import patch_backend
 from tests.diarizer_fakes import FakeWorker, found
 from tests.pick_fakes import answering, choosing, numbered, transcript
-from tests.speakers_fakes import FakeSpeakerBackend
+from tests.speakers_fakes import FakeSpeakerBackend, echo
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -166,6 +167,74 @@ def test_the_summary_names_the_spots_restored_for_words_the_transcript_dropped(
     picked = Transcript.load(tmp_path / "said.picked.json")
     assert [word.text for word in picked.words] == ["we", "saw", *birds, "at"]
     assert picked.engine.params["pick_restored"] == 1
+
+
+@pytest.mark.parametrize(
+    ("before", "after"),
+    [
+        (("we", "saw"), ("at", "noon")),
+        ((), ("at", "noon")),
+        (("we", "saw"), ()),
+    ],
+    ids=["middle", "start", "end"],
+)
+def test_every_later_command_takes_a_restored_span_as_speaker_question(
+    before: tuple[str, ...],
+    after: tuple[str, ...],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    birds = [f"bird{index}" for index in range(11)]
+    said, heard = tmp_path / "said.json", tmp_path / "heard.json"
+    # Two speakers, whichever side of the span they talk on, so the labels are ranked.
+    kept = [*before, *after]
+    speakers = {text: index % 2 for index, text in enumerate(kept)}
+    resumed = [
+        Word(
+            text=text,
+            start=len(before) + 11.0 + at,
+            end=len(before) + 11.4 + at,
+            speaker=speakers[text],
+        )
+        for at, text in enumerate(after)
+    ]
+    leading = [
+        Word(text=text, start=float(at), end=at + 0.4, speaker=speakers[text])
+        for at, text in enumerate(before)
+    ]
+    replaced = Word(text="red", start=float(len(before)), end=len(before) + 0.4, speaker=1)
+    transcript([*leading, replaced, *resumed]).dump(said)
+    transcript(_said(*before, *birds, *after), engine="parakeet-mlx").dump(heard)
+    _patch(monkeypatch, reply=answering(choosing({"red"})))
+    picked = tmp_path / "said.picked.json"
+
+    assert runner.invoke(app, ["pick", str(said), str(heard)]).exit_code == 0
+    assert {word.speaker for word in Transcript.load(picked).words if word.text in birds} == {None}
+
+    formats = ["--format", "json", "--format", "md", "--format", "srt", "--format", "vtt"]
+    built = runner.invoke(app, ["turns", "--no-llm-speakers", str(picked), *formats])
+    assert built.exit_code == 0, built.output
+    span = " ".join(birds)
+    assert "**Speaker ?**" in (tmp_path / "said.picked.md").read_text(encoding="utf-8")
+    assert span in (tmp_path / "said.picked.md").read_text(encoding="utf-8")
+    for suffix in ("srt", "vtt"):
+        assert "Speaker ?: bird0" in (tmp_path / f"said.picked.{suffix}").read_text(
+            encoding="utf-8"
+        )
+
+    disputed = runner.invoke(app, ["disputes", str(picked)])
+    assert disputed.exit_code == 0, disputed.output
+    assert "(restored)" in (tmp_path / "said.picked.disputes.md").read_text(encoding="utf-8")
+
+    _patch(monkeypatch, reply=echo)
+    named = runner.invoke(app, ["turns", str(picked), "--out-dir", str(tmp_path / "named")])
+    assert named.exit_code == 0, named.output
+    assert "**Speaker ?**" in (tmp_path / "named" / "said.picked.md").read_text(encoding="utf-8")
+
+    patch_backend(monkeypatch)
+    cleaned = runner.invoke(app, ["cleanup", str(tmp_path / "said.picked.turns.json")])
+    assert cleaned.exit_code == 0, cleaned.output
+    assert "Speaker ?: bird0" in (tmp_path / "said.picked.clean.md").read_text(encoding="utf-8")
 
 
 def test_no_spot_writes_the_transcript_and_asks_nothing(
