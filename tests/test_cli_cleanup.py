@@ -874,9 +874,7 @@ def _patch_real_backend(
     def which(name: str) -> str | None:
         return f"/opt/nowhere/bin/{name}"
 
-    def factory(
-        *, model: str, max_budget_usd: float, disable_tools: bool = False
-    ) -> ClaudeCliBackend:
+    def factory(*, model: str, max_budget_usd: float, disable_tools: bool) -> ClaudeCliBackend:
         return ClaudeCliBackend(
             model, max_budget_usd, run=run, which=which, disable_tools=disable_tools
         )

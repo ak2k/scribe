@@ -114,7 +114,8 @@ class ClaudeCliBackend:
             stub_root: The `projects` directory leaked session stubs are
                 removed from. Default: the one under
                 `CLAUDE_CONFIG_DIR`, else under `~/.claude`.
-            disable_tools: Pass `--tools ""`, so the model can only reply.
+            disable_tools: Pass `--tools ""` and `--strict-mcp-config`, so
+                the model can only reply.
 
         """
         self.model = model
@@ -132,7 +133,10 @@ class ClaudeCliBackend:
     def _argv(self, executable: str, system_prompt_file: Path) -> list[str]:
         # No positional prompt: `-p` then reads it from stdin, which has no
         # per-argument size limit (Linux caps one argv element at 128 KiB).
-        tools = ["--tools", ""] if self.disable_tools else []
+        # `--tools ""` empties only the built-in set; MCP servers, including the
+        # account's claude.ai connectors, still add tools unless strict MCP
+        # config, with no `--mcp-config`, leaves no server to load.
+        tools = ["--tools", "", "--strict-mcp-config"] if self.disable_tools else []
         return [
             executable,
             "-p",

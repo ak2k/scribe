@@ -82,7 +82,7 @@ def patch_backend(
     """Swap the CLI's backend for fakes; return the list they are recorded into."""
     made: list[FakeBackend] = []
 
-    def factory(*, model: str, max_budget_usd: float, disable_tools: bool = False) -> FakeBackend:
+    def factory(*, model: str, max_budget_usd: float, disable_tools: bool) -> FakeBackend:
         backend = FakeBackend(
             model=model,
             max_budget_usd=max_budget_usd,

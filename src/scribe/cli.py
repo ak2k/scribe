@@ -1357,7 +1357,7 @@ def cleanup(
             outputs["--curated"] = curated
         plan = plan_outputs(outputs, inputs)
         prove_writable(plan)
-        backend = ClaudeCliBackend(model=model, max_budget_usd=max_budget_usd)
+        backend = ClaudeCliBackend(model=model, max_budget_usd=max_budget_usd, disable_tools=True)
         result = clean(request, backend, max_words=chunk_words)
         diff = verify_numbers(
             "\n\n".join(turn.text for turn in request.turns),
