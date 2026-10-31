@@ -133,9 +133,8 @@ class ClaudeCliBackend:
     def _argv(self, executable: str, system_prompt_file: Path) -> list[str]:
         # No positional prompt: `-p` then reads it from stdin, which has no
         # per-argument size limit (Linux caps one argv element at 128 KiB).
-        # `--tools ""` empties only the built-in set; MCP servers, including the
-        # account's claude.ai connectors, still add tools unless strict MCP
-        # config, with no `--mcp-config`, leaves no server to load.
+        # Strict MCP config, with no `--mcp-config`, keeps every MCP server out,
+        # the account's connectors included, even if a settings source is read.
         tools = ["--tools", "", "--strict-mcp-config"] if self.disable_tools else []
         return [
             executable,
