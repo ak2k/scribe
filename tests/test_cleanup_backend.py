@@ -116,7 +116,12 @@ def test_tools_are_disabled_only_when_asked() -> None:
     ClaudeCliBackend(run=disabled.run, disable_tools=True).complete(SYSTEM, USER)
 
     assert "--tools" not in kept.argv
+    assert "--strict-mcp-config" not in kept.argv
     assert disabled.argv[disabled.argv.index("--tools") + 1] == ""
+    # Keeps every MCP server out, the account's connectors included, even if a
+    # settings source is read.
+    assert "--strict-mcp-config" in disabled.argv
+    assert "--mcp-config" not in disabled.argv
 
 
 def test_the_prompt_goes_on_stdin_and_never_into_the_argv() -> None:

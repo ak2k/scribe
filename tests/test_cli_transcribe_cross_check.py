@@ -154,6 +154,7 @@ def _linux_cpp(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, seconds: int = 9
     monkeypatch.setenv("SCRIBE_PARAKEET_MODEL", str(model))
     monkeypatch.delenv("SCRIBE_PARAKEET_CLI", raising=False)
     monkeypatch.delenv("SCRIBE_PARAKEET_THREADS", raising=False)
+    monkeypatch.delenv("SCRIBE_PARAKEET_PACE", raising=False)
     heard = [*SAID[:2], *((text.strip(), start, end) for text, start, end in HEARD), SAID[2]]
     tokens = [
         f"  [{i:2d}] id= 1 frame=  1 dur_idx= 1 dur_val= 1 p=0.9 plog=-0.1 "
@@ -316,6 +317,36 @@ def test_audio_parakeet_cli_could_not_finish_in_time_is_checked_by_loudness(
     assert len(refused) == 1, result.stderr
     assert refused[0].endswith("checking the holes by loudness instead")
     assert result.stderr.splitlines()[-len(LOUDNESS) :] == LOUDNESS
+
+
+def test_a_pace_set_for_a_faster_host_cross_checks_a_long_recording(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ran = _linux_cpp(tmp_path, monkeypatch, seconds=4 * 3600)
+    monkeypatch.setenv("SCRIBE_PARAKEET_PACE", "12")
+
+    result = _transcribe(tmp_path)
+
+    assert result.exit_code == 0, result.output
+    assert ran.count("parakeet-cli") == 9
+    announced = next(line for line in result.stderr.splitlines() if "cross-checking" in line)
+    assert "parakeet-cli, up to 12 min per audio hour" in announced
+    assert "would not finish" not in result.stderr
+
+
+def test_a_pace_that_is_no_number_is_named_where_the_cross_check_gives_way(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ran = _linux_cpp(tmp_path, monkeypatch)
+    monkeypatch.setenv("SCRIBE_PARAKEET_PACE", "fast")
+
+    result = _transcribe(tmp_path)
+
+    assert result.exit_code == 0, result.output
+    assert ran == []
+    refused = [line for line in result.stderr.splitlines() if "SCRIBE_PARAKEET_PACE" in line]
+    assert len(refused) == 1, result.stderr
+    assert refused[0].endswith("checking the holes by loudness instead")
 
 
 def test_no_cross_check_writes_xais_transcript_and_runs_nothing_else(

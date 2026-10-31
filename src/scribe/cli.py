@@ -1357,7 +1357,7 @@ def cleanup(
             outputs["--curated"] = curated
         plan = plan_outputs(outputs, inputs)
         prove_writable(plan)
-        backend = ClaudeCliBackend(model=model, max_budget_usd=max_budget_usd)
+        backend = ClaudeCliBackend(model=model, max_budget_usd=max_budget_usd, disable_tools=True)
         result = clean(request, backend, max_words=chunk_words)
         diff = verify_numbers(
             "\n\n".join(turn.text for turn in request.turns),
@@ -2061,7 +2061,9 @@ def parakeet(
     is given in memory, about 15 GB for 31 min, and heard no words in an hour
     of audio, so audio over 31 min goes to it in overlapping pieces of at most
     30 min, one at a time. Audio it could not finish within the run's limit at
-    its slow pace, about 2.1 h, is refused before it runs. Either way nothing
+    its slow pace, about 2.1 h, is refused before it runs. A host measured
+    faster or slower sets its own slow pace in SCRIBE_PARAKEET_PACE, in
+    minutes per audio hour; at 12, the limit holds about 5 h. Either way nothing
     is uploaded and no key is needed. A run is stopped after 60 minutes. The
     words carry timings but no speakers.
     """

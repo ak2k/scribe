@@ -43,9 +43,11 @@ class FakeBackend:
         respond: Callable[[str], str] | None = None,
         stop_reasons: list[str | None] | None = None,
         fail_with: Exception | None = None,
+        disable_tools: bool = False,
     ) -> None:
         self.model = model
         self.max_budget_usd = max_budget_usd
+        self.disable_tools = disable_tools
         self.calls: list[tuple[str, str]] = []
         self._mutate = mutate
         self._respond = respond or keyed_reply
@@ -80,10 +82,11 @@ def patch_backend(
     """Swap the CLI's backend for fakes; return the list they are recorded into."""
     made: list[FakeBackend] = []
 
-    def factory(*, model: str, max_budget_usd: float) -> FakeBackend:
+    def factory(*, model: str, max_budget_usd: float, disable_tools: bool) -> FakeBackend:
         backend = FakeBackend(
             model=model,
             max_budget_usd=max_budget_usd,
+            disable_tools=disable_tools,
             mutate=mutate,
             respond=respond,
             stop_reasons=stop_reasons,
