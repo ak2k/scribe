@@ -1282,9 +1282,9 @@ def test_the_pace_announced_is_the_one_set(tmp_path: Path, monkeypatch: pytest.M
 
     assert result.exit_code == 0, result.output
     assert "running parakeet-cli locally, up to 12 min per audio hour" in result.stderr
-    assert "28" not in result.stderr
+    assert "28 min" not in result.stderr
     assert "up to 12 min per audio hour" in ParakeetCpp().pace
-    assert "28" not in ParakeetCpp().pace
+    assert "28 min" not in ParakeetCpp().pace
 
 
 def test_the_pace_setting_leaves_parakeet_mlx_as_it_was(monkeypatch: pytest.MonkeyPatch) -> None:

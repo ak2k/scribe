@@ -43,8 +43,9 @@ and heard no words in an hour of audio, so audio over 31 min goes to it in
 overlapping pieces of at most 30 min, one at a time. Audio it could not finish
 within the run's limit at its slow pace, about 2.1 h with the 60-min limit, is
 refused before it runs, and the cross-check checks that audio by loudness
-instead. `scribe
-parakeet AUDIO` runs it alone.
+instead. A host measured faster or slower sets its own slow pace in
+`SCRIBE_PARAKEET_PACE`, in minutes per audio hour; at 12, the 60-min limit
+holds about 5 h. `scribe parakeet AUDIO` runs it alone.
 
 xAI can drop a passage of speech and return no words for it. So `transcribe`
 then cross-checks its words against Parakeet. Parakeet's transcript goes

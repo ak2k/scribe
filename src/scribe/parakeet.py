@@ -381,6 +381,7 @@ CPP_TOOL = "parakeet-cli"
 CLI_SETTING = "SCRIBE_PARAKEET_CLI"
 MODEL_SETTING = "SCRIBE_PARAKEET_MODEL"
 THREADS_SETTING = "SCRIBE_PARAKEET_THREADS"
+PACE_SETTING = "SCRIBE_PARAKEET_PACE"
 # The tool holds all the audio it is given in memory: with the f16 model it
 # peaked at 15 GB for 31 min and 29 GB for 62 min, and on the 62 min it printed
 # no words and exited 0. So nothing past the length seen to work reaches it.
@@ -389,8 +390,9 @@ _PIECE_SECONDS = 30 * 60
 # Heard by both pieces. The boundary sits in its middle, so each piece's cut is
 # 7.5 s from any word it owns: a word beside a cut is heard with one side missing.
 _OVERLAP_SECONDS = 15
-# The slow end of the measured pace, in minutes of running per minute of audio.
-_SLOW_PACE = 28 / 60
+# The slow end of the pace measured on a busy shared host, in minutes of running
+# per audio hour. A host measured faster or slower sets its own.
+_SLOW_PACE = 28.0
 # What 16 kHz mono 16-bit audio takes per second.
 _WAV_BYTES_PER_SECOND = 32_000
 # The ggml runtime's own settings, the GPUs it may use, and where its backend
@@ -495,6 +497,7 @@ class _Tools:
     model: Path
     ffmpeg: str
     threads: int
+    pace: float
 
 
 def _piece_starts(seconds: int) -> list[int]:
@@ -532,6 +535,25 @@ def _threads() -> int:
     return threads
 
 
+def _set_pace() -> float | None:
+    setting = os.environ.get(PACE_SETTING)
+    if setting is None:
+        return None
+    try:
+        pace = float(setting)
+    except ValueError:
+        pace = math.nan
+    if not (math.isfinite(pace) and pace > 0):
+        raise ExternalServiceError(
+            f"{PACE_SETTING} must be a number of minutes per audio hour above 0, not {setting!r}"
+        )
+    return pace
+
+
+def _host_pace(pace: float) -> str:
+    return f"up to {pace:g} min per audio hour, as {PACE_SETTING} sets for this host"
+
+
 def _model() -> Path:
     setting = os.environ.get(MODEL_SETTING)
     if not setting:
@@ -556,15 +578,29 @@ class ParakeetCpp:
 
     # Measured on a busy shared 32-thread host: 31 min of audio in 3 to 14 min.
     # Under about 11 min of audio the tool attends over all of it at once, which
-    # costs more per hour: 5 min of audio took 1.5 to 5 min.
-    pace = (
-        "with parakeet-cli, 6 to 28 min per audio hour on 8 CPU threads and more per hour"
-        " under 11 min of audio; nothing is downloaded"
-    )
-    notice = (
-        "running parakeet-cli locally, 6 to 28 min per audio hour on 8 CPU threads"
-        " and more per hour under 11 min of audio"
-    )
+    # costs more per hour: 5 min of audio took 1.5 to 5 min. A pace set for the
+    # host replaces those figures, which were measured elsewhere.
+    @property
+    def pace(self) -> str:
+        """How long a run takes, for a progress line."""
+        pace = _set_pace()
+        if pace is None:
+            return (
+                "with parakeet-cli, 6 to 28 min per audio hour on 8 CPU threads and more per hour"
+                " under 11 min of audio; nothing is downloaded"
+            )
+        return f"with parakeet-cli, {_host_pace(pace)}; nothing is downloaded"
+
+    @property
+    def notice(self) -> str:
+        """The line `scribe parakeet` prints before the run."""
+        pace = _set_pace()
+        if pace is None:
+            return (
+                "running parakeet-cli locally, 6 to 28 min per audio hour on 8 CPU threads"
+                " and more per hour under 11 min of audio"
+            )
+        return f"running parakeet-cli locally, {_host_pace(pace)}"
 
     def __init__(
         self,
@@ -593,7 +629,7 @@ class ParakeetCpp:
 
         Raises:
             ExternalServiceError: `parakeet-cli`, the model or `ffmpeg` cannot be
-                found, or the thread count set is not a number above 0.
+                found, or the thread count or pace set is not a number above 0.
 
         """
         # Resolved at call time, so a patched `shutil.which` is used.
@@ -610,7 +646,14 @@ class ParakeetCpp:
         ffmpeg = which("ffmpeg")
         if ffmpeg is None:
             raise ToolMissingError("ffmpeg is not on PATH; the audio is converted with it")
-        return _Tools(cli=cli, model=model, ffmpeg=ffmpeg, threads=_threads())
+        pace = _set_pace()
+        return _Tools(
+            cli=cli,
+            model=model,
+            ffmpeg=ffmpeg,
+            threads=_threads(),
+            pace=_SLOW_PACE if pace is None else pace,
+        )
 
     def inputs(self) -> dict[str, Path]:
         """The file the model setting names, whether or not `resolve` has checked it."""
@@ -626,11 +669,11 @@ class ParakeetCpp:
             return {}
         return {"the Parakeet model": model}
 
-    def _check_length(self, seconds: int, pieces: int) -> None:
+    def _check_length(self, seconds: int, pieces: int, pace: float) -> None:
         heard = seconds + (pieces - 1) * _OVERLAP_SECONDS
-        if heard * _SLOW_PACE > self.timeout_s:
+        if heard * (pace / 60) > self.timeout_s:
             raise ExternalServiceError(
-                f"the audio is {seconds / 60:.1f} min long; at up to 28 min per audio hour,"
+                f"the audio is {seconds / 60:.1f} min long; at up to {pace:g} min per audio hour,"
                 f" parakeet-cli would not finish within {self.timeout_s:g} s"
             )
 
@@ -706,7 +749,7 @@ class ParakeetCpp:
             # Whole seconds: the wav's header, tags included, is under one.
             seconds = wav.stat().st_size // _WAV_BYTES_PER_SECOND
             starts = _piece_starts(seconds)
-            self._check_length(seconds, len(starts))
+            self._check_length(seconds, len(starts), tools.pace)
             if len(starts) == 1:
                 words = self._hear(wav, tools, deadline)
             else:
