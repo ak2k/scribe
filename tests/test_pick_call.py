@@ -395,16 +395,24 @@ def test_a_reference_reading_ten_words_longer_is_put_in_whatever_was_answered(
 
 
 def _restorable(
-    before: Sequence[tuple[str, int]], after: Sequence[tuple[str, int]], replaced: int = 1
+    before: Sequence[tuple[str, int]],
+    after: Sequence[tuple[str, int]],
+    replaced: int = 1,
+    longer: int = 11,
 ) -> tuple[Transcript, Transcript]:
-    """A one-word reading by speaker `replaced`, against a reference's eleven words there."""
+    """A one-word reading by speaker `replaced`, against a reference's `longer` words there."""
     start = float(len(before))
     resumed = [
-        Word(text=text, start=start + 11 + index, end=start + 11.4 + index, speaker=speaker)
+        Word(
+            text=text,
+            start=start + longer + index,
+            end=start + longer + 0.4 + index,
+            speaker=speaker,
+        )
         for index, (text, speaker) in enumerate(after)
     ]
     said = [*_said(*before, ("red", replaced)), *resumed]
-    texts = [*(text for text, _ in before), *_BIRDS[:11], *(text for text, _ in after)]
+    texts = [*(text for text, _ in before), *_BIRDS[:longer], *(text for text, _ in after)]
     heard = _said(*((text, None) for text in texts))
     return transcript(said), transcript(heard, engine="parakeet-mlx")
 
@@ -447,14 +455,21 @@ def test_a_restored_reading_carries_no_speaker_and_no_other_word_changes(
     assert replayed.transcript.words == words
 
 
-def test_a_reading_the_model_picked_still_takes_the_nearest_replaced_speaker() -> None:
-    said, heard = _restorable(_AROUND, _AFTER)
-    backend = FakeSpeakerBackend(reply=answering(choosing({" ".join(_BIRDS[:11])})))
+@pytest.mark.parametrize(
+    ("longer", "speaker"),
+    [(10, 1), (11, None)],
+    ids=["nine-more-takes-the-nearest", "ten-more-takes-none"],
+)
+def test_a_reading_the_model_picked_loses_its_speaker_only_at_the_restoring_length(
+    longer: int, speaker: int | None
+) -> None:
+    said, heard = _restorable(_AROUND, _AFTER, longer=longer)
+    backend = FakeSpeakerBackend(reply=answering(choosing({" ".join(_BIRDS[:longer])})))
 
     picking = pick_readings(said, heard, backend)
 
     assert picking.picked == ("reference",)
-    assert [word.speaker for word in picking.transcript.words] == [0, 0, *[1] * 11, 0, 0]
+    assert [word.speaker for word in picking.transcript.words] == [0, 0, *[speaker] * longer, 0, 0]
 
 
 @pytest.mark.parametrize("replaced", [0, 1], ids=["own-word", "another-speakers-word"])
