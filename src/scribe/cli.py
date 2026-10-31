@@ -1876,8 +1876,9 @@ def pick_command(
     than TRANSCRIPT's: that pick is guarded and TRANSCRIPT's words stay, as a
     wrong removal loses speech. Where REFERENCE's reading is 10 or more words
     longer than TRANSCRIPT's, fillers and repeats aside, its words go in the
-    same way whatever the model picks: the spot is restored, as keeping the
-    shorter loses speech. Every other word stays as it was.
+    same way whatever the model picks, but with no speaker: the spot is
+    restored, as keeping the shorter loses speech. Every other word stays as
+    it was.
     The result records each spot and its pick in its engine params, and has
     no turns: run `scribe turns` on it next.
 

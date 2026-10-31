@@ -662,30 +662,36 @@ def _apply(
     """Put the reference's words in place of the transcript's at every spot picked or restored.
 
     A word put in keeps its text; its start is held between the starts of the
-    nearest kept words on either side, its end no earlier than its start, and
-    it takes the speaker of the replaced word nearest it in time.
+    nearest kept words on either side, and its end no earlier than its start.
+    A word put in takes the speaker of the replaced word nearest it in time,
+    save in a reading restored or long enough to be, whichever side chose it,
+    which takes none: the words it replaces are too few to say who spoke the
+    many put in.
     """
-    chosen = [
-        spot for spot, side in zip(spots, picked, strict=True) if side in {"reference", "restored"}
-    ]
-    gone = {index for spot in chosen for index in spot.transcript}
+    at = {
+        spot.transcript.start: (spot, side)
+        for spot, side in zip(spots, picked, strict=True)
+        if side in {"reference", "restored"}
+    }
+    gone = {index for spot, _ in at.values() for index in spot.transcript}
     kept = [index for index in range(len(transcript)) if index not in gone]
-    at = {spot.transcript.start: spot for spot in chosen}
     words: list[Word] = []
     index = 0
     while index < len(transcript):
-        spot = at.get(index)
-        if spot is None:
+        found = at.get(index)
+        if found is None:
             words.append(transcript[index])
             index += 1
             continue
+        spot, side = found
         after = bisect.bisect_left(kept, index)
         low = transcript[kept[after - 1]].start if after else -math.inf
         high = transcript[kept[after]].start if after < len(kept) else math.inf
         replaced = transcript[spot.transcript.start : spot.transcript.stop]
+        unspoken = side == "restored" or restored(transcript, reference, spot)
         for word in reference[spot.reference.start : spot.reference.stop]:
             start = min(max(word.start, low), high)
-            closest = nearest(replaced, word.start)
+            closest = None if unspoken else nearest(replaced, word.start)
             words.append(
                 Word(
                     text=word.text,
