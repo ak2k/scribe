@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 import sys
 from dataclasses import dataclass, field
@@ -817,6 +818,34 @@ def test_a_marker_that_cannot_be_written_holds_back_open(tmp_path: Path) -> None
     assert mac.marker_seen_at_open == []
     assert [log["event"] for log in logs].count("call_watch.marker_failed") == 1
     assert len(mac.notifications) == 1
+
+
+def test_a_directory_removed_between_calls_is_recreated_for_the_next(tmp_path: Path) -> None:
+    directory = tmp_path / "call-watch"
+
+    def call(elapsed: float) -> frozenset[str]:
+        if elapsed == 5.0:
+            shutil.rmtree(directory)
+        return ZOOM if elapsed >= 10.0 else QUIET
+
+    mac = FakeMac(directory, call, end=30.0)
+    mac.run()
+    assert mac.verbs() == ["start"]
+    assert mac.marker_path.read_text() == "confirmed"
+
+
+def test_a_directory_removed_during_a_recording_does_not_lose_the_stop(tmp_path: Path) -> None:
+    directory = tmp_path / "call-watch"
+
+    def call(elapsed: float) -> frozenset[str]:
+        if elapsed == 8.0:
+            shutil.rmtree(directory)
+        return ZOOM if elapsed < 10.0 else QUIET
+
+    mac = FakeMac(directory, call, end=60.0)
+    mac.run()
+    assert mac.verbs() == ["start", "stop"]
+    assert not mac.marker_path.exists()
 
 
 def test_a_read_outage_in_the_loop_notifies_once(tmp_path: Path) -> None:
