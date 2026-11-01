@@ -926,6 +926,23 @@ def test_a_persons_stop_still_stands_across_a_restart(tmp_path: Path) -> None:
     assert len(mac.notifications) == 1
 
 
+def test_a_directory_removed_during_a_recording_gets_its_marker_back(tmp_path: Path) -> None:
+    directory = tmp_path / "call-watch"
+
+    def call(elapsed: float) -> frozenset[str]:
+        if elapsed == 8.0:
+            shutil.rmtree(directory)
+        return ZOOM
+
+    mac = FakeMac(directory, call, end=9.0)
+    mac.run()
+    assert mac.marker_path.read_text() == "confirmed"
+    after = FakeMac(directory, lambda _: QUIET, end=40.0, session_running=True)
+    after.run()
+    assert after.verbs() == ["stop"]
+    assert after.opens[0][0] >= 30.0
+
+
 def test_a_read_outage_in_the_loop_notifies_once(tmp_path: Path) -> None:
     def call(elapsed: float) -> frozenset[str] | None:
         return None if 20.0 <= elapsed < 100.0 else ZOOM
