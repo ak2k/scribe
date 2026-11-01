@@ -184,7 +184,7 @@ def test_the_opening_that_confirms_nothing_starts_within_the_next_holds_confirma
         "us.zoom.xos",
         "com.microsoft.teams2",
         "com.apple.avconferenced",
-        "com.apple.TelephonyUtilities.callservicesd",
+        "com.apple.TelephonyUtilities",
         # A plain prefix, because a boundary rule would lose the real com.microsoft.teams2.
         "com.google.ChromeX",
     ],
