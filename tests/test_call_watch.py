@@ -7,7 +7,7 @@ import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, cast, override
 
 import pytest
 from hypothesis import given
@@ -15,7 +15,6 @@ from hypothesis import strategies as st
 from structlog.testing import capture_logs
 from typer.testing import CliRunner
 
-from scribe import call_watch
 from scribe.call_watch import (
     CONFIRM_SECONDS,
     DEFAULT_APPS,
@@ -25,6 +24,7 @@ from scribe.call_watch import (
     READBACK_SECONDS,
     RESEND_SECONDS,
     Action,
+    Marker,
     Note,
     Read,
     Recording,
@@ -33,6 +33,7 @@ from scribe.call_watch import (
     Stopping,
     Timings,
     VanishedProcessError,
+    Verb,
     command_text,
     decide,
     input_holders,
@@ -92,14 +93,17 @@ def replay(
     answers: bool = True,
     hijack_running: bool = True,
     session_running: bool = False,
+    start: float = 0.0,
 ) -> Trace:
     """Decide once a second over `spans`, with Audio Hijack answering the actions it is sent."""
     trace = Trace(state=state or State())
-    now = 0.0
+    now = start
     running = session_running
     for seconds, holding in spans:
         for _ in range(seconds):
-            read = holding if isinstance(holding, Read) else holding | (HIJACK if running else QUIET)
+            read = (
+                holding if isinstance(holding, Read) else holding | (HIJACK if running else QUIET)
+            )
             step = decide(trace.state, now, read, hijack_running=hijack_running, timings=TIMINGS)
             trace.state = step.state
             trace.notes.extend((now, note) for note in step.notes)
@@ -109,6 +113,11 @@ def replay(
                     running = step.action in {"start", "resend-start"}
             now += 1.0
     return trace
+
+
+def resume(state: State, spans: Sequence[Span], *, hijack_running: bool = True) -> Trace:
+    """Replay on from a state an earlier replay left, later than any time it holds."""
+    return replay(spans, state=state, start=10_000.0, hijack_running=hijack_running)
 
 
 def test_the_named_constants_hold_the_measured_values() -> None:
@@ -229,15 +238,15 @@ def test_a_second_call_warns_again_after_the_first_ended() -> None:
 def test_a_stop_that_does_not_read_back_warns_once_and_resends() -> None:
     state = replay([(10, ZOOM | HIJACK), (31, HIJACK)]).state
     assert isinstance(state.session, Stopping)
-    trace = replay([(100, HIJACK)], state=state)
+    trace = resume(state, [(100, HIJACK)])
     assert trace.verbs() == ["stop", "resend-stop", "resend-stop", "resend-stop"]
-    assert trace.notified() == [note.notify for _, note in trace.notes if note.notify][:1]
+    assert len(trace.notified()) == 1
     assert trace.events().count("call_watch.stop_unconfirmed") == 1
 
 
 def test_a_late_stop_confirmation_ends_the_resending_and_clears_the_marker() -> None:
     state = replay([(10, ZOOM | HIJACK), (31, HIJACK)]).state
-    trace = replay([(40, HIJACK), (60, QUIET)], state=state)
+    trace = resume(state, [(40, HIJACK), (60, QUIET)])
     assert trace.verbs() == ["stop", "resend-stop"]
     assert trace.events().count("call_watch.stop_done") == 1
     assert trace.state.marker is None
@@ -245,7 +254,7 @@ def test_a_late_stop_confirmation_ends_the_resending_and_clears_the_marker() -> 
 
 def test_a_new_call_confirmed_ends_a_stop_being_resent() -> None:
     state = replay([(10, ZOOM | HIJACK), (31, HIJACK)]).state
-    trace = replay([(10, HIJACK), (40, ZOOM | HIJACK)], state=state)
+    trace = resume(state, [(10, HIJACK), (40, ZOOM | HIJACK)])
     assert trace.verbs() == ["stop", "start"]
     assert isinstance(trace.state.session, Recording)
     assert trace.state.marker == "confirmed"
@@ -253,14 +262,14 @@ def test_a_new_call_confirmed_ends_a_stop_being_resent() -> None:
 
 def test_a_hold_too_short_to_confirm_does_not_interrupt_a_stop_being_resent() -> None:
     state = replay([(10, ZOOM | HIJACK), (31, HIJACK)]).state
-    trace = replay([(29, HIJACK), (2, ZOOM | HIJACK), (5, HIJACK)], state=state)
+    trace = resume(state, [(29, HIJACK), (2, ZOOM | HIJACK), (5, HIJACK)])
     assert trace.verbs() == ["stop", "resend-stop"]
 
 
 def test_a_release_during_a_call_notifies_once_and_starts_nothing() -> None:
     state = replay([(10, ZOOM)]).state
     assert isinstance(state.session, Recording)
-    trace = replay([(100, ZOOM)], state=state)
+    trace = resume(state, [(100, ZOOM)])
     assert trace.verbs() == []
     assert trace.events() == ["call_watch.recording_released"]
     assert len(trace.notified()) == 1
@@ -268,19 +277,19 @@ def test_a_release_during_a_call_notifies_once_and_starts_nothing() -> None:
 
 def test_after_a_release_the_next_start_needs_the_call_to_end_and_return() -> None:
     state = replay([(10, ZOOM)]).state
-    trace = replay([(50, ZOOM), (45, QUIET), (10, ZOOM)], state=state)
+    trace = resume(state, [(50, ZOOM), (45, QUIET), (10, ZOOM)])
     assert trace.verbs() == ["stop", "start"]
 
 
 def test_a_release_as_the_call_ends_is_not_called_a_lost_recording() -> None:
     state = replay([(10, ZOOM)]).state
-    trace = replay([(10, QUIET)], state=state)
+    trace = resume(state, [(10, QUIET)])
     assert "call_watch.recording_released" not in trace.events()
 
 
 def test_each_release_of_a_call_notifies() -> None:
     state = replay([(10, ZOOM)]).state
-    trace = replay([(5, ZOOM), (5, ZOOM | HIJACK), (5, ZOOM)], state=state)
+    trace = resume(state, [(5, ZOOM), (5, ZOOM | HIJACK), (5, ZOOM)])
     assert trace.events() == [
         "call_watch.recording_released",
         "call_watch.recording_resumed",
@@ -290,7 +299,7 @@ def test_each_release_of_a_call_notifies() -> None:
 
 def test_a_stop_is_not_sent_when_audio_hijack_is_not_running() -> None:
     state = replay([(10, ZOOM)]).state
-    trace = replay([(50, QUIET)], state=state, hijack_running=False)
+    trace = resume(state, [(50, QUIET)], hijack_running=False)
     assert trace.verbs() == []
     assert trace.events() == ["call_watch.stop_not_needed"]
     assert trace.state.marker is None
@@ -308,14 +317,14 @@ def test_the_running_check_is_asked_only_before_a_first_stop_with_input_released
 
 def test_a_short_outage_stays_quiet() -> None:
     state = replay([(10, ZOOM)]).state
-    trace = replay([(29, Read.FAILED), (5, ZOOM | HIJACK)], state=state)
+    trace = resume(state, [(29, Read.FAILED), (5, ZOOM | HIJACK)])
     assert trace.verbs() == []
     assert trace.notes == []
 
 
 def test_a_long_outage_notifies_once_and_its_end_is_logged() -> None:
     state = replay([(10, ZOOM)]).state
-    trace = replay([(200, Read.FAILED), (5, ZOOM | HIJACK)], state=state)
+    trace = resume(state, [(200, Read.FAILED), (5, ZOOM | HIJACK)])
     assert trace.verbs() == []
     assert trace.events() == ["call_watch.reads_failing", "call_watch.reads_recovered"]
     assert len(trace.notified()) == 1
@@ -347,7 +356,11 @@ def test_time_in_an_outage_does_not_count_toward_the_confirmation() -> None:
 class TestRestart:
     def test_sent_and_a_call_resumes_the_read_back_without_sending(self) -> None:
         trace = replay([(120, ZOOM)], state=restored_state("sent"), answers=False)
-        assert trace.actions == [(30.0, "resend-start"), (60.0, "resend-start"), (90.0, "resend-start")]
+        assert trace.actions == [
+            (30.0, "resend-start"),
+            (60.0, "resend-start"),
+            (90.0, "resend-start"),
+        ]
         assert [when for when, note in trace.notes if note.notify] == [5.0]
 
     def test_sent_and_a_call_is_confirmed_by_the_read_back(self) -> None:
@@ -366,13 +379,16 @@ class TestRestart:
         assert trace.events() == ["call_watch.recording_released"]
 
     @pytest.mark.parametrize("marker", ["sent", "confirmed"])
-    def test_a_marker_and_no_call_runs_the_grace_from_zero_then_stops(
-        self, marker: call_watch.Marker
-    ) -> None:
-        trace = replay([(60, HIJACK)], state=restored_state(marker))
+    def test_a_marker_and_no_call_runs_the_grace_from_zero_then_stops(self, marker: Marker) -> None:
+        trace = replay([(70, HIJACK)], state=restored_state(marker))
         assert trace.verbs() == ["stop", "resend-stop"]
         assert trace.actions[0][0] >= 30.0
         assert "call_watch.start_unconfirmed" not in trace.events()
+
+    def test_sent_and_no_call_warns_of_nothing(self) -> None:
+        trace = replay([(60, QUIET)], state=restored_state("sent"))
+        assert trace.verbs() == ["stop"]
+        assert trace.notified() == []
 
     def test_a_call_returning_in_the_restarted_grace_keeps_the_session(self) -> None:
         trace = replay([(10, HIJACK), (60, ZOOM | HIJACK)], state=restored_state("confirmed"))
@@ -449,7 +465,8 @@ def test_no_app_off_the_list_ever_acts(timeline: list[tuple[float, str]]) -> Non
 
 @given(st.text())
 def test_a_session_name_stays_a_single_valid_string(name: str) -> None:
-    for verb, tail in (("start", ").start()"), ("stop", ").stop()")):
+    forms: tuple[tuple[Verb, str], ...] = (("start", ").start()"), ("stop", ").stop()"))
+    for verb, tail in forms:
         text = command_text(name, verb)
         assert text.startswith("app.sessionWithName(")
         assert text.endswith(tail)
@@ -457,7 +474,7 @@ def test_a_session_name_stays_a_single_valid_string(name: str) -> None:
         assert json.loads(text.removeprefix("app.sessionWithName(").removesuffix(tail)) == name
 
 
-@pytest.mark.parametrize("name", ['Call "A"', "back\\slash", "a\nb", "é "])
+@pytest.mark.parametrize("name", ['Call "A"', "back\\slash", "a\nb", "é\u2028"])
 def test_a_hard_session_name_is_escaped(name: str) -> None:
     text = command_text(name, "start")
     assert text.isascii()
@@ -496,7 +513,8 @@ def test_a_process_object_that_vanishes_is_skipped_not_a_failed_read() -> None:
 
 def test_a_process_object_that_vanishes_between_its_two_reads_is_skipped() -> None:
     class Halfway(FakeObjects):
-        def bundle_id(self, obj: int) -> str:  # pyright: ignore[reportImplicitOverride]  # a local fake
+        @override
+        def bundle_id(self, obj: int) -> str:
             raise VanishedProcessError
 
     assert input_holders(Halfway({1: ("us.zoom.xos", True)})) == QUIET
@@ -504,14 +522,15 @@ def test_a_process_object_that_vanishes_between_its_two_reads_is_skipped() -> No
 
 def test_a_failing_read_raises_rather_than_returning_an_empty_set() -> None:
     class Broken(FakeObjects):
-        def object_ids(self) -> Sequence[int]:  # pyright: ignore[reportImplicitOverride]  # a local fake
+        @override
+        def object_ids(self) -> Sequence[int]:
             raise ExternalServiceError("CoreAudio status 1")
 
     with pytest.raises(AppError):
         input_holders(Broken({}))
 
 
-class _End(Exception):
+class _EndError(Exception):
     pass
 
 
@@ -530,7 +549,10 @@ class FakeMac:
     session_running: bool = False
     app_running: bool = True
     answers: bool = True
+    stop_ignored: bool = False
     open_error: Exception | None = None
+    open_error_until: float = float("inf")
+    check_error: Exception | None = None
     notify_error: Exception | None = None
     marker_seen_at_open: list[str | None] = field(default_factory=list[str | None])
     opens: list[tuple[float, str, str]] = field(default_factory=list[tuple[float, str, str]])
@@ -551,7 +573,7 @@ class FakeMac:
     def sleep(self, seconds: float) -> None:
         self.now += seconds
         if self.elapsed() >= self.end:
-            raise _End
+            raise _EndError
 
     def reader(self) -> frozenset[str]:
         held = self.call(self.elapsed())
@@ -572,6 +594,8 @@ class FakeMac:
             return ""
         assert program == "/usr/bin/lsappinfo"
         self.running_checks += 1
+        if self.check_error is not None:
+            raise self.check_error
         return 'ASN:0x0-0x1-"Audio Hijack":\n' if self.app_running else "\n"
 
     def _open(self, argv: Sequence[str]) -> str:
@@ -581,35 +605,37 @@ class FakeMac:
         self.marker_seen_at_open.append(
             self.marker_path.read_text() if self.marker_path.exists() else None
         )
-        if self.open_error is not None:
+        if self.open_error is not None and self.elapsed() < self.open_error_until:
             raise self.open_error
         text = path.read_text()
         self.opens.append((self.elapsed(), path.name, text))
         if self.answers:
-            self.session_running = text.strip().endswith(".start()")
+            starts = text.strip().endswith(".start()")
+            self.session_running = starts or self.stop_ignored
         return ""
 
-    def run(self, **kwargs: Any) -> list[dict[str, Any]]:
-        arguments: dict[str, Any] = {"session": "Call", "apps": DEFAULT_APPS, **kwargs}
-        with capture_logs() as logs:
-            with pytest.raises(_End):
-                watch(
-                    self.directory,
-                    reader=self.reader,
-                    runner=self.runner,
-                    clock=self.clock,
-                    sleep=self.sleep,
-                    poll_seconds=1.0,
-                    timings=TIMINGS,
-                    **arguments,  # pyright: ignore[reportAny]  # keyword overrides of a test
-                )
+    def run(self, session: str = "Call") -> list[dict[str, Any]]:
+        with capture_logs() as logs, pytest.raises(_EndError):
+            watch(
+                self.directory,
+                session=session,
+                apps=DEFAULT_APPS,
+                reader=self.reader,
+                runner=self.runner,
+                clock=self.clock,
+                sleep=self.sleep,
+                poll_seconds=1.0,
+                timings=TIMINGS,
+            )
         return cast("list[dict[str, Any]]", logs)
 
     def verbs(self) -> list[str]:
         return [name.removesuffix(".ahcommand") for _, name, _ in self.opens]
 
 
-def call_between(start: float, stop: float, holders: frozenset[str] = ZOOM) -> Callable[[float], frozenset[str]]:
+def call_between(
+    start: float, stop: float, holders: frozenset[str] = ZOOM
+) -> Callable[[float], frozenset[str]]:
     return lambda elapsed: holders if start <= elapsed < stop else QUIET
 
 
@@ -634,17 +660,7 @@ def test_the_marker_is_written_before_open_runs_and_confirmed_after(tmp_path: Pa
 
 
 def test_the_marker_is_cleared_only_when_the_stop_is_done(tmp_path: Path) -> None:
-    mac = FakeMac(tmp_path, call_between(0.0, 10.0), end=60.0)
-    mac.answers = True
-    original = mac.runner
-
-    def stubborn(argv: Sequence[str], timeout: float) -> str:
-        output = original(argv, timeout)
-        if argv[0] == "/usr/bin/open" and Path(argv[4]).name == "stop.ahcommand":
-            mac.session_running = True
-        return output
-
-    mac.runner = stubborn
+    mac = FakeMac(tmp_path, call_between(0.0, 10.0), end=60.0, stop_ignored=True)
     mac.run()
     assert mac.verbs()[:2] == ["start", "stop"]
     assert mac.marker_path.read_text() == "confirmed"
@@ -672,15 +688,13 @@ def test_a_hook_that_fails_ends_nothing_and_is_retried(tmp_path: Path, error: Ex
 
 
 def test_a_hook_that_recovers_is_confirmed(tmp_path: Path) -> None:
-    mac = FakeMac(tmp_path, call_between(0.0, 3600.0), end=70.0, open_error=OSError("gone"))
-    original = mac.runner
-
-    def recovering(argv: Sequence[str], timeout: float) -> str:
-        if mac.elapsed() > 20.0:
-            mac.open_error = None
-        return original(argv, timeout)
-
-    mac.runner = recovering
+    mac = FakeMac(
+        tmp_path,
+        call_between(0.0, 3600.0),
+        end=70.0,
+        open_error=OSError("gone"),
+        open_error_until=20.0,
+    )
     mac.run()
     assert mac.verbs() == ["start"]
     assert mac.marker_path.read_text() == "confirmed"
@@ -727,13 +741,6 @@ def test_a_failed_notification_is_logged_and_changes_nothing(tmp_path: Path) -> 
 
 def test_a_stop_is_not_opened_when_the_app_is_not_running(tmp_path: Path) -> None:
     mac = FakeMac(tmp_path, call_between(0.0, 10.0), end=80.0)
-    original = mac.runner
-
-    def quit_after_start(argv: Sequence[str], timeout: float) -> str:
-        output = original(argv, timeout)
-        return output
-
-    mac.runner = quit_after_start
     mac.marker_path.write_text("confirmed")
     mac.app_running = False
     mac.run()
@@ -743,16 +750,10 @@ def test_a_stop_is_not_opened_when_the_app_is_not_running(tmp_path: Path) -> Non
 
 
 def test_a_failed_running_check_sends_the_stop_and_is_logged(tmp_path: Path) -> None:
-    mac = FakeMac(tmp_path, lambda _: QUIET, end=60.0)
+    mac = FakeMac(
+        tmp_path, lambda _: QUIET, end=60.0, check_error=ExternalServiceError("exit 1: no")
+    )
     mac.marker_path.write_text("confirmed")
-    original = mac.runner
-
-    def broken_check(argv: Sequence[str], timeout: float) -> str:
-        if argv[0] == "/usr/bin/lsappinfo":
-            raise ExternalServiceError("exit 1: no")
-        return original(argv, timeout)
-
-    mac.runner = broken_check
     logs = mac.run()
     assert mac.verbs() == ["stop"]
     assert [log["event"] for log in logs].count("call_watch.running_check_failed") == 1
@@ -802,8 +803,11 @@ class TestLoopRestart:
 
 
 def test_a_marker_that_cannot_be_written_holds_back_open(tmp_path: Path) -> None:
-    mac = FakeMac(tmp_path, call_between(0.0, 3600.0), end=40.0)
-    mac.marker_path.mkdir()
+    def call(_elapsed: float) -> frozenset[str]:
+        (tmp_path / "marker").mkdir(exist_ok=True)
+        return ZOOM
+
+    mac = FakeMac(tmp_path, call, end=40.0)
     logs = mac.run()
     assert mac.opens == []
     assert [log["event"] for log in logs].count("call_watch.marker_failed") == 1
@@ -879,7 +883,7 @@ cli = CliRunner()
 def _record_watch(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
     calls: list[dict[str, Any]] = []
 
-    def fake(directory: Path, **kwargs: Any) -> None:
+    def fake(directory: Path, **kwargs: object) -> None:
         calls.append({"directory": directory, **kwargs})
 
     monkeypatch.setattr("scribe.call_watch.watch", fake)
@@ -907,9 +911,7 @@ def test_the_command_defaults(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -
 def test_app_replaces_the_default_list(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     calls = _record_watch(monkeypatch)
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
-    result = cli.invoke(
-        app, ["call-watch", "--session", "Other", "--app", "a.b", "--app", "c.d"]
-    )
+    result = cli.invoke(app, ["call-watch", "--session", "Other", "--app", "a.b", "--app", "c.d"])
     assert result.exit_code == 0, result.output
     assert calls[0]["session"] == "Other"
     assert calls[0]["apps"] == ("a.b", "c.d")
@@ -924,7 +926,7 @@ def test_an_empty_name_is_refused(monkeypatch: pytest.MonkeyPatch, arguments: li
 
 
 def test_an_app_error_from_the_watcher_exits_two(monkeypatch: pytest.MonkeyPatch) -> None:
-    def fail(_directory: Path, **_kwargs: Any) -> None:
+    def fail(_directory: Path, **_kwargs: object) -> None:
         raise ExternalServiceError("state directory")
 
     monkeypatch.setattr("scribe.call_watch.watch", fail)
