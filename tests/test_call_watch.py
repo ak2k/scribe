@@ -259,10 +259,48 @@ def test_a_late_stop_confirmation_ends_the_resending_and_clears_the_marker() -> 
     assert trace.state.marker is None
 
 
-def test_a_new_call_confirmed_ends_a_stop_being_resent() -> None:
-    state = replay([(10, ZOOM | HIJACK), (31, HIJACK)]).state
-    trace = resume(state, [(10, HIJACK), (40, ZOOM | HIJACK)])
+def against_a_slow_stop(
+    state: State, spans: Sequence[tuple[int, frozenset[str]]], *, lands_after: float
+) -> Trace:
+    """Decide once a second from a running session that a stop ends `lands_after` seconds
+    after it is sent. A start lands by the next poll and changes nothing while one runs."""
+    trace = Trace(state=state)
+    running = True
+    landings: list[tuple[float, bool]] = []
+    now = 10_000.0
+    for seconds, holding in spans:
+        for _ in range(seconds):
+            for _when, after in sorted(landing for landing in landings if landing[0] <= now):
+                running = after
+            landings = [landing for landing in landings if landing[0] > now]
+            read = holding | (HIJACK if running else QUIET)
+            step = decide(trace.state, now, read, timings=TIMINGS)
+            trace.state = step.state
+            trace.notes.extend((now, note) for note in step.notes)
+            if step.action is not None:
+                trace.actions.append((now, step.action))
+                starts = step.action in {"start", "resend-start"}
+                landings.append((now + (0.25 if starts else lands_after), starts))
+            now += 1.0
+    return trace
+
+
+def test_a_call_confirmed_while_a_stop_lands_starts_after_it_lands() -> None:
+    # The stop goes out at 10 000 s, and the read at 10 004 s is the last to show it running.
+    state = replay([(10, ZOOM), (31, QUIET)]).state
+    trace = against_a_slow_stop(state, [(1, QUIET), (60, ZOOM)], lands_after=4.5)
     assert trace.verbs() == ["stop", "start"]
+    assert trace.actions[1][0] > 10_004.5
+    assert isinstance(trace.state.session, Recording)
+    assert trace.state.session.holding
+    assert "call_watch.start_confirmed" in trace.events()
+    assert "call_watch.recording_released" not in trace.events()
+
+
+def test_a_call_confirmed_while_another_session_holds_input_starts_after_the_window() -> None:
+    state = replay([(10, ZOOM | HIJACK), (31, HIJACK)]).state
+    trace = resume(state, [(1, HIJACK), (100, ZOOM | HIJACK)])
+    assert trace.actions == [(10_000.0, "stop"), (10_005.0, "start")]
     assert isinstance(trace.state.session, Recording)
     assert trace.state.marker == "confirmed"
 
