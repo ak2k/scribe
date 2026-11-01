@@ -901,23 +901,33 @@ def test_a_marker_write_that_fails_on_the_start_poll_still_starts(tmp_path: Path
     assert mac.marker_path.read_text() == "confirmed"
 
 
-def test_a_marker_check_that_raises_during_a_recording_ends_nothing(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def deny_marker_checks(
+    monkeypatch: pytest.MonkeyPatch, directory: Path, denied: Callable[[], bool]
 ) -> None:
-    # Injected rather than a mode-000 directory, which root could still read.
-    denied = {"now": False}
+    """Make the marker's existence check raise while `denied()` holds.
+
+    Injected rather than a mode-000 directory, which root could still read.
+    """
     real_exists = Path.exists
 
     def exists(path: Path, *, follow_symlinks: bool = True) -> bool:
-        if denied["now"] and path == marker_path(tmp_path, "Call"):
+        if denied() and path == marker_path(directory, "Call"):
             raise PermissionError(13, "Permission denied", str(path))
         return real_exists(path, follow_symlinks=follow_symlinks)
+
+    monkeypatch.setattr(Path, "exists", exists)
+
+
+def test_a_marker_check_that_raises_during_a_recording_ends_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    denied = {"now": False}
 
     def call(elapsed: float) -> frozenset[str]:
         denied["now"] = 8.0 <= elapsed < 15.0
         return ZOOM if elapsed < 20.0 else QUIET
 
-    monkeypatch.setattr(Path, "exists", exists)
+    deny_marker_checks(monkeypatch, tmp_path, lambda: denied["now"])
     mac = FakeMac(tmp_path, call, end=60.0)
     ended: OSError | None = None
     logs: list[dict[str, Any]] = []
@@ -929,6 +939,21 @@ def test_a_marker_check_that_raises_during_a_recording_ends_nothing(
     assert mac.verbs() == ["start", "stop"]
     assert [log["event"] for log in logs].count("call_watch.marker_failed") == 1
     assert not mac.marker_path.exists()
+
+
+def test_each_marker_check_outage_is_logged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    denied = {"now": False}
+
+    def call(elapsed: float) -> frozenset[str]:
+        denied["now"] = 8.0 <= elapsed < 10.0 or 15.0 <= elapsed < 17.0
+        return ZOOM
+
+    deny_marker_checks(monkeypatch, tmp_path, lambda: denied["now"])
+    mac = FakeMac(tmp_path, call, end=30.0)
+    logs = mac.run()
+    assert [log["event"] for log in logs].count("call_watch.marker_failed") == 2
 
 
 def test_a_directory_removed_between_calls_is_recreated_for_the_next(tmp_path: Path) -> None:
