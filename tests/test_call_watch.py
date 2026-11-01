@@ -216,6 +216,11 @@ def test_a_start_that_does_not_read_back_warns_once_and_resends() -> None:
     assert [when for when, note in trace.notes if note.notify] == [8.0]
 
 
+def test_a_start_is_resent_only_while_the_call_holds_input() -> None:
+    trace = replay([(10, ZOOM), (25, QUIET), (2, ZOOM)], answers=False)
+    assert trace.actions == [(3.0, "start"), (35.0, "resend-start")]
+
+
 def test_a_late_confirmation_ends_the_resending() -> None:
     silent = replay([(40, ZOOM)], answers=False)
     assert silent.verbs() == ["start", "resend-start"]
@@ -603,7 +608,7 @@ class FakeMac:
         path = Path(argv[4])
         assert path.parent == self.directory
         self.marker_seen_at_open.append(
-            self.marker_path.read_text() if self.marker_path.exists() else None
+            self.marker_path.read_text() if self.marker_path.is_file() else None
         )
         if self.open_error is not None and self.elapsed() < self.open_error_until:
             raise self.open_error
@@ -809,7 +814,7 @@ def test_a_marker_that_cannot_be_written_holds_back_open(tmp_path: Path) -> None
 
     mac = FakeMac(tmp_path, call, end=40.0)
     logs = mac.run()
-    assert mac.opens == []
+    assert mac.marker_seen_at_open == []
     assert [log["event"] for log in logs].count("call_watch.marker_failed") == 1
     assert len(mac.notifications) == 1
 
