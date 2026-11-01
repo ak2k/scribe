@@ -338,7 +338,11 @@ def _stopping(tick: _Tick, session: Stopping) -> Step:
         session = Stopping("stopping", sent_at, sent_at)
     if not tick.hijack:
         return tick.step(Idle(), notes=(Note("call_watch.stop_done"),))
-    if tick.call_confirmed:
+    # A start sent before the stop takes effect does nothing, and the release that follows
+    # would count as a person's Stop. Past the window the hold may be another session's,
+    # which never ends.
+    landing = tick.clock - session.last_sent_at < tick.timings.readback_seconds
+    if tick.call_confirmed and not landing:
         return tick.start()
     notes: tuple[Note, ...] = ()
     if not session.warned and tick.clock - sent_at >= tick.timings.readback_seconds:
