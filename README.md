@@ -249,6 +249,16 @@ It writes `call-mic.merged.json` beside the microphone's transcript, or the
 path `--out` gives, and prints a line counting the words kept and dropped. On
 a merged transcript, `turns` skips its speaker pass and its audio naming.
 
+On a Mac, `scribe call-watch` presses Run and Stop for you. It starts an Audio
+Hijack session, `Call` unless `--session` names another, 3 s after a call app
+takes the microphone, and stops it 30 s after the last one lets go. If the
+session does not start or stop, you get a notification and it tries again. This
+needs Audio Hijack's "Allow execution of external scripts" setting (Settings,
+Advanced). Recording runs whenever a listed app holds the microphone, so a
+browser's use of the microphone for anything else also records; `--app` replaces
+the list. One session serves every call app, so that session captures
+system-wide audio, as `contrib/audio-hijack/Call.ah4session` does.
+
 ## Dictate with scribe serve
 
 ```bash
