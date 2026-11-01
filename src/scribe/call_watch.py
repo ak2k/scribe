@@ -318,11 +318,15 @@ def _recording(tick: _Tick, session: Recording) -> Step:
     return tick.step(session)
 
 
+def _first_stop(tick: _Tick) -> Step:
+    if tick.hijack or tick.running:
+        return tick.step(Stopping("stopping", tick.clock, tick.clock), "stop")
+    return tick.step(Idle(), notes=(Note("call_watch.stop_not_needed"),))
+
+
 def _stopping(tick: _Tick, session: Stopping) -> Step:
     if session.marker != "stopping":
-        if tick.hijack or tick.running:
-            return tick.step(Stopping("stopping", tick.clock, tick.clock), "stop")
-        return tick.step(Idle(), notes=(Note("call_watch.stop_not_needed"),))
+        return _first_stop(tick)
     sent_at = session.sent_at
     if sent_at is None:
         sent_at = tick.clock
