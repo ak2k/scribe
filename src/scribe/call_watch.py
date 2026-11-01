@@ -620,13 +620,16 @@ def command_text(session: str, verb: Verb) -> str:
     return f"app.sessionWithName({json.dumps(session)}).{verb}()"
 
 
+def _session_key(session: str) -> str:
+    return hashlib.sha256(session.encode(errors="surrogatepass")).hexdigest()
+
+
 def marker_path(directory: Path, session: str) -> Path:
     """Return the marker file of one session.
 
     A hash keeps any session name, however long or odd, safe as a filename.
     """
-    digest = hashlib.sha256(session.encode(errors="surrogatepass")).hexdigest()
-    return directory / f"{digest}.marker"
+    return directory / f"{_session_key(session)}.marker"
 
 
 def require_macos(platform: str) -> None:
@@ -700,7 +703,8 @@ class _Edges:
             return
         try:
             self.directory.mkdir(parents=True, exist_ok=True)
-            path = self.directory / f"{verb}.ahcommand"
+            # Keyed as the marker is, so a watcher of another session never overwrites it.
+            path = self.directory / f"{_session_key(self.session)}.{verb}.ahcommand"
             path.write_text(command_text(self.session, verb) + "\n")
             self.runner([*_OPEN_ARGV, str(path)], HOOK_TIMEOUT_SECONDS)
         except Exception as exc:  # noqa: BLE001  # whatever a hook raises, the loop outlives it
