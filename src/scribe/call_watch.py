@@ -64,7 +64,7 @@ _NOTIFY_ARGV = (
 _RUNNING_ARGV = ("/usr/bin/lsappinfo", "find", f"bundleid={HIJACK_BUNDLE_ID}")
 _OPEN_ARGV = ("/usr/bin/open", "-g", "-b", HIJACK_BUNDLE_ID)
 
-Marker = Literal["sent", "confirmed"]
+Marker = Literal["sent", "confirmed", "stopping"]
 Verb = Literal["start", "stop"]
 Action = Literal["start", "resend-start", "stop", "resend-stop"]
 Level = Literal["info", "warning", "error"]
@@ -121,7 +121,11 @@ class Recording:
 
 @dataclass(frozen=True)
 class Stopping:
-    """The call has ended. `sent_at` is None until the first stop goes out."""
+    """The call has ended.
+
+    `marker` is "stopping" once a stop has gone out. `sent_at` is None until then, and
+    after a restart, until the first good read starts the read-back again.
+    """
 
     marker: Marker
     sent_at: float | None = None
@@ -220,7 +224,8 @@ def restored_state(marker: Marker | None) -> State:
     """The state to begin from, given the marker file left by an earlier run.
 
     The first good read completes it: a call resumes the session as it was left,
-    and no call runs the end grace from zero.
+    and no call runs the end grace from zero. A stop on its way needs no call or
+    grace, only its read-back.
     """
     match marker:
         case None:
@@ -229,6 +234,8 @@ def restored_state(marker: Marker | None) -> State:
             return State(session=Starting())
         case "confirmed":
             return State(session=Recording())
+        case "stopping":
+            return State(session=Stopping("stopping"))
 
 
 def needs_running(state: State, holding: frozenset[str] | Read) -> bool:
@@ -238,7 +245,7 @@ def needs_running(state: State, holding: frozenset[str] | Read) -> bool:
     """
     return (
         isinstance(state.session, Stopping)
-        and state.session.sent_at is None
+        and state.session.marker != "stopping"
         and holding is not Read.FAILED
         and not any(_is_hijack(bundle) for bundle in holding)
     )
@@ -312,16 +319,20 @@ def _recording(tick: _Tick, session: Recording) -> Step:
 
 
 def _stopping(tick: _Tick, session: Stopping) -> Step:
-    if session.sent_at is None:
+    if session.marker != "stopping":
         if tick.hijack or tick.running:
-            return tick.step(replace(session, sent_at=tick.clock, last_sent_at=tick.clock), "stop")
+            return tick.step(Stopping("stopping", tick.clock, tick.clock), "stop")
         return tick.step(Idle(), notes=(Note("call_watch.stop_not_needed"),))
+    sent_at = session.sent_at
+    if sent_at is None:
+        sent_at = tick.clock
+        session = Stopping("stopping", sent_at, sent_at)
     if not tick.hijack:
         return tick.step(Idle(), notes=(Note("call_watch.stop_done"),))
     if tick.call_confirmed:
         return tick.start()
     notes: tuple[Note, ...] = ()
-    if not session.warned and tick.clock - session.sent_at >= tick.timings.readback_seconds:
+    if not session.warned and tick.clock - sent_at >= tick.timings.readback_seconds:
         session = replace(session, warned=True)
         notes = (_STOP_UNCONFIRMED,)
     if tick.clock - session.last_sent_at >= tick.timings.resend_seconds:
@@ -645,6 +656,9 @@ class _Edges:
             raise ExternalServiceError(f"cannot read the call-watch state: {exc}") from exc
         if raw == b"confirmed":
             self.saved = "confirmed"
+            return
+        if raw == b"stopping":
+            self.saved = "stopping"
             return
         # Only this watcher writes the file, so it stands for a session, whatever it holds.
         if raw != b"sent":

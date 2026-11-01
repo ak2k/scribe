@@ -319,7 +319,8 @@ def test_the_running_check_is_asked_only_before_a_first_stop_with_input_released
     assert needs_running(pending, QUIET)
     assert not needs_running(pending, HIJACK)
     assert not needs_running(pending, Read.FAILED)
-    assert not needs_running(State(session=Stopping("confirmed", 1.0, 1.0)), QUIET)
+    assert not needs_running(State(session=Stopping("stopping", 1.0, 1.0)), QUIET)
+    assert not needs_running(restored_state("stopping"), QUIET)
 
 
 def test_a_short_outage_stays_quiet() -> None:
@@ -670,7 +671,7 @@ def test_the_marker_is_cleared_only_when_the_stop_is_done(tmp_path: Path) -> Non
     mac = FakeMac(tmp_path, call_between(0.0, 10.0), end=60.0, stop_ignored=True)
     mac.run()
     assert mac.verbs()[:2] == ["start", "stop"]
-    assert mac.marker_path.read_text() == "confirmed"
+    assert mac.marker_path.read_text() == "stopping"
 
 
 def test_a_session_name_with_a_quote_reaches_the_file_as_one_string(tmp_path: Path) -> None:
