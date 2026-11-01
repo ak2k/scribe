@@ -638,6 +638,7 @@ class _Edges:
             if marker is None:
                 self._marker_path.unlink(missing_ok=True)
             else:
+                self.directory.mkdir(parents=True, exist_ok=True)
                 partial = self.directory / "marker.tmp"
                 partial.write_text(marker)
                 partial.replace(self._marker_path)
@@ -656,6 +657,7 @@ class _Edges:
         if verb == "start" and not marker_saved:
             return
         try:
+            self.directory.mkdir(parents=True, exist_ok=True)
             path = self.directory / f"{verb}.ahcommand"
             path.write_text(command_text(self.session, verb) + "\n")
             self.runner([*_OPEN_ARGV, str(path)], HOOK_TIMEOUT_SECONDS)
