@@ -885,6 +885,7 @@ def _killed_after_a_stop_went_out(directory: Path) -> FakeMac:
     mac = FakeMac(directory, call_between(0.0, 10.0), end=42.0)
     mac.run()
     assert mac.verbs() == ["start", "stop"]
+    assert mac.marker_seen_at_open == ["sent", "stopping"]
     return mac
 
 
@@ -936,6 +937,7 @@ def test_a_directory_removed_during_a_recording_gets_its_marker_back(tmp_path: P
 
     mac = FakeMac(directory, call, end=9.0)
     mac.run()
+    assert mac.marker_path.is_file()
     assert mac.marker_path.read_text() == "confirmed"
     after = FakeMac(directory, lambda _: QUIET, end=40.0, session_running=True)
     after.run()
