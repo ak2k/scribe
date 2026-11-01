@@ -257,7 +257,10 @@ needs Audio Hijack's "Allow execution of external scripts" setting (Settings,
 Advanced). Recording runs whenever a listed app holds the microphone, so a
 browser's use of the microphone for anything else also records; `--app` replaces
 the list. One session serves every call app, so that session captures
-system-wide audio, as `contrib/audio-hijack/Call.ah4session` does.
+system-wide audio, as `contrib/audio-hijack/Call.ah4session` does. The session
+must record a microphone, which is how the watcher sees that it runs. While
+another Audio Hijack session holds the microphone, the watcher cannot see a
+start or stop take effect, so it may warn and resend.
 
 ## Dictate with scribe serve
 
