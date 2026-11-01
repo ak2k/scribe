@@ -693,7 +693,13 @@ class FakeMac:
         return cast("list[dict[str, Any]]", logs)
 
     def verbs(self) -> list[str]:
-        return [name.removesuffix(".ahcommand") for _, name, _ in self.opens]
+        return [verb for _, verb in self.sent()]
+
+    def sent(self) -> list[tuple[float, str]]:
+        return [
+            (when, name.removesuffix(".ahcommand").rpartition(".")[2])
+            for when, name, _ in self.opens
+        ]
 
 
 def call_between(
@@ -935,6 +941,18 @@ def test_a_marker_from_another_session_is_never_acted_on(tmp_path: Path) -> None
     assert back.verbs() == ["stop"]
 
 
+def test_each_session_keeps_its_own_command_file(tmp_path: Path) -> None:
+    first = FakeMac(tmp_path, call_between(0.0, 3600.0), end=40.0, answers=False)
+    first.run(session="A")
+    second = FakeMac(tmp_path, call_between(0.0, 3600.0), end=40.0, answers=False)
+    second.run(session="B")
+    assert first.sent() == second.sent() == [(3.0, "start"), (33.0, "start")]
+    first_names = {name for _, name, _ in first.opens}
+    second_names = {name for _, name, _ in second.opens}
+    assert len(first_names) == len(second_names) == 1
+    assert first_names.isdisjoint(second_names)
+
+
 def _killed_after_a_stop_went_out(directory: Path) -> FakeMac:
     # The call ends at 10 s, the grace at 40 s, and the stop goes out on the poll at 41 s.
     mac = FakeMac(directory, call_between(0.0, 10.0), end=42.0)
@@ -948,7 +966,7 @@ def test_a_restart_after_a_sent_stop_starts_the_next_call(tmp_path: Path) -> Non
     _killed_after_a_stop_went_out(tmp_path)
     mac = FakeMac(tmp_path, call_between(0.0, 3600.0), end=20.0)
     mac.run()
-    assert [(when, name) for when, name, _ in mac.opens] == [(3.0, "start.ahcommand")]
+    assert mac.sent() == [(3.0, "start")]
     assert mac.notifications == []
     assert mac.marker_path.read_text() == "confirmed"
 
@@ -966,7 +984,7 @@ def test_a_restart_after_a_sent_stop_resumes_its_read_back(tmp_path: Path) -> No
     _killed_after_a_stop_went_out(tmp_path)
     mac = FakeMac(tmp_path, lambda _: QUIET, end=40.0, session_running=True, stop_ignored=True)
     mac.run()
-    assert [(when, name) for when, name, _ in mac.opens] == [(30.0, "stop.ahcommand")]
+    assert mac.sent() == [(30.0, "stop")]
     assert len(mac.notifications) == 1
     assert mac.running_checks == 0
     assert mac.marker_path.exists()
