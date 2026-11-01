@@ -848,6 +848,18 @@ def test_a_directory_removed_during_a_recording_does_not_lose_the_stop(tmp_path:
     assert not mac.marker_path.exists()
 
 
+def test_a_marker_from_another_session_is_never_acted_on(tmp_path: Path) -> None:
+    first = FakeMac(tmp_path, call_between(0.0, 3600.0), end=10.0)
+    first.run(session="A")
+    assert first.verbs() == ["start"]
+    other = FakeMac(tmp_path, lambda _: QUIET, end=200.0, session_running=True)
+    other.run(session="B")
+    assert other.opens == []
+    back = FakeMac(tmp_path, lambda _: QUIET, end=60.0, session_running=True)
+    back.run(session="A")
+    assert back.verbs() == ["stop"]
+
+
 def test_a_read_outage_in_the_loop_notifies_once(tmp_path: Path) -> None:
     def call(elapsed: float) -> frozenset[str] | None:
         return None if 20.0 <= elapsed < 100.0 else ZOOM
