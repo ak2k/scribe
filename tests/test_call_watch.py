@@ -879,6 +879,52 @@ def test_a_marker_from_another_session_is_never_acted_on(tmp_path: Path) -> None
     assert back.verbs() == ["stop"]
 
 
+def _killed_after_a_stop_went_out(directory: Path) -> FakeMac:
+    # The call ends at 10 s, the grace at 40 s, and the stop goes out on the poll at 41 s.
+    mac = FakeMac(directory, call_between(0.0, 10.0), end=42.0)
+    mac.run()
+    assert mac.verbs() == ["start", "stop"]
+    return mac
+
+
+def test_a_restart_after_a_sent_stop_starts_the_next_call(tmp_path: Path) -> None:
+    _killed_after_a_stop_went_out(tmp_path)
+    mac = FakeMac(tmp_path, call_between(0.0, 3600.0), end=20.0)
+    mac.run()
+    assert [(when, name) for when, name, _ in mac.opens] == [(3.0, "start.ahcommand")]
+    assert mac.notifications == []
+    assert mac.marker_path.read_text() == "confirmed"
+
+
+def test_a_restart_after_a_sent_stop_with_no_call_clears_the_marker(tmp_path: Path) -> None:
+    _killed_after_a_stop_went_out(tmp_path)
+    mac = FakeMac(tmp_path, lambda _: QUIET, end=5.0)
+    mac.run()
+    assert mac.opens == []
+    assert mac.running_checks == 0
+    assert not mac.marker_path.exists()
+
+
+def test_a_restart_after_a_sent_stop_resumes_its_read_back(tmp_path: Path) -> None:
+    _killed_after_a_stop_went_out(tmp_path)
+    mac = FakeMac(tmp_path, lambda _: QUIET, end=40.0, session_running=True, stop_ignored=True)
+    mac.run()
+    assert [(when, name) for when, name, _ in mac.opens] == [(30.0, "stop.ahcommand")]
+    assert len(mac.notifications) == 1
+    assert mac.running_checks == 0
+    assert mac.marker_path.exists()
+
+
+def test_a_persons_stop_still_stands_across_a_restart(tmp_path: Path) -> None:
+    first = FakeMac(tmp_path, call_between(0.0, 3600.0), end=10.0)
+    first.run()
+    assert first.marker_path.read_text() == "confirmed"
+    mac = FakeMac(tmp_path, call_between(0.0, 3600.0), end=100.0)
+    mac.run()
+    assert mac.opens == []
+    assert len(mac.notifications) == 1
+
+
 def test_a_read_outage_in_the_loop_notifies_once(tmp_path: Path) -> None:
     def call(elapsed: float) -> frozenset[str] | None:
         return None if 20.0 <= elapsed < 100.0 else ZOOM
