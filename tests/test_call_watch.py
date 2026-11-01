@@ -63,7 +63,7 @@ QUIET: frozenset[str] = frozenset()
 HIJACK = frozenset({HIJACK_BUNDLE_ID})
 NEVER_CALLS = (
     HIJACK_BUNDLE_ID,
-    "com.krisp.krispMac",
+    "ai.krisp.krispMac",
     "com.prakashjoshipax.VoiceInk",
     "com.p5sys.jump.mac.viewer",
 )
@@ -157,7 +157,7 @@ def test_an_app_off_the_list_never_starts(bundle: str) -> None:
 
 
 def test_an_app_off_the_list_keeps_nothing_alive() -> None:
-    krisp = frozenset({"com.krisp.krispMac"})
+    krisp = frozenset({"ai.krisp.krispMac"})
     assert replay([(20, ZOOM), (120, krisp)]).verbs() == ["start", "stop"]
 
 
