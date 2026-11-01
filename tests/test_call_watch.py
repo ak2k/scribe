@@ -273,6 +273,23 @@ def test_a_hold_too_short_to_confirm_does_not_interrupt_a_stop_being_resent() ->
     assert trace.verbs() == ["stop", "resend-stop"]
 
 
+def test_a_call_back_on_the_poll_after_the_grace_keeps_the_recording() -> None:
+    # The grace ends on the poll at 40 s, and the call is back on the poll at 41 s.
+    returned = replay([(10, ZOOM), (31, QUIET), (1, ZOOM)])
+    assert returned.actions == [(3.0, "start")]
+    assert isinstance(returned.state.session, Recording)
+    trace = replay([(10, ZOOM), (31, QUIET), (20, ZOOM), (40, QUIET)])
+    assert trace.actions == [(3.0, "start"), (92.0, "stop")]
+    assert "call_watch.recording_released" not in trace.events()
+    assert trace.state.marker is None
+
+
+def test_a_call_back_on_the_poll_after_the_grace_resumes_an_unread_start() -> None:
+    trace = replay([(10, ZOOM), (31, QUIET), (40, ZOOM)], answers=False)
+    assert trace.actions == [(3.0, "start"), (71.0, "resend-start")]
+    assert isinstance(trace.state.session, Starting)
+
+
 def test_a_release_during_a_call_notifies_once_and_starts_nothing() -> None:
     state = replay([(10, ZOOM)]).state
     assert isinstance(state.session, Recording)
