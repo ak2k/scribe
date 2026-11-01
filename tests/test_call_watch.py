@@ -901,6 +901,36 @@ def test_a_marker_write_that_fails_on_the_start_poll_still_starts(tmp_path: Path
     assert mac.marker_path.read_text() == "confirmed"
 
 
+def test_a_marker_check_that_raises_during_a_recording_ends_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Injected rather than a mode-000 directory, which root could still read.
+    denied = {"now": False}
+    real_exists = Path.exists
+
+    def exists(path: Path, *, follow_symlinks: bool = True) -> bool:
+        if denied["now"] and path == marker_path(tmp_path, "Call"):
+            raise PermissionError(13, "Permission denied", str(path))
+        return real_exists(path, follow_symlinks=follow_symlinks)
+
+    def call(elapsed: float) -> frozenset[str]:
+        denied["now"] = 8.0 <= elapsed < 15.0
+        return ZOOM if elapsed < 20.0 else QUIET
+
+    monkeypatch.setattr(Path, "exists", exists)
+    mac = FakeMac(tmp_path, call, end=60.0)
+    ended: OSError | None = None
+    logs: list[dict[str, Any]] = []
+    try:
+        logs = mac.run()
+    except OSError as exc:
+        ended = exc
+    assert ended is None
+    assert mac.verbs() == ["start", "stop"]
+    assert [log["event"] for log in logs].count("call_watch.marker_failed") == 1
+    assert not mac.marker_path.exists()
+
+
 def test_a_directory_removed_between_calls_is_recreated_for_the_next(tmp_path: Path) -> None:
     directory = tmp_path / "call-watch"
 
