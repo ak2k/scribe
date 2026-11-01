@@ -666,7 +666,7 @@ class _Edges:
         self.saved = "sent"
 
     def save_marker(self, marker: Marker | None) -> bool:
-        if marker == self.saved:
+        if marker == self.saved and (marker is None or self._marker_path.exists()):
             return True
         try:
             if marker is None:
