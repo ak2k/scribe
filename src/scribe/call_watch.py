@@ -318,7 +318,12 @@ def _recording(tick: _Tick, session: Recording) -> Step:
     return tick.step(session)
 
 
-def _first_stop(tick: _Tick) -> Step:
+def _first_stop(tick: _Tick, marker: Marker) -> Step:
+    # A stop now would end a session that is capturing the call that came back.
+    if tick.call_held:
+        if marker == "sent":
+            return _starting(tick, Starting())
+        return _recording(tick, Recording())
     if tick.hijack or tick.running:
         return tick.step(Stopping("stopping", tick.clock, tick.clock), "stop")
     return tick.step(Idle(), notes=(Note("call_watch.stop_not_needed"),))
@@ -326,7 +331,7 @@ def _first_stop(tick: _Tick) -> Step:
 
 def _stopping(tick: _Tick, session: Stopping) -> Step:
     if session.marker != "stopping":
-        return _first_stop(tick)
+        return _first_stop(tick, session.marker)
     sent_at = session.sent_at
     if sent_at is None:
         sent_at = tick.clock
