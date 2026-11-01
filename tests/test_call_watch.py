@@ -871,16 +871,34 @@ class TestLoopRestart:
         assert [log["event"] for log in logs].count("call_watch.marker_unreadable") == 1
 
 
-def test_a_marker_that_cannot_be_written_holds_back_open(tmp_path: Path) -> None:
+def test_a_marker_that_cannot_be_written_holds_back_no_start(tmp_path: Path) -> None:
     def call(_elapsed: float) -> frozenset[str]:
         marker_path(tmp_path, "Call").mkdir(exist_ok=True)
         return ZOOM
 
     mac = FakeMac(tmp_path, call, end=40.0)
     logs = mac.run()
-    assert mac.marker_seen_at_open == []
+    assert mac.sent() == [(3.0, "start")]
     assert [log["event"] for log in logs].count("call_watch.marker_failed") == 1
-    assert len(mac.notifications) == 1
+    assert mac.notifications == []
+
+
+def test_a_marker_write_that_fails_on_the_start_poll_still_starts(tmp_path: Path) -> None:
+    blocker = marker_path(tmp_path, "Call")
+
+    def call(elapsed: float) -> frozenset[str]:
+        if elapsed == 3.0:
+            blocker.mkdir()
+        elif elapsed == 4.0:
+            blocker.rmdir()
+        return ZOOM
+
+    mac = FakeMac(tmp_path, call, end=10.0)
+    logs = mac.run()
+    assert mac.sent() == [(3.0, "start")]
+    assert [log["event"] for log in logs].count("call_watch.marker_failed") == 1
+    assert mac.marker_path.is_file()
+    assert mac.marker_path.read_text() == "confirmed"
 
 
 def test_a_directory_removed_between_calls_is_recreated_for_the_next(tmp_path: Path) -> None:
