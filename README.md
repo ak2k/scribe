@@ -250,7 +250,8 @@ path `--out` gives, and prints a line counting the words kept and dropped. On
 a merged transcript, `turns` skips its speaker pass and its audio naming.
 
 On a Mac, `scribe call-watch` presses Run and Stop for you. It starts an Audio
-Hijack session, `Call` unless `--session` names another, 3 s after a call app
+Hijack session, `Call` unless `--session` names another (changing the name leaves
+a run of the old session going), 3 s after a call app
 takes the microphone, and stops it 30 s after the last one lets go. If the
 session does not start or stop, you get a notification and it tries again. This
 needs Audio Hijack's "Allow execution of external scripts" setting (Settings,

@@ -39,6 +39,7 @@ from scribe.call_watch import (
     decide,
     input_holders,
     is_call_app,
+    marker_path,
     needs_running,
     require_macos,
     restored_state,
@@ -568,7 +569,7 @@ class FakeMac:
 
     @property
     def marker_path(self) -> Path:
-        return self.directory / "marker"
+        return marker_path(self.directory, "Call")
 
     def elapsed(self) -> float:
         return self.now - self.began
@@ -810,7 +811,7 @@ class TestLoopRestart:
 
 def test_a_marker_that_cannot_be_written_holds_back_open(tmp_path: Path) -> None:
     def call(_elapsed: float) -> frozenset[str]:
-        (tmp_path / "marker").mkdir(exist_ok=True)
+        marker_path(tmp_path, "Call").mkdir(exist_ok=True)
         return ZOOM
 
     mac = FakeMac(tmp_path, call, end=40.0)
@@ -846,6 +847,24 @@ def test_a_directory_removed_during_a_recording_does_not_lose_the_stop(tmp_path:
     mac.run()
     assert mac.verbs() == ["start", "stop"]
     assert not mac.marker_path.exists()
+
+
+@given(st.text(), st.text())
+def test_a_marker_filename_is_safe_for_any_session_name(first: str, second: str) -> None:
+    path = marker_path(Path("state"), first)
+    assert path.parent == Path("state")
+    assert path.name.isascii()
+    assert len(path.name) < 100
+    assert "/" not in path.name
+    assert (path == marker_path(Path("state"), second)) == (first == second)
+
+
+def test_a_name_that_is_no_filename_gets_a_marker(tmp_path: Path) -> None:
+    name = "../" * 200 + "a\nb\u2028\udc80"
+    mac = FakeMac(tmp_path, call_between(0.0, 3600.0), end=10.0)
+    logs = mac.run(session=name)
+    assert marker_path(tmp_path, name).read_text() == "confirmed"
+    assert "call_watch.marker_failed" not in [log["event"] for log in logs]
 
 
 def test_a_marker_from_another_session_is_never_acted_on(tmp_path: Path) -> None:

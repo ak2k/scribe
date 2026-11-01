@@ -8,6 +8,7 @@ sync loop wires them together, since nothing here is concurrent.
 from __future__ import annotations
 
 import ctypes
+import hashlib
 import json
 import struct
 import time
@@ -600,6 +601,15 @@ def command_text(session: str, verb: Verb) -> str:
     return f"app.sessionWithName({json.dumps(session)}).{verb}()"
 
 
+def marker_path(directory: Path, session: str) -> Path:
+    """Return the marker file of one session.
+
+    A hash keeps any session name, however long or odd, safe as a filename.
+    """
+    digest = hashlib.sha256(session.encode(errors="surrogatepass")).hexdigest()
+    return directory / f"{digest}.marker"
+
+
 def require_macos(platform: str) -> None:
     """Refuse a platform with no Audio Hijack.
 
@@ -623,7 +633,7 @@ class _Edges:
 
     @property
     def _marker_path(self) -> Path:
-        return self.directory / "marker"
+        return marker_path(self.directory, self.session)
 
     def load_marker(self) -> None:
         try:
@@ -649,7 +659,7 @@ class _Edges:
                 self._marker_path.unlink(missing_ok=True)
             else:
                 self.directory.mkdir(parents=True, exist_ok=True)
-                partial = self.directory / "marker.tmp"
+                partial = self._marker_path.with_suffix(".tmp")
                 partial.write_text(marker)
                 partial.replace(self._marker_path)
         except OSError as exc:
