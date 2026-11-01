@@ -676,9 +676,9 @@ class _Edges:
             _logger().error("call_watch.marker_unreadable", session=self.session)
         self.saved = "sent"
 
-    def save_marker(self, marker: Marker | None) -> bool:
+    def save_marker(self, marker: Marker | None) -> None:
         if marker == self.saved and (marker is None or self._marker_path.exists()):
-            return True
+            return
         try:
             if marker is None:
                 self._marker_path.unlink(missing_ok=True)
@@ -691,16 +691,12 @@ class _Edges:
             if not self.marker_failing:
                 _logger().error("call_watch.marker_failed", session=self.session, error=str(exc))
             self.marker_failing = True
-            return False
+            return
         self.saved = marker
         self.marker_failing = False
-        return True
 
-    def send(self, action: Action, *, marker_saved: bool) -> None:
+    def send(self, action: Action) -> None:
         verb: Verb = "start" if action in {"start", "resend-start"} else "stop"
-        # A start that a restart could forget must not go out.
-        if verb == "start" and not marker_saved:
-            return
         try:
             self.directory.mkdir(parents=True, exist_ok=True)
             # Keyed as the marker is, so a watcher of another session never overwrites it.
@@ -760,11 +756,13 @@ def _poll(
         error = str(exc)
     running = edges.hijack_running() if needs_running(state, holding) else True
     step = decide(state, now, holding, apps=apps, hijack_running=running, timings=timings)
-    marker_saved = edges.save_marker(step.state.marker)
+    # Attempted before `open`, not required: recording the call outranks restart safety,
+    # and a failed write is retried on every poll.
+    edges.save_marker(step.state.marker)
     for note in step.notes:
         edges.report(note, error)
     if step.action is not None:
-        edges.send(step.action, marker_saved=marker_saved)
+        edges.send(step.action)
     return step.state
 
 
