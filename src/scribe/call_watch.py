@@ -45,7 +45,7 @@ DEFAULT_APPS = (
     "us.zoom.",
     "com.microsoft.teams",
     "com.apple.avconferenced",
-    "com.apple.TelephonyUtilities.callservicesd",
+    "com.apple.TelephonyUtilities",
 )
 HIJACK_BUNDLE_ID = "com.rogueamoeba.audiohijack"
 
