@@ -504,9 +504,9 @@ class CoreAudio:  # pragma: no cover
     def _address(selector: bytes) -> _PropertyAddress:
         return _PropertyAddress(_four_cc(selector), _four_cc(b"glob"), 0)
 
-    def _read(self, obj: int, selector: bytes, value: ctypes.c_uint32 | ctypes.c_void_p) -> None:
+    def _status(self, obj: int, selector: bytes, value: ctypes.c_uint32 | ctypes.c_void_p) -> int:
         size = ctypes.c_uint32(ctypes.sizeof(value))
-        status = self._get_data(
+        return self._get_data(
             obj,
             ctypes.byref(self._address(selector)),
             0,
@@ -514,10 +514,19 @@ class CoreAudio:  # pragma: no cover
             ctypes.byref(size),
             ctypes.byref(value),
         )
-        if status == _BAD_OBJECT:
+
+    def _read(self, obj: int, selector: bytes, value: ctypes.c_uint32 | ctypes.c_void_p) -> None:
+        status = self._status(obj, selector, value)
+        if status == _NO_ERROR:
+            return
+        # An exiting process can answer `who?` just before it reads `!obj`. Only the
+        # re-read decides: `who?` for every object would otherwise read as nobody holding input.
+        again = self._status(obj, selector, value)
+        if again == _BAD_OBJECT:
             raise VanishedProcessError
-        if status != _NO_ERROR:
-            raise ExternalServiceError(f"CoreAudio status {status} reading {selector.decode()}")
+        raise ExternalServiceError(
+            f"CoreAudio status {status}, then {again}, reading {selector.decode()}"
+        )
 
     def object_ids(self) -> Sequence[int]:
         """Return the process objects now listed.
@@ -555,17 +564,18 @@ class CoreAudio:  # pragma: no cover
 
         """
         value = ctypes.c_void_p()
-        self._read(obj, b"pbid", value)
-        if not value.value:
-            return ""
         # The caller owns this CFString, and a watcher reads for months.
         try:
+            self._read(obj, b"pbid", value)
+            if not value.value:
+                return ""
             text = ctypes.create_string_buffer(_BUNDLE_BYTES)
             if not self._get_string(value, text, _BUNDLE_BYTES, _UTF8):
                 raise ExternalServiceError("a bundle ID does not fit its buffer")
             return ctypes.string_at(text).decode()
         finally:
-            self._release(value)
+            if value.value:
+                self._release(value)
 
 
 @cache
