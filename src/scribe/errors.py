@@ -42,5 +42,9 @@ class EarError(AppError):
         super().__init__(" ".join(message.split()))
 
 
+class UnsupportedPlatformError(AppError):
+    """Raised when a command cannot run on this operating system."""
+
+
 class SpendCapError(AppError):
     """Raised when a paid call could take a run's spending past its cap."""

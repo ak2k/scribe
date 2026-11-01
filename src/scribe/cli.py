@@ -2219,6 +2219,41 @@ def _xdg_home(variable: str, fallback: str) -> Path:
     return session_terms.xdg_home(os.environ, variable, fallback, home=Path.home())
 
 
+@app.command(name="call-watch")
+def call_watch_command(
+    session: str = typer.Option("Call", "--session", help="The Audio Hijack session to run."),
+    apps: list[str] | None = typer.Option(
+        None,
+        "--app",
+        metavar="PREFIX",
+        help="A bundle ID prefix that counts as a call app. Repeatable; replaces the default list.",
+    ),
+) -> None:
+    """Run an Audio Hijack session while a call app holds the microphone (macOS).
+
+    Starts the session 3 s after a call app takes the microphone and stops it 30 s
+    after the last one lets go. Needs Audio Hijack's "Allow execution of external
+    scripts" setting. Runs until killed.
+    """
+    # Imported here so no other command pays for what it loads.
+    from scribe import call_watch  # noqa: PLC0415  # see above
+
+    configure()
+    try:
+        call_watch.require_macos(sys.platform)
+        if not session.strip():
+            raise InputValidationError("--session needs a name")
+        if apps is not None and not all(prefix.strip() for prefix in apps):
+            raise InputValidationError("--app needs a bundle ID prefix")
+        call_watch.watch(
+            session_terms.state_dir(os.environ, home=Path.home()) / "call-watch",
+            session=session,
+            apps=tuple(apps) if apps else call_watch.DEFAULT_APPS,
+        )
+    except AppError as exc:
+        _fail(exc)
+
+
 @app.command(name="serve")
 def serve_command(
     host: str = typer.Option("127.0.0.1", "--host", help="Loopback address to listen on."),

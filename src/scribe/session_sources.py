@@ -61,7 +61,7 @@ def run_program(argv: Sequence[str], timeout: float) -> str:
 
     """
     try:
-        done = subprocess.run(  # noqa: S603  # argv is ssh and a host checked at startup
+        done = subprocess.run(  # noqa: S603  # argv is ssh to a checked host or a fixed macOS program
             list(argv), capture_output=True, stdin=subprocess.DEVNULL, timeout=timeout, check=False
         )
     except subprocess.TimeoutExpired as exc:
