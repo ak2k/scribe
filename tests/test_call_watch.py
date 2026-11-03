@@ -921,7 +921,8 @@ class FakeChild:
 
 @dataclass
 class FakeMac:
-    """A clock, a reader and an argv runner, with Audio Hijack answering the files it is sent."""
+    """A clock, a reader, an argv runner and a process starter, with Audio Hijack answering
+    the files it is sent."""
 
     directory: Path
     call: Callable[[float], frozenset[str] | None]
@@ -988,18 +989,6 @@ class FakeMac:
         program = argv[0]
         if program == "/usr/bin/open":
             return self._open(argv)
-        if program == "/usr/bin/osascript":
-            if self.notify_error is not None:
-                raise self.notify_error
-            self.notifications.append(argv[-1])
-            self.notify_argv.append(list(argv))
-            latency = self._latency()
-            self.now += min(latency, timeout)
-            if latency >= timeout:
-                raise ExternalServiceError(f"no answer within {timeout:g} s")
-            if self.notify_exit:
-                raise ExternalServiceError(f"exit {self.notify_exit}: no error output")
-            return ""
         assert program == "/usr/bin/lsappinfo"
         self.running_checks += 1
         if self.check_error is not None:
@@ -1030,6 +1019,7 @@ class FakeMac:
                 apps=DEFAULT_APPS,
                 reader=self.reader,
                 runner=self.runner,
+                spawn=self.spawn,
                 clock=self.clock,
                 sleep=self.sleep,
                 poll_seconds=1.0,

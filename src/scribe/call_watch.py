@@ -11,8 +11,9 @@ import ctypes
 import hashlib
 import json
 import struct
+import subprocess
 import time
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from functools import cache
 from typing import TYPE_CHECKING, Literal, NoReturn, Protocol
@@ -706,6 +707,37 @@ def require_macos(platform: str) -> None:
         raise UnsupportedPlatformError("call-watch runs only on macOS")
 
 
+class Child(Protocol):
+    """A started process that is not waited on."""
+
+    pid: int
+
+    def poll(self) -> int | None:
+        """Return the exit status once it has exited, reaping it, else None."""
+        ...
+
+    def kill(self) -> None:
+        """Kill this process, and no other."""
+        ...
+
+
+def start_detached(argv: Sequence[str]) -> Child:  # pragma: no cover
+    """Start `argv` with no pipes and return without waiting for it."""
+    return subprocess.Popen(  # noqa: S603  # a fixed macOS program, the text as an argument
+        list(argv),
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
+@dataclass
+class _Notifying:
+    child: Child
+    started: float
+    killed: bool = False
+
+
 @dataclass
 class _Edges:
     """The watcher's side effects. None of them may end the loop."""
@@ -713,8 +745,10 @@ class _Edges:
     directory: Path
     session: str
     runner: Runner
+    spawn: Callable[[Sequence[str]], Child] = start_detached
     saved: Marker | None = None
     marker_failing: bool = False
+    notifying: list[_Notifying] = field(default_factory=list[_Notifying])
 
     @property
     def _marker_path(self) -> Path:
@@ -774,7 +808,7 @@ class _Edges:
             return
         _logger().info("call_watch.sent", session=self.session, action=action)
 
-    def report(self, note: Note, error: str | None) -> None:
+    def report(self, note: Note, error: str | None, now: float) -> None:
         log = _logger().bind(session=self.session)
         if note.apps:
             log = log.bind(apps=list(note.apps))
@@ -789,10 +823,38 @@ class _Edges:
                 log.error(note.event)
         if note.notify is None:
             return
+        # Not waited on: a slow notification would delay the next poll and could miss a call.
         try:
-            self.runner([*_NOTIFY_ARGV, note.notify], HOOK_TIMEOUT_SECONDS)
+            child = self.spawn([*_NOTIFY_ARGV, note.notify])
         except Exception as exc:  # noqa: BLE001  # a failure to notify changes nothing else
-            _logger().error("call_watch.notify_failed", session=self.session, error=str(exc))
+            self._notify_failed(str(exc))
+            return
+        self.notifying.append(_Notifying(child, now))
+
+    def reap(self, now: float) -> None:
+        """Collect the notifications that have exited, and kill those past the timeout."""
+        running: list[_Notifying] = []
+        for notifying in self.notifying:
+            code = notifying.child.poll()
+            if code is None:
+                if not notifying.killed and now - notifying.started >= HOOK_TIMEOUT_SECONDS:
+                    notifying.killed = True
+                    self._kill(notifying.child)
+                running.append(notifying)
+            elif code != 0 and not notifying.killed:
+                self._notify_failed(f"exit {code}")
+        self.notifying = running
+
+    def _kill(self, child: Child) -> None:
+        try:
+            child.kill()
+        except Exception as exc:  # noqa: BLE001  # a failure to notify changes nothing else
+            self._notify_failed(f"no answer within {HOOK_TIMEOUT_SECONDS:g} s: {exc}")
+            return
+        self._notify_failed(f"no answer within {HOOK_TIMEOUT_SECONDS:g} s")
+
+    def _notify_failed(self, error: str) -> None:
+        _logger().error("call_watch.notify_failed", session=self.session, error=error)
 
     def hijack_running(self) -> bool:
         try:
@@ -824,9 +886,10 @@ def _poll(
     # restart that forgets the session, and a failed write is retried on every poll.
     edges.save_marker(step.state.marker)
     for note in step.notes:
-        edges.report(note, error)
+        edges.report(note, error, now)
     if step.action is not None:
         edges.send(step.action)
+    edges.reap(now)
     return step.state
 
 
@@ -838,6 +901,7 @@ def watch(
     timings: Timings = TIMINGS,
     reader: Callable[[], frozenset[str]] = read_input_holders,
     runner: Runner = run_program,
+    spawn: Callable[[Sequence[str]], Child] = start_detached,
     clock: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], None] = time.sleep,
     poll_seconds: float = POLL_SECONDS,
@@ -851,6 +915,7 @@ def watch(
         timings: The waits.
         reader: Returns the bundle IDs holding input, or raises when it cannot.
         runner: Runs an argv with a timeout and returns its standard output.
+        spawn: Starts a notification's argv and returns without waiting for it.
         clock: The monotonic time.
         sleep: Waits between polls.
         poll_seconds: The time between polls.
@@ -859,7 +924,7 @@ def watch(
         ExternalServiceError: the state directory cannot be used.
 
     """
-    edges = _Edges(directory, session, runner)
+    edges = _Edges(directory, session, runner, spawn)
     edges.load_marker()
     state = restored_state(edges.saved)
     while True:
