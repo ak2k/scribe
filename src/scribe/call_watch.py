@@ -13,6 +13,7 @@ import json
 import struct
 import subprocess
 import time
+from collections import deque
 from dataclasses import dataclass, field, replace
 from enum import Enum
 from functools import cache
@@ -39,6 +40,7 @@ OUTAGE_SECONDS = 30.0
 REMINDER_SECONDS = 1800.0
 POLL_SECONDS = 1.0
 HOOK_TIMEOUT_SECONDS = 10.0
+NOTIFY_WAITING_MAX = 10
 
 DEFAULT_SESSION = "Call"
 # Plain prefixes: Chrome's microphone sits on helpers that carry its ID, and Teams ships
@@ -757,7 +759,8 @@ class _Edges:
     spawn: Callable[[Sequence[str]], Child] = start_detached
     saved: Marker | None = None
     marker_failing: bool = False
-    notifying: list[_Notifying] = field(default_factory=list[_Notifying])
+    notifying: _Notifying | None = None
+    waiting: deque[str] = field(default_factory=deque[str])
 
     @property
     def _marker_path(self) -> Path:
@@ -832,27 +835,38 @@ class _Edges:
                 log.error(note.event)
         if note.notify is None:
             return
-        # Not waited on: a slow notification would delay the next poll and could miss a call.
-        try:
-            child = self.spawn([*_NOTIFY_ARGV, note.notify])
-        except Exception as exc:  # noqa: BLE001  # a failure to notify changes nothing else
-            self._notify_failed(str(exc))
-            return
-        self.notifying.append(_Notifying(child, now))
+        self.waiting.append(note.notify)
+        if len(self.waiting) > NOTIFY_WAITING_MAX:
+            self.waiting.popleft()
+            self._notify_failed(f"more than {NOTIFY_WAITING_MAX} notifications waiting")
+        self._notify_next(now)
 
     def reap(self, now: float) -> None:
-        """Collect the notifications that have exited, and kill those past the timeout."""
-        running: list[_Notifying] = []
-        for notifying in self.notifying:
+        """Collect the notification that has exited, kill one past the timeout, start the next."""
+        notifying = self.notifying
+        if notifying is not None:
             code = notifying.child.poll()
             if code is None:
                 if not notifying.killed and now - notifying.started >= HOOK_TIMEOUT_SECONDS:
                     notifying.killed = True
                     self._kill(notifying.child)
-                running.append(notifying)
-            elif code != 0 and not notifying.killed:
+                return
+            if code != 0 and not notifying.killed:
                 self._notify_failed(f"exit {code}")
-        self.notifying = running
+            self.notifying = None
+        self._notify_next(now)
+
+    def _notify_next(self, now: float) -> None:
+        # One at a time, so banners appear in the order their changes happened. Not waited
+        # on: a slow notification would delay the next poll and could miss a call.
+        while self.notifying is None and self.waiting:
+            text = self.waiting.popleft()
+            try:
+                child = self.spawn([*_NOTIFY_ARGV, text])
+            except Exception as exc:  # noqa: BLE001  # a failure to notify changes nothing else
+                self._notify_failed(str(exc))
+                continue
+            self.notifying = _Notifying(child, now)
 
     def _kill(self, child: Child) -> None:
         try:
