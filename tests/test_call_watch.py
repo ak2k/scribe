@@ -610,6 +610,18 @@ class TestBanners:
         assert "call_watch.stop_done" in trace.events()
         assert trace.banners() == []
 
+    def test_a_call_back_after_the_grace_keeps_the_read_hold_for_the_stop(self) -> None:
+        # Audio Hijack holds input only during the first call, so the stop banner rests on
+        # the read at 4 s. The grace ends at 40 s and the call is back at 41 s.
+        spans: list[Span] = [(10, ZOOM | HIJACK), (31, QUIET), (10, ZOOM), (40, QUIET)]
+        trace = replay(spans, answers=False)
+        assert trace.actions == [(3.0, "start"), (82.0, "stop")]
+        assert trace.banners() == [
+            (4.0, "call_watch.start_confirmed"),
+            (41.0, "call_watch.recording_released"),
+            (83.0, "call_watch.stop_done"),
+        ]
+
     def test_a_restart_restoring_sent_then_a_read_back_shows_one_start(self) -> None:
         trace = replay([(60, ZOOM | HIJACK)], state=restored_state("sent"))
         assert trace.verbs() == []
