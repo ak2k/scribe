@@ -534,6 +534,11 @@ class TestBanners:
         assert text.count("Google Chrome") == 1
         assert "Zoom" in text
 
+    def test_two_apps_holding_input_are_both_named_in_bundle_id_order(self) -> None:
+        trace = replay([(10, CHROME | ZOOM)])
+        assert trace.banners() == [(4.0, "call_watch.start_confirmed")]
+        assert trace.notified()[0] == "Recording started for the call in Google Chrome and Zoom."
+
     def test_an_app_prefix_outside_the_defaults_is_named_by_its_bundle_id(self) -> None:
         trace = replay([(10, frozenset({"org.example.Talk"}))], apps=("org.example.",))
         assert trace.banners() == [(4.0, "call_watch.start_confirmed")]
