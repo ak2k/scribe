@@ -893,6 +893,33 @@ OPEN_PREFIX = ("/usr/bin/open", "-g", "-b", "com.rogueamoeba.audiohijack")
 
 
 @dataclass
+class FakeChild:
+    """A notification process that finishes `seconds` after it starts on the fake clock."""
+
+    mac: FakeMac
+    pid: int
+    done_at: float
+    code: int
+    killed: bool = False
+    reaped: bool = False
+
+    def poll(self) -> int | None:
+        if self.killed:
+            self.reaped = True
+            return -9
+        if self.mac.now < self.done_at:
+            return None
+        self.reaped = True
+        return self.code
+
+    def kill(self) -> None:
+        if self.mac.kill_error is not None:
+            raise self.mac.kill_error
+        self.mac.killed.append(self.pid)
+        self.killed = True
+
+
+@dataclass
 class FakeMac:
     """A clock, a reader and an argv runner, with Audio Hijack answering the files it is sent."""
 
@@ -909,11 +936,31 @@ class FakeMac:
     open_error_until: float = float("inf")
     check_error: Exception | None = None
     notify_error: Exception | None = None
+    notify_seconds: float = 0.0
+    notify_latencies: list[float] = field(default_factory=list[float])
+    notify_exit: int = 0
+    kill_error: Exception | None = None
     marker_seen_at_open: list[str | None] = field(default_factory=list[str | None])
     opens: list[tuple[float, str, str]] = field(default_factory=list[tuple[float, str, str]])
     notifications: list[str] = field(default_factory=list[str])
     notify_argv: list[list[str]] = field(default_factory=list[list[str]])
+    children: list[FakeChild] = field(default_factory=list[FakeChild])
+    killed: list[int] = field(default_factory=list[int])
     running_checks: int = 0
+
+    def _latency(self) -> float:
+        return self.notify_latencies.pop(0) if self.notify_latencies else self.notify_seconds
+
+    def spawn(self, argv: Sequence[str]) -> FakeChild:
+        if self.notify_error is not None:
+            raise self.notify_error
+        self.notifications.append(argv[-1])
+        self.notify_argv.append(list(argv))
+        child = FakeChild(
+            self, 500 + len(self.children), self.now + self._latency(), self.notify_exit
+        )
+        self.children.append(child)
+        return child
 
     @property
     def marker_path(self) -> Path:
@@ -946,6 +993,12 @@ class FakeMac:
                 raise self.notify_error
             self.notifications.append(argv[-1])
             self.notify_argv.append(list(argv))
+            latency = self._latency()
+            self.now += min(latency, timeout)
+            if latency >= timeout:
+                raise ExternalServiceError(f"no answer within {timeout:g} s")
+            if self.notify_exit:
+                raise ExternalServiceError(f"exit {self.notify_exit}: no error output")
             return ""
         assert program == "/usr/bin/lsappinfo"
         self.running_checks += 1
@@ -1132,6 +1185,69 @@ def test_a_failed_notification_is_logged_and_changes_nothing(tmp_path: Path) -> 
     logs = mac.run()
     assert [when for when, _, _ in mac.opens] == [3.0, 33.0, 63.0]
     assert [log["event"] for log in logs].count("call_watch.notify_failed") == 1
+
+
+def _two_calls(elapsed: float) -> frozenset[str]:
+    return ZOOM if elapsed < 20.0 or 53.0 <= elapsed < 60.0 else QUIET
+
+
+@pytest.mark.parametrize("latency", [0.0, 9.0, 10.0])
+def test_a_slow_notification_changes_no_action(tmp_path: Path, latency: float) -> None:
+    # The stop notification goes out at 52 s, and the second call holds only from 53 s to 60 s.
+    mac = FakeMac(tmp_path, _two_calls, end=120.0, notify_seconds=latency)
+    mac.run()
+    assert mac.sent() == [(3.0, "start"), (51.0, "stop"), (56.0, "start"), (91.0, "stop")]
+
+
+def notify_errors(logs: Sequence[Mapping[str, Any]]) -> list[str]:
+    return [cast("str", log["error"]) for log in logs if log["event"] == "call_watch.notify_failed"]
+
+
+def test_a_notification_running_past_the_timeout_is_killed_alone(tmp_path: Path) -> None:
+    mac = FakeMac(tmp_path, call_between(0.0, 20.0), end=100.0, notify_latencies=[0.0, 3600.0])
+    logs = mac.run()
+    assert mac.sent() == [(3.0, "start"), (51.0, "stop")]
+    assert [child.pid for child in mac.children] == [500, 501]
+    assert mac.killed == [501]
+    assert all(child.reaped for child in mac.children)
+    assert notify_errors(logs) == ["no answer within 10 s"]
+
+
+def test_a_notification_that_exits_non_zero_is_logged_and_changes_nothing(
+    tmp_path: Path,
+) -> None:
+    mac = FakeMac(tmp_path, call_between(0.0, 20.0), end=100.0, notify_exit=1)
+    logs = mac.run()
+    assert mac.sent() == [(3.0, "start"), (51.0, "stop")]
+    assert len(notify_errors(logs)) == 2
+    assert all(error.startswith("exit 1") for error in notify_errors(logs))
+
+
+def test_a_kill_that_fails_is_logged_once_and_ends_nothing(tmp_path: Path) -> None:
+    mac = FakeMac(
+        tmp_path,
+        call_between(0.0, 3600.0),
+        end=60.0,
+        notify_seconds=3600.0,
+        kill_error=OSError("gone"),
+    )
+    logs = mac.run()
+    assert mac.sent() == [(3.0, "start")]
+    assert len(mac.children) == 1
+    assert len(notify_errors(logs)) == 1
+    assert "gone" in notify_errors(logs)[0]
+
+
+def test_finished_notifications_are_reaped(tmp_path: Path) -> None:
+    def calls(elapsed: float) -> frozenset[str]:
+        return ZOOM if elapsed % 100.0 < 20.0 else QUIET
+
+    mac = FakeMac(tmp_path, calls, end=320.0, notify_seconds=2.0)
+    logs = mac.run()
+    assert mac.verbs() == ["start", "stop"] * 3 + ["start"]
+    assert len(mac.children) == len(mac.notifications) == 7
+    assert all(child.reaped for child in mac.children)
+    assert notify_errors(logs) == []
 
 
 def test_a_stop_is_not_opened_when_the_app_is_not_running(tmp_path: Path) -> None:
