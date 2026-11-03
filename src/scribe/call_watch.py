@@ -238,8 +238,8 @@ def _start_confirmed(call_apps: tuple[str, ...]) -> Note:
     names = list(dict.fromkeys(_app_name(bundle) for bundle in call_apps))
     text = "Recording started."
     if names:
-        label = "Call app" if len(names) == 1 else "Call apps"
-        text += f" {label} using the microphone: {', '.join(names)}."
+        listed = names[0] if len(names) == 1 else f"{', '.join(names[:-1])} and {names[-1]}"
+        text = f"Recording started for the call in {listed}."
     return Note("call_watch.start_confirmed", notify=text, apps=call_apps)
 
 
