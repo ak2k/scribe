@@ -604,6 +604,23 @@ class TestBanners:
         assert trace.banners() == [(0.0, "call_watch.start_confirmed")]
         assert "Zoom" in trace.notified()[0]
 
+    def test_a_start_read_back_after_the_grace_ran_out_shows_one_start_then_the_stop(
+        self,
+    ) -> None:
+        # The call lets go before the read-back, the grace runs out, and the call is back
+        # with Audio Hijack holding on the next poll.
+        trace = replay(
+            [(4, ZOOM), (31, QUIET), (10, ZOOM | HIJACK), (32, HIJACK), (5, QUIET)],
+            answers=False,
+        )
+        assert trace.verbs() == ["start", "stop"]
+        assert trace.banners() == [
+            (8.0, "call_watch.start_unconfirmed"),
+            (35.0, "call_watch.start_confirmed"),
+            (77.0, "call_watch.stop_done"),
+        ]
+        assert "Zoom" in trace.notified()[1]
+
 
 class TestReminder:
     def test_audio_hijack_alone_is_reminded_about_once_and_never_stopped(self) -> None:
@@ -758,7 +775,10 @@ def test_banners_pair_with_read_backs(
             if not note.notify:
                 continue
             if note.event == "call_watch.start_confirmed":
-                assert isinstance(was, Starting)
+                # A start whose call let go before its read-back is read back from there.
+                assert isinstance(was, Starting) or (
+                    isinstance(was, Stopping) and was.marker == "sent"
+                )
                 assert isinstance(state.session, Recording)
                 assert not recording
                 recording = True
