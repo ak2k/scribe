@@ -131,9 +131,14 @@ class Starting:
 
 @dataclass(frozen=True)
 class Recording:
-    """A start is read back. `holding` is False once a release during the call was noted."""
+    """A start is read back. `holding` is False once a release during the call was noted.
+
+    `hold_read` is True once a read of this process held Audio Hijack's bundle, which a
+    session restored from the marker has not had.
+    """
 
     holding: bool = True
+    hold_read: bool = False
 
 
 @dataclass(frozen=True)
@@ -142,7 +147,8 @@ class Stopping:
 
     `marker` is "stopping" once a stop has gone out. `sent_at` is None until then, and
     after a restart, until the first good read starts the read-back again.
-    `was_recording` is True when the stop ends a start that was read back.
+    `was_recording` is True when the stop ends a recording during which a read of this
+    process held Audio Hijack's bundle.
     """
 
     marker: Marker
@@ -346,7 +352,7 @@ def _idle(tick: _Tick, session: Idle) -> Step:
 
 def _starting(tick: _Tick, session: Starting) -> Step:
     if tick.hijack:
-        return tick.step(Recording(), notes=(_start_confirmed(tick.call_apps),))
+        return tick.step(Recording(hold_read=True), notes=(_start_confirmed(tick.call_apps),))
     if tick.call_ended:
         return tick.step(Stopping("sent"))
     window = session.window_from
@@ -365,30 +371,33 @@ def _starting(tick: _Tick, session: Starting) -> Step:
 
 
 def _recording(tick: _Tick, session: Recording) -> Step:
+    if tick.hijack:
+        session = replace(session, hold_read=True)
     if tick.call_ended:
-        return tick.step(Stopping("confirmed"))
+        return tick.step(Stopping("confirmed", was_recording=session.hold_read))
     # Only while the call holds input: a person's Stop as a call ends loses nothing.
     if tick.call_held and session.holding != tick.hijack:
         note = Note("call_watch.recording_resumed") if tick.hijack else _RELEASED
-        return tick.step(Recording(tick.hijack), notes=(note,))
+        return tick.step(replace(session, holding=tick.hijack), notes=(note,))
     return tick.step(session)
 
 
-def _first_stop(tick: _Tick, marker: Marker) -> Step:
+def _first_stop(tick: _Tick, session: Stopping) -> Step:
     # A stop now would end a session that is capturing the call that came back.
     if tick.call_held:
-        if marker == "sent":
+        if session.marker == "sent":
             return _starting(tick, Starting())
-        return _recording(tick, Recording())
+        return _recording(tick, Recording(hold_read=session.was_recording))
     if tick.hijack or tick.running:
-        stopping = Stopping("stopping", tick.clock, tick.clock, was_recording=marker == "confirmed")
+        was_recording = session.marker == "confirmed" and (session.was_recording or tick.hijack)
+        stopping = Stopping("stopping", tick.clock, tick.clock, was_recording=was_recording)
         return tick.step(stopping, "stop")
     return tick.step(Idle(), notes=(Note("call_watch.stop_not_needed"),))
 
 
 def _stopping(tick: _Tick, session: Stopping) -> Step:
     if session.marker != "stopping":
-        return _first_stop(tick, session.marker)
+        return _first_stop(tick, session)
     sent_at = session.sent_at
     if sent_at is None:
         sent_at = tick.clock
