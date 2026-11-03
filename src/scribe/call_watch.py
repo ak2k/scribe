@@ -249,8 +249,8 @@ def _reminder(seconds: float) -> Note:
     return Note(
         "call_watch.recording_without_call",
         "warning",
-        f"Audio Hijack has held the microphone for {length} with no call app using it. "
-        "Press Stop in Audio Hijack to end the recording.",
+        f"Audio Hijack has held the microphone for {length} with no call detected. "
+        "Press Stop in Audio Hijack if you do not need this recording.",
     )
 
 

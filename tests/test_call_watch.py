@@ -607,8 +607,8 @@ class TestBanners:
     def test_a_start_read_back_after_the_grace_ran_out_shows_one_start_then_the_stop(
         self,
     ) -> None:
-        # The call lets go before the read-back, the grace runs out, and the call is back
-        # with Audio Hijack holding on the next poll.
+        # The call lets go before the read-back and is back, with Audio Hijack holding, on
+        # the poll after the grace runs out.
         trace = replay(
             [(4, ZOOM), (31, QUIET), (10, ZOOM | HIJACK), (32, HIJACK), (5, QUIET)],
             answers=False,
@@ -629,9 +629,10 @@ class TestReminder:
         assert trace.banners() == [(1800.0, REMINDER)]
         note = trace.notes[0][1]
         assert note.level == "warning"
-        assert note.notify is not None
-        assert "30 minutes" in note.notify
-        assert "Stop" in note.notify
+        assert note.notify == (
+            "Audio Hijack has held the microphone for 30 minutes with no call detected. "
+            "Press Stop in Audio Hijack if you do not need this recording."
+        )
         assert isinstance(trace.state.session, Idle)
 
     def test_a_short_call_hold_ends_the_stretch(self) -> None:
