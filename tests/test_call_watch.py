@@ -725,11 +725,12 @@ def _run_timeline(
     return polls
 
 
-@given(_timelines)
+# The shorter times are drawn too: generated timelines almost never reach the default.
+@given(_timelines, st.sampled_from([TIMINGS.reminder_seconds, 30.0, 0.0]))
 def test_the_reminder_changes_only_its_own_note(
-    timeline: list[tuple[float, frozenset[str] | Read, bool]],
+    timeline: list[tuple[float, frozenset[str] | Read, bool]], reminder_seconds: float
 ) -> None:
-    reminded = _run_timeline(timeline, TIMINGS)
+    reminded = _run_timeline(timeline, replace(TIMINGS, reminder_seconds=reminder_seconds))
     never = _run_timeline(timeline, replace(TIMINGS, reminder_seconds=float("inf")))
     assert [poll[:4] for poll in reminded] == [poll[:4] for poll in never]
     for with_reminder, without in zip(reminded, never, strict=True):
@@ -737,18 +738,22 @@ def test_the_reminder_changes_only_its_own_note(
     assert all(note.event != REMINDER for poll in never for note in poll[4])
 
 
-@given(_timelines)
+@given(_timelines, st.sampled_from([TIMINGS.reminder_seconds, 0.0]))
 def test_banners_pair_with_read_backs(
-    timeline: list[tuple[float, frozenset[str] | Read, bool]],
+    timeline: list[tuple[float, frozenset[str] | Read, bool]], reminder_seconds: float
 ) -> None:
+    timings = replace(TIMINGS, reminder_seconds=reminder_seconds)
     state = State()
     now = 0.0
     recording = False
+    reminded = False
     for gap, read, running in timeline:
         now += gap
         was = state.session
-        step = decide(state, now, read, hijack_running=running, timings=TIMINGS)
+        step = decide(state, now, read, hijack_running=running, timings=timings)
         state = step.state
+        if read is not Read.FAILED and read != HIJACK:
+            reminded = False
         for note in step.notes:
             if not note.notify:
                 continue
@@ -768,8 +773,12 @@ def test_banners_pair_with_read_backs(
                 assert step.action is None
                 assert read is not Read.FAILED
                 assert not any(is_call_app(bundle, DEFAULT_APPS) for bundle in read)
+                assert not reminded, "a second reminder in one stretch"
+                reminded = True
         if not isinstance(state.session, (Recording, Stopping)):
             recording = False
+        if not isinstance(state.session, Idle):
+            reminded = False
 
 
 @given(st.lists(st.tuples(st.floats(0.1, 45.0), st.sampled_from(NEVER_CALLS)), max_size=60))

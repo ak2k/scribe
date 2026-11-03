@@ -35,6 +35,7 @@ GRACE_SECONDS = 30.0
 READBACK_SECONDS = 5.0
 RESEND_SECONDS = 30.0
 OUTAGE_SECONDS = 30.0
+REMINDER_SECONDS = 1800.0
 POLL_SECONDS = 1.0
 HOOK_TIMEOUT_SECONDS = 10.0
 
@@ -48,6 +49,13 @@ DEFAULT_APPS = (
     "com.apple.avconferenced",
     "com.apple.TelephonyUtilities",
 )
+_APP_NAMES = {
+    "com.google.Chrome": "Google Chrome",
+    "us.zoom.": "Zoom",
+    "com.microsoft.teams": "Microsoft Teams",
+    "com.apple.avconferenced": "FaceTime",
+    "com.apple.TelephonyUtilities": "Phone",
+}
 HIJACK_BUNDLE_ID = "com.rogueamoeba.audiohijack"
 
 _NOTIFY_ARGV = (
@@ -89,6 +97,7 @@ class Timings:
     readback_seconds: float = READBACK_SECONDS
     resend_seconds: float = RESEND_SECONDS
     outage_seconds: float = OUTAGE_SECONDS
+    reminder_seconds: float = REMINDER_SECONDS
 
 
 TIMINGS = Timings()
@@ -96,7 +105,14 @@ TIMINGS = Timings()
 
 @dataclass(frozen=True)
 class Idle:
-    """No session of this watcher's is believed to be running."""
+    """No session of this watcher's is believed to be running.
+
+    `hijack_since` is when Audio Hijack began holding input with no call app holding
+    it, and `reminded` whether that stretch has been reminded about.
+    """
+
+    hijack_since: float | None = None
+    reminded: bool = False
 
 
 @dataclass(frozen=True)
@@ -125,12 +141,14 @@ class Stopping:
 
     `marker` is "stopping" once a stop has gone out. `sent_at` is None until then, and
     after a restart, until the first good read starts the read-back again.
+    `was_recording` is True when the stop ends a start that was read back.
     """
 
     marker: Marker
     sent_at: float | None = None
     last_sent_at: float = 0.0
     warned: bool = False
+    was_recording: bool = False
 
 
 type Session = Idle | Starting | Recording | Stopping
@@ -205,6 +223,35 @@ _READS_FAILING = Note(
     "error",
     "Cannot read which apps hold the microphone, so calls are not being watched.",
 )
+_STOP_DONE = Note("call_watch.stop_done", notify="The call ended, and recording stopped.")
+
+
+def _app_name(bundle: str) -> str:
+    lowered = bundle.lower()
+    for prefix, name in _APP_NAMES.items():
+        if lowered.startswith(prefix.lower()):
+            return name
+    return bundle
+
+
+def _start_confirmed(call_apps: tuple[str, ...]) -> Note:
+    names = list(dict.fromkeys(_app_name(bundle) for bundle in call_apps))
+    text = "Recording started."
+    if names:
+        label = "Call app" if len(names) == 1 else "Call apps"
+        text += f" {label} using the microphone: {', '.join(names)}."
+    return Note("call_watch.start_confirmed", notify=text, apps=call_apps)
+
+
+def _reminder(seconds: float) -> Note:
+    minutes = seconds / 60
+    length = f"{minutes:g} minute{'' if minutes == 1 else 's'}"
+    return Note(
+        "call_watch.recording_without_call",
+        "warning",
+        f"Audio Hijack has held the microphone for {length} with no call app using it. "
+        "Press Stop in Audio Hijack to end the recording.",
+    )
 
 
 def _is_hijack(bundle: str) -> bool:
@@ -285,12 +332,20 @@ class _Tick:
 
 
 def _idle(tick: _Tick, session: Idle) -> Step:
-    return tick.start() if tick.call_confirmed else tick.step(session)
+    if tick.call_confirmed:
+        return tick.start()
+    # A session this watcher did not start is never stopped by it, only reminded about.
+    if tick.call_held or not tick.hijack:
+        return tick.step(Idle())
+    since = tick.clock if session.hijack_since is None else session.hijack_since
+    if session.reminded or tick.clock - since < tick.timings.reminder_seconds:
+        return tick.step(Idle(since, session.reminded))
+    return tick.step(Idle(since, reminded=True), notes=(_reminder(tick.timings.reminder_seconds),))
 
 
 def _starting(tick: _Tick, session: Starting) -> Step:
     if tick.hijack:
-        return tick.step(Recording(), notes=(Note("call_watch.start_confirmed"),))
+        return tick.step(Recording(), notes=(_start_confirmed(tick.call_apps),))
     if tick.call_ended:
         return tick.step(Stopping("sent"))
     window = session.window_from
@@ -325,7 +380,8 @@ def _first_stop(tick: _Tick, marker: Marker) -> Step:
             return _starting(tick, Starting())
         return _recording(tick, Recording())
     if tick.hijack or tick.running:
-        return tick.step(Stopping("stopping", tick.clock, tick.clock), "stop")
+        stopping = Stopping("stopping", tick.clock, tick.clock, was_recording=marker == "confirmed")
+        return tick.step(stopping, "stop")
     return tick.step(Idle(), notes=(Note("call_watch.stop_not_needed"),))
 
 
@@ -335,9 +391,11 @@ def _stopping(tick: _Tick, session: Stopping) -> Step:
     sent_at = session.sent_at
     if sent_at is None:
         sent_at = tick.clock
-        session = Stopping("stopping", sent_at, sent_at)
+        session = replace(session, sent_at=sent_at, last_sent_at=sent_at)
     if not tick.hijack:
-        return tick.step(Idle(), notes=(Note("call_watch.stop_done"),))
+        # A stop that follows no read-back start may have ended a recording of nothing.
+        done = _STOP_DONE if session.was_recording else Note("call_watch.stop_done")
+        return tick.step(Idle(), notes=(done,))
     # A start sent before the stop takes effect does nothing, and the release that follows
     # would count as a person's Stop. Past the window the hold may be another session's,
     # which never ends.
