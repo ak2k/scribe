@@ -603,6 +603,13 @@ class TestBanners:
         assert trace.verbs() == ["stop"]
         assert [event for _, event in trace.banners()] == ["call_watch.stop_done"]
 
+    def test_a_restart_restoring_confirmed_with_no_hold_read_shows_no_stop(self) -> None:
+        # Audio Hijack runs but never holds input, so this process read no recording to end.
+        trace = replay([(45, QUIET)], state=restored_state("confirmed"))
+        assert trace.actions == [(31.0, "stop")]
+        assert "call_watch.stop_done" in trace.events()
+        assert trace.banners() == []
+
     def test_a_restart_restoring_sent_then_a_read_back_shows_one_start(self) -> None:
         trace = replay([(60, ZOOM | HIJACK)], state=restored_state("sent"))
         assert trace.verbs() == []
@@ -894,12 +901,13 @@ OPEN_PREFIX = ("/usr/bin/open", "-g", "-b", "com.rogueamoeba.audiohijack")
 
 @dataclass
 class FakeChild:
-    """A notification process that finishes `seconds` after it starts on the fake clock."""
+    """A notification process that shows `text` and exits at `done_at` on the fake clock."""
 
     mac: FakeMac
     pid: int
     done_at: float
     code: int
+    text: str
     killed: bool = False
     reaped: bool = False
 
@@ -947,6 +955,7 @@ class FakeMac:
     notify_argv: list[list[str]] = field(default_factory=list[list[str]])
     children: list[FakeChild] = field(default_factory=list[FakeChild])
     killed: list[int] = field(default_factory=list[int])
+    most_running: int = 0
     running_checks: int = 0
 
     def _latency(self) -> float:
@@ -957,11 +966,21 @@ class FakeMac:
             raise self.notify_error
         self.notifications.append(argv[-1])
         self.notify_argv.append(list(argv))
+        self.most_running = max(
+            self.most_running, 1 + sum(not child.reaped for child in self.children)
+        )
         child = FakeChild(
-            self, 500 + len(self.children), self.now + self._latency(), self.notify_exit
+            self, 500 + len(self.children), self.now + self._latency(), self.notify_exit, argv[-1]
         )
         self.children.append(child)
         return child
+
+    def delivered(self) -> list[tuple[float, str]]:
+        """The notifications shown, by when each was shown: the moment its process exits."""
+        shown = sorted(
+            (child for child in self.children if not child.killed), key=lambda c: c.done_at
+        )
+        return [(child.done_at - self.began, child.text) for child in shown]
 
     @property
     def marker_path(self) -> Path:
@@ -1187,6 +1206,43 @@ def test_a_slow_notification_changes_no_action(tmp_path: Path, latency: float) -
     mac = FakeMac(tmp_path, _two_calls, end=120.0, notify_seconds=latency)
     mac.run()
     assert mac.sent() == [(3.0, "start"), (51.0, "stop"), (56.0, "start"), (91.0, "stop")]
+
+
+def test_a_slow_stop_notification_is_shown_before_the_next_start(tmp_path: Path) -> None:
+    mac = FakeMac(tmp_path, _two_calls, end=120.0, notify_latencies=[0.0, 9.0, 0.0, 0.0])
+    mac.run()
+    assert mac.sent() == [(3.0, "start"), (51.0, "stop"), (56.0, "start"), (91.0, "stop")]
+    shown = [text.partition(" ")[0] for _, text in mac.delivered()]
+    assert shown == ["Recording", "The", "Recording", "The"]
+    assert [when for when, _ in mac.delivered()] == [4.0, 61.0, 61.0, 92.0]
+    assert mac.most_running == 1
+
+
+def test_notifications_waiting_past_the_cap_drop_the_oldest_and_are_logged(
+    tmp_path: Path,
+) -> None:
+    # Audio Hijack lets go every other second, and the first notification never exits.
+    def call(elapsed: float) -> frozenset[str]:
+        if elapsed >= 70.0:
+            return QUIET
+        return ZOOM | (HIJACK if elapsed >= 4.0 and int(elapsed) % 2 == 0 else QUIET)
+
+    mac = FakeMac(
+        tmp_path,
+        call,
+        end=70.0,
+        answers=False,
+        notify_seconds=3600.0,
+        kill_error=OSError("gone"),
+    )
+    logs = mac.run()
+    assert mac.sent() == [(3.0, "start")]
+    released = [log["event"] for log in logs].count("call_watch.recording_released")
+    assert released == 33
+    assert len(mac.children) == 1
+    errors = notify_errors(logs)
+    assert len([error for error in errors if "gone" in error]) == 1
+    assert len([error for error in errors if "gone" not in error]) == released - 10
 
 
 def notify_errors(logs: Sequence[Mapping[str, Any]]) -> list[str]:
