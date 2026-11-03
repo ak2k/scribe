@@ -1221,7 +1221,7 @@ def test_a_slow_stop_notification_is_shown_before_the_next_start(tmp_path: Path)
 def test_notifications_waiting_past_the_cap_drop_the_oldest_and_are_logged(
     tmp_path: Path,
 ) -> None:
-    # Audio Hijack lets go every other second, and the first notification never exits.
+    # Audio Hijack lets go every other second. The first notification never exits.
     def call(elapsed: float) -> frozenset[str]:
         if elapsed >= 70.0:
             return QUIET
