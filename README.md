@@ -255,7 +255,10 @@ a run of the old session going), 3 s after a call app
 takes the microphone, and stops it 30 s after the last one lets go. If the
 session does not start or stop, you get a notification and it tries again. This
 needs Audio Hijack's "Allow execution of external scripts" setting (Settings,
-Advanced). Recording runs whenever a listed app holds the microphone, so a
+Advanced). A notification also shows when a call's recording starts and when it
+stops. When Audio Hijack records for 30 minutes with no call detected, as after a
+Run pressed by hand, a notification reminds you once; the watcher never stops that
+recording. Recording runs whenever a listed app holds the microphone, so a
 browser's use of the microphone for anything else also records; `--app` replaces
 the list. One session serves every call app, so that session captures
 system-wide audio, as `contrib/audio-hijack/Call.ah4session` does. The session
