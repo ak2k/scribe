@@ -66,6 +66,14 @@ def _load_failure(exc: HfHubHTTPError | LocalEntryNotFoundError, model: str, rev
     return f"{where} from Hugging Face: HTTP {status} ({type(exc).__name__})"
 
 
+def _device() -> torch.device:
+    if torch.backends.mps.is_available():
+        return torch.device("mps")
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    return torch.device("cpu")
+
+
 def _load(model: str, revision: str, device: torch.device) -> Pipeline:
     pipeline = Pipeline.from_pretrained(model, revision=revision)
     if pipeline is None:
@@ -90,7 +98,7 @@ def main(argv: list[str]) -> int:
     request_path, out_path = argv
     request = json.loads(Path(request_path).read_text(encoding="utf-8"))
     model, revision = request["model"], request["revision"]
-    device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
+    device = _device()
     try:
         pipeline = _load(model, revision, device)
     # pyannote prints its own multi-line advice to stdout; scribe shows this line instead.

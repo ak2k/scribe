@@ -371,7 +371,7 @@ _FAILURES = {
     "no-source": "the transcript names no source audio; pass --audio",
     "missing": "the source audio gone.mp3 does not exist; pass --audio",
     "hash": "is not the audio the transcript was made from",
-    "intel": "needs Apple silicon (macOS on arm64); this is Darwin x86_64",
+    "intel": "runs on macOS on arm64 or Linux on x86_64; this is Darwin x86_64",
     "no-uvx": "uvx is not on PATH",
     "no-ffmpeg": "ffmpeg is not on PATH",
     "exit": "the diarizer exited 1: set HF_TOKEN to a token",

@@ -39,6 +39,8 @@ PYTHON = "3.13"
 # Dependencies as published by then: uvx otherwise resolves them afresh, and a
 # dependency that moves can change the clusters.
 EXCLUDE_NEWER = "2026-09-24T00:00:00Z"
+# The (system, machine) pairs, as `platform` names them, the worker has run on.
+HOSTS = frozenset({("Darwin", "arm64"), ("Linux", "x86_64")})
 # About 85 s per audio hour on Apple silicon once cached; a first run also
 # downloads ~960 MB of packages and weights, which a slow link stretches.
 DEFAULT_TIMEOUT_S = 3600.0
@@ -172,15 +174,16 @@ class PyannoteDiarizer:
         """Check this machine can run the worker, before anything is spawned.
 
         Raises:
-            ExternalServiceError: this is not macOS on arm64, or `uvx` is not on PATH.
+            ExternalServiceError: this is neither macOS on arm64 nor Linux on x86_64,
+                or `uvx` is not on PATH.
             ToolMissingError: ffmpeg is not on PATH.
 
         """
         system, machine = self._host()
-        # Only Apple silicon's GPU was measured; elsewhere the clusters are untested.
-        if (system, machine) != ("Darwin", "arm64"):
+        # Elsewhere the pinned wheels and the clusters are untested.
+        if (system, machine) not in HOSTS:
             raise ExternalServiceError(
-                f"the diarizer needs Apple silicon (macOS on arm64); this is {system} {machine}"
+                f"the diarizer runs on macOS on arm64 or Linux on x86_64; this is {system} {machine}"
             )
         # Resolved at call time, so a patched `shutil.which` is used.
         which = self._which or shutil.which

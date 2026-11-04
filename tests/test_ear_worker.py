@@ -44,17 +44,18 @@ def _decoded(*_args: object, **_kwargs: object) -> list[int]:
 class _Ear:
     """Cohere's processor and model at once: a clip is heard as its first and last samples."""
 
-    device = SimpleNamespace(type="mps")
     dtype = "bfloat16"
 
     def __init__(self) -> None:
         self.loads: list[str] = []
+        self.device = SimpleNamespace(type="unmoved")
 
     def load(self, model: str, **_kwargs: object) -> _Ear:
         self.loads.append(model)
         return self
 
-    def to(self, _device: str) -> _Ear:
+    def to(self, device: str) -> _Ear:
+        self.device = SimpleNamespace(type=device)
         return self
 
     def eval(self) -> _Ear:
@@ -76,6 +77,7 @@ def _run(
     spec: Recognizer,
     *,
     mps: bool,
+    cuda: bool = False,
     refusal: str = _GATED,
     hub: Mapping[str, object] = _NO_SAVED_TOKEN,
     ear: _Ear | None = None,
@@ -90,6 +92,7 @@ def _run(
         raise OSError(refusal)
 
     gpu = SimpleNamespace(mps=SimpleNamespace(is_available=lambda: mps))
+    nvidia = SimpleNamespace(is_available=lambda: cuda)
     classes = (
         "AutoProcessor",
         "CohereAsrForConditionalGeneration",
@@ -98,7 +101,12 @@ def _run(
     load = refuse if ear is None else ear.load
     stand_ins: dict[str, dict[str, object]] = {
         "numpy": {"fromfile": _decoded},
-        "torch": {"bfloat16": "bfloat16", "backends": gpu, "inference_mode": nullcontext},
+        "torch": {
+            "bfloat16": "bfloat16",
+            "backends": gpu,
+            "cuda": nvidia,
+            "inference_mode": nullcontext,
+        },
         "transformers": {name: SimpleNamespace(from_pretrained=load) for name in classes},
         "huggingface_hub": dict(hub),
     }
@@ -136,15 +144,20 @@ def test_a_model_that_cannot_load_is_one_line_naming_its_cause(
     assert not (tmp_path / "out.json").exists()
 
 
-def test_a_gpu_torch_cannot_use_is_one_line(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+@pytest.mark.parametrize(
+    ("mps", "cuda", "device"),
+    [(True, True, "mps"), (False, True, "cuda"), (False, False, "cpu")],
+    ids=["mps", "cuda", "cpu"],
+)
+def test_the_model_runs_on_the_first_device_torch_can_use_of_mps_cuda_and_cpu(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, mps: bool, cuda: bool, device: str
 ) -> None:
-    code = _run(tmp_path, monkeypatch, RECOGNIZERS[0], mps=False)
+    ear = _Ear()
 
-    _, err = capsys.readouterr()
-    assert code == 1
-    assert err.splitlines() == [f"{FAILED}torch cannot use the Metal GPU (mps) here"]
-    assert not (tmp_path / "out.json").exists()
+    code = _run(tmp_path, monkeypatch, RECOGNIZERS[0], mps=mps, cuda=cuda, ear=ear)
+
+    assert code == 0
+    assert json.loads((tmp_path / "out.json").read_text(encoding="utf-8"))["device"] == device
 
 
 @pytest.mark.parametrize("name", TOKEN_NAMES)

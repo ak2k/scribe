@@ -48,7 +48,13 @@ def _uncached(cause: BaseException | None) -> LocalEntryNotFoundError:
     return error
 
 
-def _worker(monkeypatch: pytest.MonkeyPatch, error: BaseException) -> Callable[[list[str]], int]:
+def _loaded(
+    monkeypatch: pytest.MonkeyPatch,
+    error: BaseException,
+    *,
+    mps: bool = False,
+    cuda: bool = False,
+) -> ModuleType:
     """Load the worker over stand-ins for what it imports; loading the model raises `error`."""
 
     def refuse(_model: str, *, revision: str) -> NoReturn:
@@ -64,7 +70,8 @@ def _worker(monkeypatch: pytest.MonkeyPatch, error: BaseException) -> Callable[[
         "soundfile": {},
         "torch": {
             "device": str,
-            "backends": SimpleNamespace(mps=SimpleNamespace(is_available=lambda: False)),
+            "backends": SimpleNamespace(mps=SimpleNamespace(is_available=lambda: mps)),
+            "cuda": SimpleNamespace(is_available=lambda: cuda),
         },
         "huggingface_hub": {},
         "huggingface_hub.errors": dict(errors),
@@ -83,7 +90,24 @@ def _worker(monkeypatch: pytest.MonkeyPatch, error: BaseException) -> Callable[[
         assert spec.loader is not None
         worker = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(worker)
-    return cast("Callable[[list[str]], int]", vars(worker)["main"])
+    return worker
+
+
+def _worker(monkeypatch: pytest.MonkeyPatch, error: BaseException) -> Callable[[list[str]], int]:
+    return cast("Callable[[list[str]], int]", vars(_loaded(monkeypatch, error))["main"])
+
+
+@pytest.mark.parametrize(
+    ("mps", "cuda", "device"),
+    [(True, True, "mps"), (False, True, "cuda"), (False, False, "cpu")],
+    ids=["mps", "cuda", "cpu"],
+)
+def test_the_pipeline_runs_on_the_first_device_torch_can_use_of_mps_cuda_and_cpu(
+    monkeypatch: pytest.MonkeyPatch, *, mps: bool, cuda: bool, device: str
+) -> None:
+    worker = _loaded(monkeypatch, LookupError(), mps=mps, cuda=cuda)
+
+    assert cast("Callable[[], str]", vars(worker)["_device"])() == device
 
 
 _TOKEN_ADVICE = (

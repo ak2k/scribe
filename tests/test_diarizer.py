@@ -247,8 +247,9 @@ def test_a_long_report_keeps_both_ends() -> None:
 @pytest.mark.parametrize(
     ("host", "which", "error", "expected"),
     [
-        (("Linux", "x86_64"), found, ExternalServiceError, "needs Apple silicon"),
+        (("Linux", "aarch64"), found, ExternalServiceError, "this is Linux aarch64"),
         (("Darwin", "x86_64"), found, ExternalServiceError, "this is Darwin x86_64"),
+        (("Linux", "x86_64"), _nothing, ExternalServiceError, "uvx is not on PATH"),
         (("Darwin", "arm64"), _nothing, ExternalServiceError, "uvx is not on PATH"),
         (("Darwin", "arm64"), _no_ffmpeg, ToolMissingError, "ffmpeg is not on PATH"),
     ],
@@ -265,6 +266,15 @@ def test_an_unusable_machine_is_refused_before_anything_runs(
     with pytest.raises(error, match=expected):
         _backend(fake, host=host, which=which).diarize(_audio(tmp_path), [(0.0, 3.0)])
     assert fake.calls == []
+
+
+@pytest.mark.parametrize("host", [("Darwin", "arm64"), ("Linux", "x86_64")])
+def test_a_supported_machine_runs_the_worker(tmp_path: Path, host: tuple[str, str]) -> None:
+    fake = FakeWorker()
+
+    _backend(fake, host=host).diarize(_audio(tmp_path), [(0.0, 3.0)])
+
+    assert [argv[0] for argv in fake.calls] == [FFMPEG, UVX]
 
 
 def test_a_null_embedding_is_kept_as_none() -> None:
