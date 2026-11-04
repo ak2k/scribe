@@ -77,7 +77,6 @@ def _run(
     spec: Recognizer,
     *,
     mps: bool,
-    cuda: bool = False,
     refusal: str = _GATED,
     hub: Mapping[str, object] = _NO_SAVED_TOKEN,
     ear: _Ear | None = None,
@@ -92,7 +91,6 @@ def _run(
         raise OSError(refusal)
 
     gpu = SimpleNamespace(mps=SimpleNamespace(is_available=lambda: mps))
-    nvidia = SimpleNamespace(is_available=lambda: cuda)
     classes = (
         "AutoProcessor",
         "CohereAsrForConditionalGeneration",
@@ -101,12 +99,7 @@ def _run(
     load = refuse if ear is None else ear.load
     stand_ins: dict[str, dict[str, object]] = {
         "numpy": {"fromfile": _decoded},
-        "torch": {
-            "bfloat16": "bfloat16",
-            "backends": gpu,
-            "cuda": nvidia,
-            "inference_mode": nullcontext,
-        },
+        "torch": {"bfloat16": "bfloat16", "backends": gpu, "inference_mode": nullcontext},
         "transformers": {name: SimpleNamespace(from_pretrained=load) for name in classes},
         "huggingface_hub": dict(hub),
     }
@@ -158,7 +151,7 @@ def test_a_gpu_torch_cannot_use_is_one_line(
 def test_a_mac_whose_torch_has_no_mps_is_refused_before_the_model_loads(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    # A model that would load: the CPU would still answer, with words the vote was not measured on.
+    # A model that would load, so only the missing GPU can refuse it.
     ear = _Ear()
 
     code = _run(tmp_path, monkeypatch, RECOGNIZERS[0], mps=False, ear=ear)

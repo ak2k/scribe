@@ -87,15 +87,6 @@ def _qwen(processor: Any, model: Any, clip: np.ndarray, max_new_tokens: int) -> 
     return processor.decode(answer, return_format="transcription_only")[0]
 
 
-def _device() -> str:
-    # scribe's host check, not this, keeps the recognizers to machines the vote was measured on.
-    if torch.backends.mps.is_available():
-        return "mps"
-    if torch.cuda.is_available():
-        return "cuda"
-    return "cpu"
-
-
 _MODELS = {
     "cohere-transcribe": (CohereAsrForConditionalGeneration, _cohere),
     "qwen3-asr": (Qwen3ASRForConditionalGeneration, _qwen),
@@ -107,6 +98,9 @@ def main(argv: list[str]) -> int:
     started = time.monotonic()
     request_path, out_path = argv
     request = json.loads(Path(request_path).read_text(encoding="utf-8"))
+    # On the CPU torch would still answer, with words the vote was not measured on.
+    if not torch.backends.mps.is_available():
+        return _fail("torch cannot use the Metal GPU (mps) here")
     audio = np.fromfile(request["audio"], dtype="<f4")
     clips = []
     for index, (start_s, end_s) in enumerate(request["intervals"]):
@@ -123,7 +117,7 @@ def main(argv: list[str]) -> int:
     pinned = {"revision": request["revision"]}
     processor = AutoProcessor.from_pretrained(request["model"], **pinned)
     model = model_class.from_pretrained(request["model"], **pinned, dtype=_DTYPE)
-    model = model.to(_device()).eval()
+    model = model.to("mps").eval()
     # One call per clip, never merged: the audio around a spot changes its words.
     texts = [transcribe(processor, model, clip, request["max_new_tokens"]) for clip in clips]
     versions = {
