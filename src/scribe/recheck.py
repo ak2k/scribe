@@ -33,7 +33,7 @@ from scribe.errors import (
 from scribe.gaps import run_ffmpeg
 from scribe.schema import FiniteFloat, XaiResponse
 from scribe.third_ear import PAD_S
-from scribe.xai_stt import DEFAULT_MODEL, check_keyterms
+from scribe.xai_stt import DEFAULT_MODEL, check_keyterms, check_vad_threshold
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -196,6 +196,33 @@ def _keyterms(transcript: Transcript, path: Path) -> list[str]:
     return terms
 
 
+@dataclass(frozen=True)
+class _Settings:
+    """What the request that made the transcript sent besides its model and keyterms."""
+
+    language: str | None
+    format_text: bool
+    vad_threshold: float
+
+
+def _settings(transcript: Transcript, path: Path) -> _Settings:
+    # Every transcript `scribe transcribe` writes records all three, so a missing
+    # one is a file it did not write, and a guess would vote on other settings.
+    params = transcript.engine.params
+    language, format_text, threshold = (
+        params.get(key) for key in ("language", "format", "vad_threshold")
+    )
+    if not isinstance(language, str):
+        raise InputValidationError(f"{path} records no language, as text, for the re-read")
+    if not isinstance(format_text, bool):
+        raise InputValidationError(f"{path} records no format, true or false, for the re-read")
+    if isinstance(threshold, bool) or not isinstance(threshold, int | float):
+        raise InputValidationError(f"{path} records no vad_threshold, a number, for the re-read")
+    check_vad_threshold(threshold)
+    # Stored as sent: an empty language sends none, and format is its effective value.
+    return _Settings(language or None, format_text, float(threshold))
+
+
 def _proposer(transcript: Transcript, path: Path) -> str:
     named = transcript.engine.params.get("fill_reference")
     if not isinstance(named, str) or not named.strip():
@@ -219,11 +246,20 @@ def _xai_vote(
     window: tuple[float, float],
     clip: Path,
     keyterms: Sequence[str],
+    settings: _Settings,
     run: Runner,
 ) -> Vote:
     try:
         _cut(audio, window, clip, run)
-        payload = client.transcribe(clip, model=DEFAULT_MODEL, diarize=False, keyterms=keyterms)
+        payload = client.transcribe(
+            clip,
+            model=DEFAULT_MODEL,
+            language=settings.language,
+            format_text=settings.format_text,
+            diarize=False,
+            keyterms=keyterms,
+            vad_threshold=settings.vad_threshold,
+        )
         try:
             reply = XaiResponse.model_validate(payload)
         except ValidationError as exc:
@@ -321,14 +357,16 @@ def recheck(
         which: Finds ffmpeg on PATH.
 
     Raises:
-        InputValidationError: the transcript is not of DEFAULT_MODEL, or its
-            ranges, fill_reference or keyterms are malformed.
+        InputValidationError: the transcript is not of DEFAULT_MODEL, its
+            ranges, fill_reference or keyterms are malformed, or its language,
+            format or vad_threshold is missing or malformed.
         ToolMissingError: ffmpeg is not on PATH.
 
     """
     _check_model(transcript, path)
     spans = find_spans(transcript, path)
     keyterms = _keyterms(transcript, path)
+    settings = _settings(transcript, path)
     proposer = _proposer(transcript, path) if spans else ""
     if which("ffmpeg") is None:
         raise ToolMissingError("ffmpeg is not on PATH; the clips are cut with it")
@@ -345,7 +383,9 @@ def recheck(
             raise InputValidationError(f"cannot make a working directory: {exc}") from exc
         with scratch as workdir:
             xai = [
-                _xai_vote(client, audio, clip, Path(workdir, f"{index}.mp3"), keyterms, run)
+                _xai_vote(
+                    client, audio, clip, Path(workdir, f"{index}.mp3"), keyterms, settings, run
+                )
                 for index, clip in enumerate(clips)
             ]
     heard = iter(zip(xai, _local_votes(audio, clips, ears, cap) if clips else [], strict=True))

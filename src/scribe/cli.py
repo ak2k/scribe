@@ -2058,9 +2058,10 @@ def recheck_command(
 
     Each span in TRANSCRIPT's fill_ranges and fill_unresolved_ranges is cut
     from --audio, 5 s past each end, and sent on its own to xAI with
-    TRANSCRIPT's keyterms, undiarized, always with the default model. The
-    local recognizers read the same clips where this host can run them;
-    where it cannot, each span records their vote as not run, with why.
+    TRANSCRIPT's keyterms, language, format and VAD threshold, undiarized,
+    always with the default model. The local recognizers read the same clips
+    where this host can run them; where it cannot, each span records their
+    vote as not run, with why.
     --out holds, per span, its kind and times, the engine whose words the
     fill took there, and one vote per engine, xAI's words timed on the
     recording's clock; and the hashes of TRANSCRIPT and the recording.
@@ -2071,9 +2072,9 @@ def recheck_command(
 
     Needs XAI_API_KEY in the environment and ffmpeg on PATH. A span whose
     clip or request fails records the failure and the run goes on. Exit 2 is
-    a bad input, a transcript of another model or with no duration, audio
-    that is not TRANSCRIPT's, no key, no ffmpeg, or an --out that is an
-    input, all found before any request. Exit 5 is a run with spans in which
+    a bad input, a transcript of another model, with no duration or without
+    those settings, audio that is not TRANSCRIPT's, no key, no ffmpeg, or an
+    --out that is an input, all found before any request. Exit 5 is a run with spans in which
     xAI heard none of them, sent or out of range: --out is not written, and
     a file already there is removed; one that cannot be is exit 2.
     """
