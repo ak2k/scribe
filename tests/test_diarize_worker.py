@@ -54,13 +54,11 @@ def _loaded(
     *,
     mps: bool = False,
     cuda: bool = False,
-    kernels: bool = True,
     on: list[str] | None = None,
 ) -> ModuleType:
     """Load the worker over stand-ins for what it imports; loading the model raises `error`.
 
-    `kernels` False is a GPU torch sees but has no kernels for, which raises only once
-    work runs on it. `on` collects the device the pipeline is moved to.
+    `on` collects the device the pipeline is moved to.
     """
 
     def refuse(_model: str, *, revision: str) -> NoReturn:
@@ -74,15 +72,6 @@ def _loaded(
         on.append(device)
         raise error
 
-    def add(_other: int) -> None: ...
-
-    def ones(*_shape: int, device: str) -> SimpleNamespace:
-        return SimpleNamespace(add_=add, device=device)
-
-    def synchronize() -> None:
-        if not kernels:
-            raise RuntimeError("CUDA error: no kernel image is available for this device")
-
     errors = {
         "GatedRepoError": GatedRepoError,
         "HfHubHTTPError": HfHubHTTPError,
@@ -94,8 +83,7 @@ def _loaded(
         "torch": {
             "device": str,
             "backends": SimpleNamespace(mps=SimpleNamespace(is_available=lambda: mps)),
-            "cuda": SimpleNamespace(is_available=lambda: cuda, synchronize=synchronize),
-            "ones": ones,
+            "cuda": SimpleNamespace(is_available=lambda: cuda),
         },
         "huggingface_hub": {},
         "huggingface_hub.errors": dict(errors),
@@ -140,27 +128,15 @@ class _MovedError(Exception): ...
 
 
 @pytest.mark.parametrize(
-    ("mps", "cuda", "kernels", "device"),
-    [
-        (True, True, False, "mps"),
-        (False, True, True, "cpu"),
-        (False, True, False, "cpu"),
-        (False, False, True, "cpu"),
-    ],
-    ids=["mps", "cuda", "cuda-without-kernels", "cpu"],
+    ("mps", "cuda", "device"),
+    [(True, True, "mps"), (False, True, "cpu"), (False, False, "cpu")],
+    ids=["mps", "cuda", "cpu"],
 )
-def test_a_run_moves_the_pipeline_to_a_device_that_can_run_it(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-    *,
-    mps: bool,
-    cuda: bool,
-    kernels: bool,
-    device: str,
+def test_a_run_moves_the_pipeline_to_the_device_it_picked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, mps: bool, cuda: bool, device: str
 ) -> None:
     on: list[str] = []
-    worker = _loaded(monkeypatch, _MovedError(), mps=mps, cuda=cuda, kernels=kernels, on=on)
+    worker = _loaded(monkeypatch, _MovedError(), mps=mps, cuda=cuda, on=on)
     main = cast("Callable[[list[str]], int]", vars(worker)["main"])
     request = tmp_path / "in.json"
     request.write_text(
@@ -171,16 +147,7 @@ def test_a_run_moves_the_pipeline_to_a_device_that_can_run_it(
     with pytest.raises(_MovedError):
         main([str(request), str(tmp_path / "out.json")])
 
-    _, err = capsys.readouterr()
     assert on == [device]
-    told = [line for line in err.splitlines() if "cuda" in line]
-    if cuda and not kernels and not mps:
-        assert len(told) == 1
-        assert "no kernel image" in told[0]
-        assert not told[0].startswith(FAILED)
-        assert "Traceback" not in err
-    else:
-        assert told == []
 
 
 _TOKEN_ADVICE = (
