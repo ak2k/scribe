@@ -232,17 +232,27 @@ def _proposer(transcript: Transcript, path: Path) -> str:
     return named
 
 
-def _cut(audio: Path, window: tuple[float, float], clip: Path, run: Runner) -> None:
+def _decode(audio: Path, wav: Path, run: Runner) -> None:
+    # Absolute, so a colon in a relative name is not read as a protocol.
+    argv = ["ffmpeg", "-nostdin", "-v", "error", "-i", str(audio.absolute()), "-vn"]
+    run_ffmpeg(run, [*argv, "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", str(wav)])
+
+
+def _cut(decoded: Path, window: tuple[float, float], clip: Path, run: Runner) -> None:
     start, end = window
     timing = ["-ss", f"{start:.3f}", "-t", f"{end - start:.3f}"]
-    # Absolute, so a colon in a relative name is not read as a protocol.
-    argv = ["ffmpeg", "-nostdin", "-v", "error", *timing, "-i", str(audio.absolute()), "-vn"]
+    argv = ["ffmpeg", "-nostdin", "-v", "error", *timing, "-i", str(decoded.absolute()), "-vn"]
     run_ffmpeg(run, [*argv, "-ac", "1", "-ar", "16000", "-b:a", "64k", str(clip)])
+
+
+def _failed_xai(exc: AppError) -> Vote:
+    reason = " ".join(str(exc).split())
+    return Vote(engine=XAI, model=DEFAULT_MODEL, status="failed", reason=reason)
 
 
 def _xai_vote(
     client: XaiStt,
-    audio: Path,
+    decoded: Path,
     window: tuple[float, float],
     clip: Path,
     keyterms: Sequence[str],
@@ -250,7 +260,7 @@ def _xai_vote(
     run: Runner,
 ) -> Vote:
     try:
-        _cut(audio, window, clip, run)
+        _cut(decoded, window, clip, run)
         payload = client.transcribe(
             clip,
             model=DEFAULT_MODEL,
@@ -265,8 +275,7 @@ def _xai_vote(
         except ValidationError as exc:
             raise ExternalServiceError(f"malformed xAI transcription response: {exc}") from exc
     except AppError as exc:
-        reason = " ".join(str(exc).split())
-        return Vote(engine=XAI, model=DEFAULT_MODEL, status="failed", reason=reason)
+        return _failed_xai(exc)
     offset = window[0]
     words = [
         HeardWord(text=word.text, start=word.start + offset, end=word.end + offset)
@@ -382,12 +391,26 @@ def recheck(
         except OSError as exc:
             raise InputValidationError(f"cannot make a working directory: {exc}") from exc
         with scratch as workdir:
-            xai = [
-                _xai_vote(
-                    client, audio, clip, Path(workdir, f"{index}.mp3"), keyterms, settings, run
-                )
-                for index, clip in enumerate(clips)
-            ]
+            # Cut from the decoded samples, not the container: its timestamps can
+            # jump, and the spans, like the local recognizers, count samples.
+            decoded = Path(workdir, "recording.wav")
+            try:
+                _decode(audio, decoded, run)
+            except AppError as exc:
+                xai = [_failed_xai(exc)] * len(clips)
+            else:
+                xai = [
+                    _xai_vote(
+                        client,
+                        decoded,
+                        clip,
+                        Path(workdir, f"{index}.mp3"),
+                        keyterms,
+                        settings,
+                        run,
+                    )
+                    for index, clip in enumerate(clips)
+                ]
     heard = iter(zip(xai, _local_votes(audio, clips, ears, cap) if clips else [], strict=True))
     checked: list[CheckedSpan] = []
     for span in spans:

@@ -208,7 +208,7 @@ def test_clip_pad_and_shift(tmp_path: Path) -> None:
     result, seen, fake = _run(transcript, tmp_path)
 
     assert [span.clip for span in result.spans] == [(0.0, 9.0), (107.0, 120.0)]
-    timings = [call[call.index("-ss") : call.index("-ss") + 4] for call in fake.calls]
+    timings = [call[call.index("-ss") : call.index("-ss") + 4] for call in fake.calls[1:]]
     assert timings == [["-ss", "0.000", "-t", "9.000"], ["-ss", "107.000", "-t", "13.000"]]
     assert len(seen) == 2
     words = result.spans[1].votes[0].words
@@ -307,6 +307,20 @@ def test_each_clip_is_cut_from_one_decode_of_the_recording(tmp_path: Path) -> No
     assert len(seen) == 2
 
 
+def test_a_recording_that_does_not_decode_fails_every_xai_vote(tmp_path: Path) -> None:
+    transcript = _transcript(fills=[(10.0, 12.0)], unresolved=[(60.0, 90.0)])
+
+    result, seen, fake = _run(transcript, tmp_path, ffmpeg=Ffmpeg(failing=[0]))
+
+    assert seen == []
+    assert len(fake.calls) == 1
+    for span in result.spans:
+        vote = span.votes[0]
+        assert vote.status == "failed"
+        assert vote.reason is not None
+        assert "ffmpeg exited 1" in vote.reason
+
+
 def test_a_transcript_of_another_model_is_refused(tmp_path: Path) -> None:
     transcript = _transcript(fills=[(10.0, 12.0)], model="some-other-model")
 
@@ -345,7 +359,7 @@ def test_span_failure_recorded(tmp_path: Path) -> None:
 def test_a_failed_cut_is_recorded_and_sends_nothing(tmp_path: Path) -> None:
     transcript = _transcript(fills=[(10.0, 12.0), (50.0, 52.0)])
 
-    result, seen, _ = _run(transcript, tmp_path, ffmpeg=Ffmpeg(failing=[0]))
+    result, seen, _ = _run(transcript, tmp_path, ffmpeg=Ffmpeg(failing=[1]))
 
     assert len(seen) == 1
     first, second = (span.votes[0] for span in result.spans)
@@ -485,7 +499,7 @@ def test_a_span_past_the_end_leaves_the_other_spans_votes(tmp_path: Path) -> Non
     past = result.spans[1]
     assert past.clip is None
     assert [vote.status for vote in past.votes] == ["out of range"] * 3
-    assert len(seen) == len(fake.calls) == 1
+    assert len(seen) == len(fake.calls) - 1 == 1
 
 
 def test_a_span_starting_within_the_pad_after_the_end_hears_nothing(tmp_path: Path) -> None:
