@@ -277,6 +277,18 @@ def test_a_supported_machine_runs_the_worker(tmp_path: Path, host: tuple[str, st
     assert [argv[0] for argv in fake.calls] == [FFMPEG, UVX]
 
 
+def test_linux_installs_the_cpu_build_of_torch_and_macos_the_default(tmp_path: Path) -> None:
+    macos, linux = FakeWorker(), FakeWorker()
+
+    _backend(macos).diarize(_audio(tmp_path), [(0.0, 3.0)])
+    _backend(linux, host=("Linux", "x86_64")).diarize(_audio(tmp_path), [(0.0, 3.0)])
+
+    on_macos, on_linux = macos.calls[1], linux.calls[1]
+    assert "--torch-backend" not in on_macos
+    assert on_linux[:3] == [UVX, "--torch-backend", "cpu"]
+    assert on_linux[3:-3] == on_macos[1:-3]
+
+
 _FOUR_HOURS_S = 4 * 3600.0
 
 
