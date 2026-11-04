@@ -254,6 +254,19 @@ def test_an_uncached_snapshot_is_refused_before_anything_runs(
     assert fake.calls == []
 
 
+def test_an_uncached_recognizer_does_not_stop_the_other(tmp_path: Path, cache: Path) -> None:
+    (_snapshot(cache, COHERE.model, COHERE.revision) / "model.safetensors").unlink()
+    fake = FakeWorker(answer)
+
+    with pytest.raises(EarError, match=f"{COHERE.model} at {COHERE.revision} is not in"):
+        _ears(fake).resolve()
+    assert _ears(fake).resolve((QWEN,)) == Tools(UVX, FFMPEG)
+    (heard,) = _ears(fake).hear(_audio(tmp_path), [(0.0, 3.0)], recognizers=(QWEN,))
+
+    assert heard.recognizer == QWEN
+    assert [json.loads(request)["name"] for request in fake.requests] == [QWEN.name]
+
+
 @pytest.mark.skipif(os.geteuid() == 0, reason="root reads a 0o000 directory, so nothing fails")
 def test_an_unreadable_cache_is_one_ear_error_before_anything_runs(
     tmp_path: Path, cache: Path
@@ -421,3 +434,12 @@ def test_a_well_formed_answer_with_one_field_changed_parses_or_is_a_one_line_ear
     key: str, value: object
 ) -> None:
     _parses_or_is_one_line(json.dumps(answer([[0.0, 1.0]], **{key: value})).encode())
+
+
+def test_only_the_recognizers_asked_for_run(tmp_path: Path) -> None:
+    fake = FakeWorker(answer)
+
+    heard = _ears(fake).hear(_audio(tmp_path), [(1.0, 4.0)], recognizers=(QWEN,))
+
+    assert [json.loads(raw)["name"] for raw in fake.requests] == ["qwen3-asr"]
+    assert [ear.recognizer for ear in heard] == [QWEN]

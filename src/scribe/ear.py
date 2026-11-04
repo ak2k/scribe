@@ -186,8 +186,11 @@ class LocalEars:
         self._host = host
         self.timeout_s = timeout_s
 
-    def resolve(self) -> Tools:
-        """Check this machine can run every recognizer, spawning nothing.
+    def resolve(self, recognizers: Sequence[Recognizer] = RECOGNIZERS, /) -> Tools:
+        """Check this machine can run each of `recognizers`, spawning nothing.
+
+        Args:
+            recognizers: Which of RECOGNIZERS to check for.
 
         Raises:
             EarError: this is not macOS on arm64, `uvx` or ffmpeg is not on PATH,
@@ -208,7 +211,7 @@ class LocalEars:
         if ffmpeg is None:
             raise EarError("ffmpeg is not on PATH; the recognizers read the audio with it")
         hub = _hub_cache()
-        for spec in RECOGNIZERS:
+        for spec in recognizers:
             snapshot = (
                 hub / f"models--{spec.model.replace('/', '--')}" / "snapshots" / spec.revision
             )
@@ -247,21 +250,24 @@ class LocalEars:
         *,
         max_new_tokens: int = 256,
         offline: bool = True,
+        recognizers: Sequence[Recognizer] = RECOGNIZERS,
     ) -> tuple[Heard, ...]:
-        """Transcribe each of `clips` of `audio`, in seconds, by each recognizer in turn.
+        """Transcribe each of `clips` of `audio`, in seconds, by each of `recognizers` in turn.
 
         Args:
             audio: The recording.
             clips: Start and end of each stretch, each transcribed on its own.
             max_new_tokens: Ceiling on the tokens each recognizer writes for one clip.
             offline: Use only what uv and Hugging Face have cached; download nothing.
+            recognizers: Which of RECOGNIZERS run, so a caller can tell one's failure
+                from another's.
 
         Raises:
             EarError: `resolve` failed, a working file could not be written, or the
                 decode or a worker failed, timed out, or left no readable answer.
 
         """
-        tools = self.resolve()
+        tools = self.resolve(recognizers)
         try:
             # A directory left behind costs disk; failing on it would discard an answer in hand.
             scratch = tempfile.TemporaryDirectory(prefix="scribe-ear-", ignore_cleanup_errors=True)
@@ -275,7 +281,7 @@ class LocalEars:
             self._spawn(decode, "ffmpeg", child_env(*TOKENLESS))
             return tuple(
                 self._worker(tools.uvx, spec, samples, clips, max_new_tokens, offline=offline)
-                for spec in RECOGNIZERS
+                for spec in recognizers
             )
 
     def _worker(
