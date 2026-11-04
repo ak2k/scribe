@@ -76,7 +76,7 @@ def _loaded(
 
     def synchronize() -> None:
         if not kernels:
-            raise RuntimeError("CUDA error: no kernel image is available for execution on the device")
+            raise RuntimeError("CUDA error: no kernel image is available for this device")
 
     errors = {
         "GatedRepoError": GatedRepoError,
@@ -131,7 +131,7 @@ def test_the_pipeline_runs_on_the_first_device_torch_can_use_of_mps_cuda_and_cpu
     assert cast("Callable[[], str]", vars(worker)["_device"])() == device
 
 
-class _Moved(Exception): ...
+class _MovedError(Exception): ...
 
 
 @pytest.mark.parametrize(
@@ -155,7 +155,7 @@ def test_a_run_moves_the_pipeline_to_a_device_that_can_run_it(
     device: str,
 ) -> None:
     on: list[str] = []
-    worker = _loaded(monkeypatch, _Moved(), mps=mps, cuda=cuda, kernels=kernels, on=on)
+    worker = _loaded(monkeypatch, _MovedError(), mps=mps, cuda=cuda, kernels=kernels, on=on)
     main = cast("Callable[[list[str]], int]", vars(worker)["main"])
     request = tmp_path / "in.json"
     request.write_text(
@@ -163,7 +163,7 @@ def test_a_run_moves_the_pipeline_to_a_device_that_can_run_it(
         encoding="utf-8",
     )
 
-    with pytest.raises(_Moved):
+    with pytest.raises(_MovedError):
         main([str(request), str(tmp_path / "out.json")])
 
     _, err = capsys.readouterr()
