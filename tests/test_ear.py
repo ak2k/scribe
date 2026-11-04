@@ -421,3 +421,12 @@ def test_a_well_formed_answer_with_one_field_changed_parses_or_is_a_one_line_ear
     key: str, value: object
 ) -> None:
     _parses_or_is_one_line(json.dumps(answer([[0.0, 1.0]], **{key: value})).encode())
+
+
+def test_only_the_recognizers_asked_for_run(tmp_path: Path) -> None:
+    fake = FakeWorker(answer)
+
+    heard = _ears(fake).hear(_audio(tmp_path), [(1.0, 4.0)], recognizers=(QWEN,))
+
+    assert [json.loads(raw)["name"] for raw in fake.requests] == ["qwen3-asr"]
+    assert [ear.recognizer for ear in heard] == [QWEN]

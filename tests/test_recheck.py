@@ -21,6 +21,7 @@ from scribe.xai_stt import DEFAULT_MODEL, XaiStt
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Mapping, Sequence
 
+    from scribe.ear import Recognizer
     from scribe.recheck import Recheck
 
 REFERENCE = "parakeet-cpp ggml-parakeet-tdt-0.6b-v3-f16.bin"
@@ -111,8 +112,42 @@ def _ok(_request: httpx.Request) -> httpx.Response:
     return _reply(("one", 1.0, 1.5), ("two", 2.0, 2.5))
 
 
-def _refused(_audio: Path, _clips: Sequence[tuple[float, float]]) -> tuple[Heard, ...]:
-    raise EarError("the recognizers need Apple silicon (macOS on arm64); this is Linux x86_64")
+APPLE_ONLY = "the recognizers need Apple silicon (macOS on arm64); this is Linux x86_64"
+
+
+class Ears:
+    """Stand-in local recognizers: refused by the host, or each hearing or failing as told."""
+
+    def __init__(self, *, refused: str | None = None, failing: Mapping[str, str] | None = None):
+        self.refused = refused
+        self.failing = failing or {}
+        self.asked: list[tuple[str, list[tuple[float, float]], int]] = []
+
+    def resolve(self) -> None:
+        if self.refused is not None:
+            raise EarError(self.refused)
+
+    def hear(
+        self,
+        _audio: Path,
+        clips: Sequence[tuple[float, float]],
+        *,
+        max_new_tokens: int = 256,
+        recognizers: Sequence[Recognizer] = RECOGNIZERS,
+    ) -> tuple[Heard, ...]:
+        self.resolve()
+        for spec in recognizers:
+            self.asked.append((spec.name, list(clips), max_new_tokens))
+            if spec.name in self.failing:
+                raise EarError(self.failing[spec.name])
+        return tuple(
+            Heard(spec, {}, "mps", "float16", 1.0, tuple(f"{spec.name} {clip}" for clip in clips))
+            for spec in recognizers
+        )
+
+
+def _refused() -> Ears:
+    return Ears(refused=APPLE_ONLY)
 
 
 def _run(
@@ -121,7 +156,7 @@ def _run(
     *,
     handler: Callable[[httpx.Request], httpx.Response] = _ok,
     ffmpeg: Ffmpeg | None = None,
-    hear: Callable[[Path, Sequence[tuple[float, float]]], tuple[Heard, ...]] = _refused,
+    ears: Ears | None = None,
 ) -> tuple[Recheck, list[httpx.Request], Ffmpeg]:
     client, seen = _client(handler)
     fake = ffmpeg or Ffmpeg()
@@ -132,7 +167,7 @@ def _run(
         tmp_path / "meeting.json",
         audio,
         client,
-        hear,
+        ears or _refused(),
         transcript_sha256="t" * 64,
         source_sha256="s" * 64,
         run=fake.run,
@@ -241,18 +276,14 @@ def test_a_failed_cut_is_recorded_and_sends_nothing(tmp_path: Path) -> None:
 
 
 def test_no_spans_writes_empty(tmp_path: Path) -> None:
-    heard: list[int] = []
+    ears = Ears()
 
-    def counted(_audio: Path, _clips: Sequence[tuple[float, float]]) -> tuple[Heard, ...]:
-        heard.append(1)
-        return ()
-
-    result, seen, fake = _run(_transcript(), tmp_path, hear=counted)
+    result, seen, fake = _run(_transcript(), tmp_path, ears=ears)
 
     assert result.spans == []
     assert seen == []
     assert fake.calls == []
-    assert heard == []
+    assert ears.asked == []
 
 
 def test_no_ffmpeg_is_refused_before_any_request(tmp_path: Path) -> None:
@@ -264,7 +295,7 @@ def test_no_ffmpeg_is_refused_before_any_request(tmp_path: Path) -> None:
             tmp_path / "meeting.json",
             tmp_path / "recording.mp3",
             client,
-            _refused,
+            _refused(),
             transcript_sha256="t" * 64,
             source_sha256="s" * 64,
             run=Ffmpeg().run,
@@ -290,24 +321,83 @@ def test_a_refused_local_ear_is_recorded_as_not_run(tmp_path: Path) -> None:
 
 def test_local_ears_vote_on_every_span(tmp_path: Path) -> None:
     transcript = _transcript(fills=[(10.0, 12.0)], unresolved=[(60.0, 90.0)])
-    asked: list[list[tuple[float, float]]] = []
+    ears = Ears()
 
-    def hear(_audio: Path, clips: Sequence[tuple[float, float]]) -> tuple[Heard, ...]:
-        asked.append(list(clips))
-        return tuple(
-            Heard(spec, {}, "mps", "float16", 1.0, tuple(f"{spec.name} {i}" for i in range(2)))
-            for spec in RECOGNIZERS
-        )
+    result, _, _ = _run(transcript, tmp_path, ears=ears)
 
-    result, _, _ = _run(transcript, tmp_path, hear=hear)
-
-    assert asked == [[(5.0, 17.0), (55.0, 95.0)]]
-    for index, span in enumerate(result.spans):
+    clips = [(5.0, 17.0), (55.0, 95.0)]
+    assert [(name, asked) for name, asked, _ in ears.asked] == [
+        (spec.name, clips) for spec in RECOGNIZERS
+    ]
+    for clip, span in zip(clips, result.spans, strict=True):
         local = span.votes[1:]
         assert [(vote.engine, vote.model, vote.status) for vote in local] == [
             (spec.name, spec.model, "heard") for spec in RECOGNIZERS
         ]
-        assert [vote.text for vote in local] == [f"{spec.name} {index}" for spec in RECOGNIZERS]
+        assert [vote.text for vote in local] == [f"{spec.name} {clip}" for spec in RECOGNIZERS]
+
+
+def test_a_recognizer_that_fails_is_failed_and_the_other_still_votes(tmp_path: Path) -> None:
+    cohere, qwen = RECOGNIZERS
+    ears = Ears(failing={cohere.name: f"{cohere.name} exited 1: no GPU"})
+
+    result, _, _ = _run(_transcript(fills=[(10.0, 12.0)]), tmp_path, ears=ears)
+
+    _, first, second = result.spans[0].votes
+    assert (first.engine, first.status, first.reason) == (
+        cohere.name,
+        "failed",
+        f"{cohere.name} exited 1: no GPU",
+    )
+    assert (second.engine, second.status, second.reason) == (qwen.name, "heard", None)
+
+
+def test_local_token_cap_fits_the_longest_clip(tmp_path: Path) -> None:
+    # A 60 s span: a 70 s clip once padded.
+    ears = Ears()
+
+    result, _, _ = _run(
+        _transcript(fills=[(10.0, 12.0)], unresolved=[(20.0, 80.0)]), tmp_path, ears=ears
+    )
+
+    caps = {cap for _, _, cap in ears.asked}
+    assert len(caps) == 1
+    (cap,) = caps
+    assert cap >= recheck.TOKENS_PER_S * 70.0
+    assert result.local_max_new_tokens == cap
+
+
+def test_a_span_past_the_end_leaves_the_other_spans_votes(tmp_path: Path) -> None:
+    ears = Ears()
+    transcript = _transcript(fills=[(10.0, 12.0), (130.0, 131.0)], duration=120.0)
+
+    result, seen, fake = _run(transcript, tmp_path, ears=ears)
+
+    assert {tuple(asked) for _, asked, _ in ears.asked} == {((5.0, 17.0),)}
+    assert [vote.status for vote in result.spans[0].votes] == ["heard"] * 3
+    past = result.spans[1]
+    assert past.clip is None
+    assert [vote.status for vote in past.votes] == ["out of range"] * 3
+    assert len(seen) == len(fake.calls) == 1
+
+
+def test_a_span_starting_within_the_pad_after_the_end_hears_nothing(tmp_path: Path) -> None:
+    ears = Ears()
+    transcript = _transcript(fills=[(122.0, 123.0)], duration=120.0)
+
+    result, seen, fake = _run(transcript, tmp_path, ears=ears)
+
+    votes = result.spans[0].votes
+    assert [vote.status for vote in votes] == ["out of range"] * 3
+    assert all(vote.reason is not None and "120" in vote.reason for vote in votes)
+    assert (seen, fake.calls, ears.asked) == ([], [], [])
+
+
+def test_spans_without_a_known_duration_are_refused(tmp_path: Path) -> None:
+    transcript = _transcript(fills=[(10.0, 12.0)], duration=None)
+
+    with pytest.raises(InputValidationError, match="duration"):
+        _run(transcript, tmp_path)
 
 
 def test_each_span_names_the_engine_that_proposed_it(tmp_path: Path) -> None:
@@ -333,24 +423,6 @@ def test_spans_with_no_fill_reference_are_refused(tmp_path: Path) -> None:
 
     with pytest.raises(InputValidationError, match="fill_reference"):
         _run(transcript, tmp_path)
-
-
-def test_a_clip_runs_its_full_pad_when_the_duration_is_unknown() -> None:
-    transcript = _transcript(fills=[(10.0, 12.0)], duration=None)
-
-    assert [span.clip for span in recheck.find_spans(transcript, Path("m.json"))] == [(5.0, 17.0)]
-
-
-def test_a_span_past_the_recordings_end_is_recorded_as_failed(tmp_path: Path) -> None:
-    transcript = _transcript(fills=[(130.0, 131.0)], duration=120.0)
-
-    result, seen, fake = _run(transcript, tmp_path)
-
-    vote = result.spans[0].votes[0]
-    assert vote.status == "failed"
-    assert vote.reason is not None
-    assert "past the recording's end" in vote.reason
-    assert (seen, fake.calls) == ([], [])
 
 
 def test_a_malformed_reply_is_recorded_as_failed(tmp_path: Path) -> None:

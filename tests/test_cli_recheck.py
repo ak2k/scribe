@@ -49,7 +49,9 @@ class Calls:
         self.cuts: list[list[str]] = []
 
 
-def _fakes(monkeypatch: pytest.MonkeyPatch, *, status: int = 200, ffmpeg: bool = True) -> Calls:
+def _fakes(
+    monkeypatch: pytest.MonkeyPatch, *, status: int = 200, ffmpeg: bool = True, failing: int = 0
+) -> Calls:
     calls = Calls()
 
     def answer(request: httpx.Request) -> httpx.Response:
@@ -57,6 +59,9 @@ def _fakes(monkeypatch: pytest.MonkeyPatch, *, status: int = 200, ffmpeg: bool =
         calls.requests.append(request)
         if status != 200:
             return httpx.Response(status, text="no")
+        # Unauthorized is not retried, so each of the first `failing` requests fails one span.
+        if len(calls.requests) <= failing:
+            return httpx.Response(401, text="no")
         words = [{"text": "one", "start": 1.0, "end": 1.5}]
         return httpx.Response(200, json={"text": "one", "duration": 9.0, "words": words})
 
@@ -133,8 +138,24 @@ def test_it_writes_one_vote_per_engine_per_span(
     assert "2 spans" in result.stderr
 
 
-def test_span_failure_recorded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_no_heard_xai_vote_exits_5_and_writes_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     _fakes(monkeypatch, status=500)
+    transcript, audio = _meeting(tmp_path)
+    out = tmp_path / "meeting.recheck.json"
+
+    result = _invoke(transcript, audio, out)
+
+    assert result.exit_code == 5, result.output
+    assert "500" in result.stderr
+    assert not out.exists()
+
+
+def test_a_span_failure_beside_a_heard_vote_is_recorded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _fakes(monkeypatch, failing=1)
     transcript, audio = _meeting(tmp_path)
     out = tmp_path / "meeting.recheck.json"
 
@@ -142,8 +163,8 @@ def test_span_failure_recorded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
 
     assert result.exit_code == 0, result.output
     written = Recheck.model_validate_json(out.read_text(encoding="utf-8"))
-    assert [span.votes[0].status for span in written.spans] == ["failed", "failed"]
-    assert "500" in (written.spans[0].votes[0].reason or "")
+    assert [span.votes[0].status for span in written.spans] == ["failed", "heard"]
+    assert "401" in (written.spans[0].votes[0].reason or "")
 
 
 def test_no_spans_writes_empty(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
