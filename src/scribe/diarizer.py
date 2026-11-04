@@ -183,7 +183,8 @@ class PyannoteDiarizer:
         # Elsewhere the pinned wheels and the clusters are untested.
         if (system, machine) not in HOSTS:
             raise ExternalServiceError(
-                f"the diarizer runs on macOS on arm64 or Linux on x86_64; this is {system} {machine}"
+                "the diarizer runs on macOS on arm64 or Linux on x86_64; "
+                f"this is {system} {machine}"
             )
         # Resolved at call time, so a patched `shutil.which` is used.
         which = self._which or shutil.which
