@@ -1046,7 +1046,7 @@ def _name_from_audio(
         backend.resolve()
         _warn(
             f"naming {unattributed} unattributed words with pyannote Community-1, run locally "
-            "(about 85 s per audio hour; a first run downloads ~960 MB)"
+            "(about 85 s per audio hour on Apple silicon; a first run downloads ~960 MB)"
         )
         planned = attribution.plan(words, speakers)
         diarization = backend.diarize(path, planned.intervals)

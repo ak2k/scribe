@@ -138,7 +138,7 @@ def test_unattributed_words_take_the_speaker_both_readings_agree_on(
     assert written.turns == turns_from_speakers(original.words, named)
     assert result.stderr.splitlines() == [
         "scribe: naming 2 unattributed words with pyannote Community-1, run locally "
-        "(about 85 s per audio hour; a first run downloads ~960 MB)",
+        "(about 85 s per audio hour on Apple silicon; a first run downloads ~960 MB)",
         "scribe: the diarizer named 2 of 2 unattributed words",
     ]
     assert written.engine.params == {
