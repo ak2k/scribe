@@ -2073,8 +2073,8 @@ def recheck_command(
     clip or request fails records the failure and the run goes on. Exit 2 is
     a bad input, a transcript of another model or with no duration, audio
     that is not TRANSCRIPT's, no key, no ffmpeg, or an --out that is an
-    input, all found before any request. Exit 5 is a run in which xAI heard
-    none of the spans it was sent: --out is not written.
+    input, all found before any request. Exit 5 is a run with spans in which
+    xAI heard none of them, sent or out of range: --out is not written.
     """
     # stdout carries only the output path; unconfigured, structlog prints there.
     configure()
@@ -2101,9 +2101,11 @@ def recheck_command(
             transcript_sha256=hashlib.sha256(raw).hexdigest(),
             source_sha256=transcript.source.sha256 or _sha256(recording),
         )
-        sent = [span.votes[0] for span in checked.spans if span.clip is not None]
-        if sent and not any(vote.status == "heard" for vote in sent):
-            _warn(f"xAI heard none of the {len(sent)} spans; first failure: {sent[0].reason}")
+        xai = [span.votes[0] for span in checked.spans]
+        if xai and not any(vote.status == "heard" for vote in xai):
+            # A failure says more than an out-of-range span, so it is named when there is one.
+            first = next((vote for vote in xai if vote.status == "failed"), xai[0])
+            _warn(f"xAI heard none of the {len(xai)} spans; first: {first.reason}")
             raise typer.Exit(_EXIT_NO_VOTE)
         _write_text(plan["--out"], checked.model_dump_json(indent=2) + "\n")
     except AppError as exc:
