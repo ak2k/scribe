@@ -186,8 +186,11 @@ class LocalEars:
         self._host = host
         self.timeout_s = timeout_s
 
-    def resolve(self) -> Tools:
-        """Check this machine can run every recognizer, spawning nothing.
+    def resolve(self, recognizers: Sequence[Recognizer] = RECOGNIZERS, /) -> Tools:
+        """Check this machine can run each of `recognizers`, spawning nothing.
+
+        Args:
+            recognizers: Which of RECOGNIZERS to check for.
 
         Raises:
             EarError: this is not macOS on arm64, `uvx` or ffmpeg is not on PATH,
@@ -208,7 +211,7 @@ class LocalEars:
         if ffmpeg is None:
             raise EarError("ffmpeg is not on PATH; the recognizers read the audio with it")
         hub = _hub_cache()
-        for spec in RECOGNIZERS:
+        for spec in recognizers:
             snapshot = (
                 hub / f"models--{spec.model.replace('/', '--')}" / "snapshots" / spec.revision
             )
@@ -264,7 +267,7 @@ class LocalEars:
                 decode or a worker failed, timed out, or left no readable answer.
 
         """
-        tools = self.resolve()
+        tools = self.resolve(recognizers)
         try:
             # A directory left behind costs disk; failing on it would discard an answer in hand.
             scratch = tempfile.TemporaryDirectory(prefix="scribe-ear-", ignore_cleanup_errors=True)

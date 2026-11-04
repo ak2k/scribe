@@ -63,8 +63,8 @@ Status = Literal["heard", "failed", "not run", "out of range"]
 class Ears(Protocol):
     """The local recognizers, as `ear.LocalEars` runs them."""
 
-    def resolve(self) -> object:
-        """Raise EarError when this host cannot run them."""
+    def resolve(self, recognizers: Sequence[Recognizer] = RECOGNIZERS, /) -> object:
+        """Raise EarError when this host cannot run each of `recognizers`."""
         ...
 
     def hear(
@@ -248,18 +248,16 @@ def _local_votes(
     audio: Path, clips: Sequence[tuple[float, float]], ears: Ears, cap: int
 ) -> list[list[Vote]]:
     """Each clip's vote from each recognizer, each run on its own so a failure is its own."""
-    try:
-        ears.resolve()
-    # OSError too: the cache lookup can fail on a file it cannot read.
-    except (EarError, OSError) as exc:
-        reason = " ".join(str(exc).split())
-        missing = [
-            Vote(engine=spec.name, model=spec.model, status="not run", reason=reason)
-            for spec in RECOGNIZERS
-        ]
-        return [missing for _ in clips]
     by_engine: list[list[Vote]] = []
     for spec in RECOGNIZERS:
+        try:
+            ears.resolve((spec,))
+        # OSError too: the cache lookup can fail on a file it cannot read.
+        except (EarError, OSError) as exc:
+            reason = " ".join(str(exc).split())
+            missing = Vote(engine=spec.name, model=spec.model, status="not run", reason=reason)
+            by_engine.append([missing] * len(clips))
+            continue
         try:
             (heard,) = ears.hear(audio, clips, max_new_tokens=cap, recognizers=(spec,))
         # OSError too: the run's temporary directory can fail to be made.
