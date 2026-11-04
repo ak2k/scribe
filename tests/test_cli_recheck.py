@@ -152,6 +152,21 @@ def test_no_heard_xai_vote_exits_5_and_writes_nothing(
     assert not out.exists()
 
 
+def test_every_span_out_of_range_exits_5_and_writes_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = _fakes(monkeypatch)
+    transcript, audio = _meeting(tmp_path, fills=((130.0, 131.0),), unresolved=((150.0, 160.0),))
+    out = tmp_path / "meeting.recheck.json"
+
+    result = _invoke(transcript, audio, out)
+
+    assert result.exit_code == 5, result.output
+    assert "recording's end" in result.stderr
+    assert calls.requests == []
+    assert not out.exists()
+
+
 def test_a_span_failure_beside_a_heard_vote_is_recorded(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

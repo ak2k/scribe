@@ -13,10 +13,11 @@ import pytest
 import stamina
 
 from scribe import recheck
-from scribe.ear import RECOGNIZERS, Heard
+from scribe.ear import RECOGNIZERS, Heard, LocalEars
 from scribe.errors import EarError, InputValidationError, ToolMissingError
 from scribe.schema import Engine, Source, Transcript
 from scribe.xai_stt import DEFAULT_MODEL, XaiStt
+from tests.diarizer_fakes import FakeWorker, found
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Mapping, Sequence
@@ -123,7 +124,7 @@ class Ears:
         self.failing = failing or {}
         self.asked: list[tuple[str, list[tuple[float, float]], int]] = []
 
-    def resolve(self) -> None:
+    def resolve(self, _recognizers: Sequence[Recognizer] = RECOGNIZERS, /) -> None:
         if self.refused is not None:
             raise EarError(self.refused)
 
@@ -156,7 +157,7 @@ def _run(
     *,
     handler: Callable[[httpx.Request], httpx.Response] = _ok,
     ffmpeg: Ffmpeg | None = None,
-    ears: Ears | None = None,
+    ears: recheck.Ears | None = None,
 ) -> tuple[Recheck, list[httpx.Request], Ffmpeg]:
     client, seen = _client(handler)
     fake = ffmpeg or Ffmpeg()
@@ -350,6 +351,33 @@ def test_a_recognizer_that_fails_is_failed_and_the_other_still_votes(tmp_path: P
         f"{cohere.name} exited 1: no GPU",
     )
     assert (second.engine, second.status, second.reason) == (qwen.name, "heard", None)
+
+
+def test_an_uncached_recognizer_is_not_run_and_the_other_still_votes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cohere, qwen = RECOGNIZERS
+    hub = tmp_path / "hub"
+    monkeypatch.setenv("HF_HUB_CACHE", str(hub))
+    snapshot = hub / f"models--{qwen.model.replace('/', '--')}" / "snapshots" / qwen.revision
+    snapshot.mkdir(parents=True)
+    for name in ("config.json", "model.safetensors"):
+        (snapshot / name).write_text("{}", encoding="utf-8")
+
+    def answer(intervals: list[list[float]]) -> dict[str, object]:
+        texts = [f"heard {start:g}" for start, _ in intervals]
+        return {"versions": {}, "device": "mps", "dtype": "bf16", "runtime_s": 1.0, "texts": texts}
+
+    worker = FakeWorker(answer)
+    ears = LocalEars(run=worker.run, which=found, host=lambda: ("Darwin", "arm64"))
+
+    result, _, _ = _run(_transcript(fills=[(10.0, 12.0)]), tmp_path, ears=ears)
+
+    _, first, second = result.spans[0].votes
+    assert (first.engine, first.status) == (cohere.name, "not run")
+    assert first.reason is not None
+    assert f"{cohere.model} at {cohere.revision} is not in the Hugging Face cache" in first.reason
+    assert (second.engine, second.status, second.text) == (qwen.name, "heard", "heard 5")
 
 
 def test_local_token_cap_fits_the_longest_clip(tmp_path: Path) -> None:
