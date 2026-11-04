@@ -2074,7 +2074,8 @@ def recheck_command(
     a bad input, a transcript of another model or with no duration, audio
     that is not TRANSCRIPT's, no key, no ffmpeg, or an --out that is an
     input, all found before any request. Exit 5 is a run with spans in which
-    xAI heard none of them, sent or out of range: --out is not written.
+    xAI heard none of them, sent or out of range: --out is not written, and
+    a file already there is removed; one that cannot be is exit 2.
     """
     # stdout carries only the output path; unconfigured, structlog prints there.
     configure()
@@ -2106,6 +2107,11 @@ def recheck_command(
             # A failure says more than an out-of-range span, so it is named when there is one.
             first = next((vote for vote in xai if vote.status == "failed"), xai[0])
             _warn(f"xAI heard none of the {len(xai)} spans; first: {first.reason}")
+            # An earlier run's file left in place would read as this run's votes.
+            try:
+                plan["--out"].unlink(missing_ok=True)
+            except OSError as exc:
+                raise InputValidationError(f"cannot remove {plan['--out']}: {exc}") from exc
             raise typer.Exit(_EXIT_NO_VOTE)
         _write_text(plan["--out"], checked.model_dump_json(indent=2) + "\n")
     except AppError as exc:
