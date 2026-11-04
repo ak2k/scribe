@@ -70,7 +70,21 @@ def _device() -> torch.device:
     if torch.backends.mps.is_available():
         return torch.device("mps")
     if torch.cuda.is_available():
-        return torch.device("cuda")
+        cuda = torch.device("cuda")
+        # A GPU the wheel ships no kernels for still reports available, and fails only
+        # once work runs on it, asynchronously, so the probe waits for its result.
+        try:
+            torch.ones(1, device=cuda).add_(1)
+            torch.cuda.synchronize()
+        except Exception as exc:  # noqa: BLE001  # any failure here means cpu
+            print(
+                f"cuda is unusable, diarizing on cpu: {type(exc).__name__}: "
+                f"{' '.join(str(exc).split())}",
+                file=sys.stderr,
+                flush=True,
+            )
+        else:
+            return cuda
     return torch.device("cpu")
 
 
