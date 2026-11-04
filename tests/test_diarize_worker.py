@@ -54,11 +54,29 @@ def _loaded(
     *,
     mps: bool = False,
     cuda: bool = False,
+    kernels: bool = True,
+    on: list[str] | None = None,
 ) -> ModuleType:
-    """Load the worker over stand-ins for what it imports; loading the model raises `error`."""
+    """Load the worker over stand-ins for what it imports; loading the model raises `error`.
+
+    `kernels` False is a GPU torch sees but has no kernels for, which raises only once
+    work runs on it. `on` collects the device the pipeline is moved to.
+    """
 
     def refuse(_model: str, *, revision: str) -> NoReturn:
         raise error
+
+    def load(_model: str, *, revision: str) -> SimpleNamespace:
+        return SimpleNamespace(to=move)
+
+    def move(device: str) -> NoReturn:
+        assert on is not None
+        on.append(device)
+        raise error
+
+    def synchronize() -> None:
+        if not kernels:
+            raise RuntimeError("CUDA error: no kernel image is available for execution on the device")
 
     errors = {
         "GatedRepoError": GatedRepoError,
@@ -71,12 +89,15 @@ def _loaded(
         "torch": {
             "device": str,
             "backends": SimpleNamespace(mps=SimpleNamespace(is_available=lambda: mps)),
-            "cuda": SimpleNamespace(is_available=lambda: cuda),
+            "cuda": SimpleNamespace(is_available=lambda: cuda, synchronize=synchronize),
+            "ones": lambda *_shape, device: SimpleNamespace(add_=lambda _other: None),
         },
         "huggingface_hub": {},
         "huggingface_hub.errors": dict(errors),
         "pyannote": {},
-        "pyannote.audio": {"Pipeline": SimpleNamespace(from_pretrained=refuse)},
+        "pyannote.audio": {
+            "Pipeline": SimpleNamespace(from_pretrained=refuse if on is None else load)
+        },
     }
     for name, attributes in stand_ins.items():
         module = ModuleType(name)
@@ -108,6 +129,53 @@ def test_the_pipeline_runs_on_the_first_device_torch_can_use_of_mps_cuda_and_cpu
     worker = _loaded(monkeypatch, LookupError(), mps=mps, cuda=cuda)
 
     assert cast("Callable[[], str]", vars(worker)["_device"])() == device
+
+
+class _Moved(Exception): ...
+
+
+@pytest.mark.parametrize(
+    ("mps", "cuda", "kernels", "device"),
+    [
+        (True, True, False, "mps"),
+        (False, True, True, "cuda"),
+        (False, True, False, "cpu"),
+        (False, False, True, "cpu"),
+    ],
+    ids=["mps", "cuda", "cuda-without-kernels", "cpu"],
+)
+def test_a_run_moves_the_pipeline_to_a_device_that_can_run_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    *,
+    mps: bool,
+    cuda: bool,
+    kernels: bool,
+    device: str,
+) -> None:
+    on: list[str] = []
+    worker = _loaded(monkeypatch, _Moved(), mps=mps, cuda=cuda, kernels=kernels, on=on)
+    main = cast("Callable[[list[str]], int]", vars(worker)["main"])
+    request = tmp_path / "in.json"
+    request.write_text(
+        json.dumps({"audio": "a.wav", "model": MODEL, "revision": "abc", "intervals": []}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(_Moved):
+        main([str(request), str(tmp_path / "out.json")])
+
+    _, err = capsys.readouterr()
+    assert on == [device]
+    told = [line for line in err.splitlines() if "cuda" in line]
+    if cuda and not kernels and not mps:
+        assert len(told) == 1
+        assert "no kernel image" in told[0]
+        assert not told[0].startswith(FAILED)
+        assert "Traceback" not in err
+    else:
+        assert told == []
 
 
 _TOKEN_ADVICE = (
