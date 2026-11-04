@@ -125,10 +125,10 @@ def _worker(monkeypatch: pytest.MonkeyPatch, error: BaseException) -> Callable[[
 
 @pytest.mark.parametrize(
     ("mps", "cuda", "device"),
-    [(True, True, "mps"), (False, True, "cuda"), (False, False, "cpu")],
+    [(True, True, "mps"), (False, True, "cpu"), (False, False, "cpu")],
     ids=["mps", "cuda", "cpu"],
 )
-def test_the_pipeline_runs_on_the_first_device_torch_can_use_of_mps_cuda_and_cpu(
+def test_the_pipeline_runs_on_mps_when_torch_has_it_and_otherwise_on_cpu(
     monkeypatch: pytest.MonkeyPatch, *, mps: bool, cuda: bool, device: str
 ) -> None:
     worker = _loaded(monkeypatch, LookupError(), mps=mps, cuda=cuda)
@@ -143,7 +143,7 @@ class _MovedError(Exception): ...
     ("mps", "cuda", "kernels", "device"),
     [
         (True, True, False, "mps"),
-        (False, True, True, "cuda"),
+        (False, True, True, "cpu"),
         (False, True, False, "cpu"),
         (False, False, True, "cpu"),
     ],
