@@ -40,16 +40,22 @@ def _transcript(
     fills: Sequence[tuple[float, float]] = (),
     unresolved: Sequence[tuple[float, float]] = (),
     model: str | None = DEFAULT_MODEL,
-    params: Mapping[str, float | str] | None = None,
+    params: Mapping[str, float | bool | str] | None = None,
     duration: float | None = 120.0,
+    without: Sequence[str] = (),
 ) -> Transcript:
-    recorded: dict[str, float | str] = {
+    recorded: dict[str, float | bool | str] = {
         "fill_reference": REFERENCE,
         "fill_ranges": json.dumps([list(span) for span in fills]),
         "fill_unresolved_ranges": json.dumps([list(span) for span in unresolved]),
         "keyterms": json.dumps(["Alpha Term", "Beta Term"]),
+        "language": "en",
+        "format": True,
+        "vad_threshold": 0.0,
     }
     recorded |= params or {}
+    for key in without:
+        del recorded[key]
     return Transcript(
         source=Source(kind="audio", ref="recording.mp3"),
         engine=Engine(name="xai-stt", model=model, params=recorded),
@@ -226,6 +232,79 @@ def test_keyterms_and_model_reused(tmp_path: Path) -> None:
     assert [body for name, body in fields if name == "keyterm"] == [b"Alpha Term", b"Beta Term"]
     assert result.model == DEFAULT_MODEL
     assert result.spans[0].votes[0].model == DEFAULT_MODEL
+
+
+@pytest.mark.parametrize(
+    ("stored", "sent"),
+    [
+        ({"language": "", "format": False, "vad_threshold": 0.4}, {"vad_threshold": b"0.4"}),
+        (
+            {"language": "fr", "format": False, "vad_threshold": 0.0},
+            {"language": b"fr", "vad_threshold": b"0"},
+        ),
+        (
+            {"language": "en", "format": True, "vad_threshold": 0.25},
+            {"language": b"en", "format": b"true", "vad_threshold": b"0.25"},
+        ),
+    ],
+    ids=["no-language", "no-format", "formatted"],
+)
+def test_the_stored_request_settings_are_replayed(
+    tmp_path: Path, stored: dict[str, float | bool | str], sent: dict[str, bytes]
+) -> None:
+    _, seen, _ = _run(_transcript(fills=[(10.0, 12.0)], params=stored), tmp_path)
+
+    fields = dict(_parts(seen[0]))
+    settings = {"language", "format", "vad_threshold"}
+    assert {name: body for name, body in fields.items() if name in settings} == sent
+    assert "diarize" not in fields
+
+
+@pytest.mark.parametrize(
+    ("change", "without", "named"),
+    [
+        ({}, ("language",), "language"),
+        ({}, ("format",), "format"),
+        ({}, ("vad_threshold",), "vad_threshold"),
+        ({"language": 1.0}, (), "language"),
+        ({"format": "yes"}, (), "format"),
+        ({"vad_threshold": True}, (), "vad_threshold"),
+        ({"vad_threshold": 1.5}, (), "VAD threshold"),
+    ],
+    ids=[
+        "no-language",
+        "no-format",
+        "no-vad",
+        "number-language",
+        "text-format",
+        "bool-vad",
+        "vad-past-1",
+    ],
+)
+def test_missing_or_malformed_request_settings_are_refused_before_any_cut(
+    tmp_path: Path, change: dict[str, float | bool | str], without: tuple[str, ...], named: str
+) -> None:
+    transcript = _transcript(fills=[(10.0, 12.0)], params=change, without=without)
+    fake = Ffmpeg()
+
+    with pytest.raises(InputValidationError, match=named):
+        _run(transcript, tmp_path, ffmpeg=fake)
+    assert fake.calls == []
+
+
+def test_each_clip_is_cut_from_one_decode_of_the_recording(tmp_path: Path) -> None:
+    transcript = _transcript(fills=[(10.0, 12.0)], unresolved=[(60.0, 90.0)])
+
+    _, seen, fake = _run(transcript, tmp_path)
+
+    decode, *cuts = fake.calls
+    recording = str((tmp_path / "recording.mp3").absolute())
+    # A container's timestamps can jump; the decoded samples are the timeline the spans are on.
+    assert decode[decode.index("-i") + 1] == recording
+    assert "-ss" not in decode
+    assert decode[-1].endswith(".wav")
+    assert [cut[cut.index("-i") + 1] for cut in cuts] == [decode[-1]] * 2
+    assert len(seen) == 2
 
 
 def test_a_transcript_of_another_model_is_refused(tmp_path: Path) -> None:

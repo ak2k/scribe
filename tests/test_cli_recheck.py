@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import subprocess
 from functools import partial
 from pathlib import Path
@@ -89,10 +90,13 @@ def _meeting(
 ) -> tuple[Path, Path]:
     audio = tmp_path / "recording.mp3"
     audio.write_bytes(b"pretend this is audio")
-    params: dict[str, float | str] = {
+    params: dict[str, float | bool | str] = {
         "fill_reference": "parakeet-cpp model.bin",
         "fill_ranges": json.dumps([list(span) for span in fills]),
         "fill_unresolved_ranges": json.dumps([list(span) for span in unresolved]),
+        "language": "en",
+        "format": True,
+        "vad_threshold": 0.0,
     }
     transcript = Transcript(
         source=Source(
@@ -150,6 +154,40 @@ def test_no_heard_xai_vote_exits_5_and_writes_nothing(
     assert result.exit_code == 5, result.output
     assert "500" in result.stderr
     assert not out.exists()
+
+
+def test_no_heard_xai_vote_removes_an_earlier_out(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _fakes(monkeypatch, status=500)
+    transcript, audio = _meeting(tmp_path)
+    out = tmp_path / "meeting.recheck.json"
+    out.write_text("an earlier run's votes", encoding="utf-8")
+
+    result = _invoke(transcript, audio, out)
+
+    assert result.exit_code == 5, result.output
+    assert not out.exists()
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root unlinks in a read-only directory")
+def test_an_earlier_out_that_cannot_be_removed_is_an_input_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _fakes(monkeypatch, status=500)
+    transcript, audio = _meeting(tmp_path)
+    kept = tmp_path / "kept"
+    kept.mkdir()
+    out = kept / "meeting.recheck.json"
+    out.write_text("an earlier run's votes", encoding="utf-8")
+    kept.chmod(0o555)
+    try:
+        result = _invoke(transcript, audio, out)
+    finally:
+        kept.chmod(0o755)
+
+    assert result.exit_code == 2, result.output
+    assert f"cannot remove {out}" in result.stderr
 
 
 def test_every_span_out_of_range_exits_5_and_writes_nothing(
