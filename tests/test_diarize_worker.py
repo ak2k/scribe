@@ -58,7 +58,8 @@ def _loaded(
 ) -> ModuleType:
     """Load the worker over stand-ins for what it imports; loading the model raises `error`.
 
-    `on` collects the device the pipeline is moved to.
+    `cuda` True is a GPU torch sees and runs work on. `on` collects the device the
+    pipeline is moved to.
     """
 
     def refuse(_model: str, *, revision: str) -> NoReturn:
@@ -72,6 +73,13 @@ def _loaded(
         on.append(device)
         raise error
 
+    def add(_other: int) -> None: ...
+
+    def ones(*_shape: int, device: str) -> SimpleNamespace:
+        return SimpleNamespace(add_=add, device=device)
+
+    def synchronize() -> None: ...
+
     errors = {
         "GatedRepoError": GatedRepoError,
         "HfHubHTTPError": HfHubHTTPError,
@@ -83,7 +91,8 @@ def _loaded(
         "torch": {
             "device": str,
             "backends": SimpleNamespace(mps=SimpleNamespace(is_available=lambda: mps)),
-            "cuda": SimpleNamespace(is_available=lambda: cuda),
+            "cuda": SimpleNamespace(is_available=lambda: cuda, synchronize=synchronize),
+            "ones": ones,
         },
         "huggingface_hub": {},
         "huggingface_hub.errors": dict(errors),
