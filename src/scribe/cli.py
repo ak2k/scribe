@@ -867,9 +867,9 @@ def turns(
     match of its voice against each speaker's other speech agree; the rest stay
     "Speaker ?". The audio is --audio, else INPUT's source audio, read relative
     to the current directory; a recorded sha256 must match it. It needs macOS
-    on arm64 or Linux on x86_64, uvx and ffmpeg on PATH, and takes about 85 s
-    per audio hour on Apple silicon; a first run downloads ~960 MB, or several
-    GB of CUDA wheels on Linux. The model is gated: accept its terms at
+    on arm64 or Linux on x86_64, uvx and ffmpeg on PATH. It runs on Apple
+    silicon's GPU, about 85 s per audio hour, and on the CPU on Linux; a first
+    run downloads ~960 MB. The model is gated: accept its terms at
     https://hf.co/pyannote/speaker-diarization-community-1 and set HF_TOKEN.
     A named word before its speaker's first word changes the "Speaker N" ranks
     too, so a `cleanup --speaker` key made from other output may need its

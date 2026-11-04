@@ -39,6 +39,8 @@ PYTHON = "3.13"
 # Dependencies as published by then: uvx otherwise resolves them afresh, and a
 # dependency that moves can change the clusters.
 EXCLUDE_NEWER = "2026-09-24T00:00:00Z"
+# torch's default Linux wheels pull in GB of CUDA libraries the worker never uses.
+LINUX_TORCH = ("--torch-backend", "cpu")
 # The (system, machine) pairs, as `platform` names them, the worker has run on.
 HOSTS = frozenset({("Darwin", "arm64"), ("Linux", "x86_64")})
 # About 85 s per audio hour on Apple silicon once cached; a first run also
@@ -260,7 +262,8 @@ class PyannoteDiarizer:
                 request.write_text(json.dumps(body), encoding="utf-8")
             except OSError as exc:
                 raise ExternalServiceError(f"cannot write the diarizer's request: {exc}") from exc
-            pins = [tools.uvx, "--python", PYTHON, "--exclude-newer", EXCLUDE_NEWER]
+            backend = LINUX_TORCH if self._host()[0] == "Linux" else ()
+            pins = [tools.uvx, *backend, "--python", PYTHON, "--exclude-newer", EXCLUDE_NEWER]
             pins += ["--from", f"{PACKAGE}=={VERSION}"]
             pins += [option for pin in WITH for option in ("--with", pin)]
             with resources.as_file(resources.files("scribe") / "diarize_worker.py") as worker:
