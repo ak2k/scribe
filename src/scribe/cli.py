@@ -68,6 +68,8 @@ from scribe.pick import (
     pick_readings,
     replay_readings,
 )
+from scribe.recheck import SPAN_DEADLINE_S
+from scribe.recheck import recheck as recheck_spans
 from scribe.schema import Engine, Source, Transcript, from_xai_response
 from scribe.speakers import (
     DEFAULT_SPEAKER_MODEL,
@@ -2036,6 +2038,74 @@ def disputes_command(
         _fail(exc)
 
     _warn(summarize(found))
+    typer.echo(str(plan["--out"]))
+
+
+@app.command(name="recheck")
+def recheck_command(
+    transcript_path: Path = typer.Argument(
+        ...,
+        metavar="TRANSCRIPT",
+        help="Filled transcript, as `scribe transcribe` writes, whose spans are re-read.",
+    ),
+    audio: Path = typer.Option(..., "--audio", help="The recording TRANSCRIPT was made from."),
+    out: Path = typer.Option(..., "--out", help="Where to write the votes, as JSON."),
+) -> None:
+    """Re-read each span the fill filled or flagged, and record every engine's vote on it.
+
+    Each span in TRANSCRIPT's fill_ranges and fill_unresolved_ranges is cut
+    from --audio, 5 s past each end, and sent on its own to xAI with
+    TRANSCRIPT's keyterms, undiarized, always with the default model. The
+    local recognizers read the same clips where this host can run them;
+    where it cannot, each span records their vote as not run, with why.
+    --out holds, per span, its kind and times, the engine whose words the
+    fill took there, and one vote per engine, xAI's words timed on the
+    recording's clock; and the hashes of TRANSCRIPT and the recording.
+
+    Needs XAI_API_KEY in the environment and ffmpeg on PATH. A span whose
+    clip or request fails records the failure and the run goes on. Exit 2 is
+    a bad input, a transcript of another model, audio that is not
+    TRANSCRIPT's, no key, no ffmpeg, or an --out that is an input, all found
+    before any request.
+    """
+    # stdout carries only the output path; unconfigured, structlog prints there.
+    configure()
+    try:
+        try:
+            raw = transcript_path.read_bytes()
+        except OSError as exc:
+            raise InputValidationError(f"cannot read transcript {transcript_path}: {exc}") from exc
+        transcript = _one_track(
+            Transcript.parse(raw, transcript_path), f"TRANSCRIPT {transcript_path}"
+        )
+        api_key = resolve_api_key()
+        recording = _source_audio(transcript.source, audio)
+        plan = plan_outputs(
+            {"--out": out}, {"TRANSCRIPT": transcript_path, "the audio file": recording}
+        )
+        prove_writable(plan)
+        checked = recheck_spans(
+            transcript,
+            transcript_path,
+            recording,
+            XaiStt(api_key, deadline_seconds=SPAN_DEADLINE_S),
+            LocalEars().hear,
+            transcript_sha256=hashlib.sha256(raw).hexdigest(),
+            source_sha256=transcript.source.sha256 or _sha256(recording),
+        )
+        _write_text(plan["--out"], checked.model_dump_json(indent=2) + "\n")
+    except AppError as exc:
+        _fail(exc)
+
+    votes = [vote for span in checked.spans for vote in span.votes]
+    tally = {
+        status: sum(vote.status == status for vote in votes)
+        for status in ("heard", "failed", "not run")
+    }
+    _warn(
+        f"rechecked {len(checked.spans)} spans: {tally['heard']} votes heard, "
+        f"{tally['failed']} failed, {tally['not run']} not run"
+    )
     typer.echo(str(plan["--out"]))
 
 

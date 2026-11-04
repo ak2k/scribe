@@ -185,7 +185,8 @@ def test_keyterms_and_model_reused(tmp_path: Path) -> None:
 
     fields = _parts(seen[0])
     assert dict(fields)["model"] == DEFAULT_MODEL.encode()
-    assert dict(fields)["diarize"] == b"false"
+    # Diarization off is the field left out, the API's default.
+    assert "diarize" not in dict(fields)
     assert [body for name, body in fields if name == "keyterm"] == [b"Alpha Term", b"Beta Term"]
     assert result.model == DEFAULT_MODEL
     assert result.spans[0].votes[0].model == DEFAULT_MODEL
