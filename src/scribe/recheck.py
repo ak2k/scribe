@@ -165,7 +165,9 @@ def _keyterms(transcript: Transcript, path: Path) -> list[str]:
 def _proposer(transcript: Transcript, path: Path) -> str:
     named = transcript.engine.params.get("fill_reference")
     if not isinstance(named, str) or not named.strip():
-        raise InputValidationError(f"{path} has fill ranges but no fill_reference naming its engine")
+        raise InputValidationError(
+            f"{path} has fill ranges but no fill_reference naming its engine"
+        )
     return named
 
 

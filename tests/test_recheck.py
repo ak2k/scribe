@@ -319,3 +319,47 @@ def test_each_span_names_the_engine_that_proposed_it(tmp_path: Path) -> None:
     assert result.transcript_sha256 == "t" * 64
     assert result.source_sha256 == "s" * 64
     assert result.pad_s == recheck.PAD_S == 5.0
+
+
+def test_malformed_keyterms_are_refused(tmp_path: Path) -> None:
+    transcript = _transcript(fills=[(10.0, 12.0)], params={"keyterms": "not a list"})
+
+    with pytest.raises(InputValidationError, match="keyterms"):
+        _run(transcript, tmp_path)
+
+
+def test_spans_with_no_fill_reference_are_refused(tmp_path: Path) -> None:
+    transcript = _transcript(fills=[(10.0, 12.0)], params={"fill_reference": " "})
+
+    with pytest.raises(InputValidationError, match="fill_reference"):
+        _run(transcript, tmp_path)
+
+
+def test_a_clip_runs_its_full_pad_when_the_duration_is_unknown() -> None:
+    transcript = _transcript(fills=[(10.0, 12.0)], duration=None)
+
+    assert [span.clip for span in recheck.find_spans(transcript, Path("m.json"))] == [(5.0, 17.0)]
+
+
+def test_a_span_past_the_recordings_end_is_recorded_as_failed(tmp_path: Path) -> None:
+    transcript = _transcript(fills=[(130.0, 131.0)], duration=120.0)
+
+    result, seen, fake = _run(transcript, tmp_path)
+
+    vote = result.spans[0].votes[0]
+    assert vote.status == "failed"
+    assert vote.reason is not None
+    assert "past the recording's end" in vote.reason
+    assert (seen, fake.calls) == ([], [])
+
+
+def test_a_malformed_reply_is_recorded_as_failed(tmp_path: Path) -> None:
+    def odd(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"words": []})
+
+    result, _, _ = _run(_transcript(fills=[(10.0, 12.0)]), tmp_path, handler=odd)
+
+    vote = result.spans[0].votes[0]
+    assert vote.status == "failed"
+    assert vote.reason is not None
+    assert "malformed xAI transcription response" in vote.reason

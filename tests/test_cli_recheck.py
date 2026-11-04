@@ -17,6 +17,7 @@ from typer.testing import CliRunner
 from scribe import recheck
 from scribe.cli import app
 from scribe.ear import LocalEars
+from scribe.recheck import HeardWord, Recheck
 from scribe.schema import Engine, Source, Transcript
 from scribe.xai_stt import DEFAULT_MODEL, XaiStt
 
@@ -48,9 +49,7 @@ class Calls:
         self.cuts: list[list[str]] = []
 
 
-def _fakes(
-    monkeypatch: pytest.MonkeyPatch, *, status: int = 200, ffmpeg: bool = True
-) -> Calls:
+def _fakes(monkeypatch: pytest.MonkeyPatch, *, status: int = 200, ffmpeg: bool = True) -> Calls:
     calls = Calls()
 
     def answer(request: httpx.Request) -> httpx.Response:
@@ -67,9 +66,7 @@ def _fakes(
         return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
 
     located = "/usr/bin/ffmpeg" if ffmpeg else None
-    monkeypatch.setattr(
-        "scribe.cli.XaiStt", partial(XaiStt, transport=httpx.MockTransport(answer))
-    )
+    monkeypatch.setattr("scribe.cli.XaiStt", partial(XaiStt, transport=httpx.MockTransport(answer)))
     monkeypatch.setattr(
         "scribe.cli.recheck_spans",
         partial(recheck.recheck, run=cut, which=lambda _name: located),
@@ -122,17 +119,16 @@ def test_it_writes_one_vote_per_engine_per_span(
 
     assert result.exit_code == 0, result.output
     assert result.stdout.strip() == str(out)
-    written = json.loads(out.read_text(encoding="utf-8"))
-    assert written["transcript_sha256"] == hashlib.sha256(transcript.read_bytes()).hexdigest()
-    assert written["source_sha256"] == hashlib.sha256(audio.read_bytes()).hexdigest()
-    assert written["model"] == DEFAULT_MODEL
-    assert [span["kind"] for span in written["spans"]] == ["fill", "unresolved"]
-    assert [span["proposed_by"] for span in written["spans"]] == ["parakeet-cpp model.bin"] * 2
-    statuses = [[vote["status"] for vote in span["votes"]] for span in written["spans"]]
+    # Read back strictly: a field the file holds and the model does not name fails here.
+    written = Recheck.model_validate_json(out.read_text(encoding="utf-8"))
+    assert written.transcript_sha256 == hashlib.sha256(transcript.read_bytes()).hexdigest()
+    assert written.source_sha256 == hashlib.sha256(audio.read_bytes()).hexdigest()
+    assert written.model == DEFAULT_MODEL
+    assert [span.kind for span in written.spans] == ["fill", "unresolved"]
+    assert [span.proposed_by for span in written.spans] == ["parakeet-cpp model.bin"] * 2
+    statuses = [[vote.status for vote in span.votes] for span in written.spans]
     assert statuses == [["heard", "not run", "not run"]] * 2
-    assert written["spans"][0]["votes"][0]["words"] == [
-        {"text": "one", "start": 6.0, "end": 6.5}
-    ]
+    assert written.spans[0].votes[0].words == [HeardWord(text="one", start=6.0, end=6.5)]
     assert len(calls.requests) == 2
     assert "2 spans" in result.stderr
 
@@ -145,9 +141,9 @@ def test_span_failure_recorded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
     result = _invoke(transcript, audio, out)
 
     assert result.exit_code == 0, result.output
-    written = json.loads(out.read_text(encoding="utf-8"))
-    assert [span["votes"][0]["status"] for span in written["spans"]] == ["failed", "failed"]
-    assert "500" in written["spans"][0]["votes"][0]["reason"]
+    written = Recheck.model_validate_json(out.read_text(encoding="utf-8"))
+    assert [span.votes[0].status for span in written.spans] == ["failed", "failed"]
+    assert "500" in (written.spans[0].votes[0].reason or "")
 
 
 def test_no_spans_writes_empty(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -158,7 +154,7 @@ def test_no_spans_writes_empty(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
     result = _invoke(transcript, audio, out)
 
     assert result.exit_code == 0, result.output
-    assert json.loads(out.read_text(encoding="utf-8"))["spans"] == []
+    assert Recheck.model_validate_json(out.read_text(encoding="utf-8")).spans == []
     assert calls.requests == []
     assert calls.cuts == []
 
