@@ -74,6 +74,11 @@ def _loaded(
         on.append(device)
         raise error
 
+    def add(_other: int) -> None: ...
+
+    def ones(*_shape: int, device: str) -> SimpleNamespace:
+        return SimpleNamespace(add_=add, device=device)
+
     def synchronize() -> None:
         if not kernels:
             raise RuntimeError("CUDA error: no kernel image is available for this device")
@@ -90,7 +95,7 @@ def _loaded(
             "device": str,
             "backends": SimpleNamespace(mps=SimpleNamespace(is_available=lambda: mps)),
             "cuda": SimpleNamespace(is_available=lambda: cuda, synchronize=synchronize),
-            "ones": lambda *_shape, device: SimpleNamespace(add_=lambda _other: None),
+            "ones": ones,
         },
         "huggingface_hub": {},
         "huggingface_hub.errors": dict(errors),
