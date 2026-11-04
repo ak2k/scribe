@@ -48,11 +48,37 @@ def _uncached(cause: BaseException | None) -> LocalEntryNotFoundError:
     return error
 
 
-def _worker(monkeypatch: pytest.MonkeyPatch, error: BaseException) -> Callable[[list[str]], int]:
-    """Load the worker over stand-ins for what it imports; loading the model raises `error`."""
+def _loaded(
+    monkeypatch: pytest.MonkeyPatch,
+    error: BaseException,
+    *,
+    mps: bool = False,
+    cuda: bool = False,
+    on: list[str] | None = None,
+) -> ModuleType:
+    """Load the worker over stand-ins for what it imports; loading the model raises `error`.
+
+    `cuda` True is a GPU torch sees and runs work on. `on` collects the device the
+    pipeline is moved to.
+    """
 
     def refuse(_model: str, *, revision: str) -> NoReturn:
         raise error
+
+    def load(_model: str, *, revision: str) -> SimpleNamespace:
+        return SimpleNamespace(to=move)
+
+    def move(device: str) -> NoReturn:
+        assert on is not None
+        on.append(device)
+        raise error
+
+    def add(_other: int) -> None: ...
+
+    def ones(*_shape: int, device: str) -> SimpleNamespace:
+        return SimpleNamespace(add_=add, device=device)
+
+    def synchronize() -> None: ...
 
     errors = {
         "GatedRepoError": GatedRepoError,
@@ -64,12 +90,16 @@ def _worker(monkeypatch: pytest.MonkeyPatch, error: BaseException) -> Callable[[
         "soundfile": {},
         "torch": {
             "device": str,
-            "backends": SimpleNamespace(mps=SimpleNamespace(is_available=lambda: False)),
+            "backends": SimpleNamespace(mps=SimpleNamespace(is_available=lambda: mps)),
+            "cuda": SimpleNamespace(is_available=lambda: cuda, synchronize=synchronize),
+            "ones": ones,
         },
         "huggingface_hub": {},
         "huggingface_hub.errors": dict(errors),
         "pyannote": {},
-        "pyannote.audio": {"Pipeline": SimpleNamespace(from_pretrained=refuse)},
+        "pyannote.audio": {
+            "Pipeline": SimpleNamespace(from_pretrained=refuse if on is None else load)
+        },
     }
     for name, attributes in stand_ins.items():
         module = ModuleType(name)
@@ -83,7 +113,50 @@ def _worker(monkeypatch: pytest.MonkeyPatch, error: BaseException) -> Callable[[
         assert spec.loader is not None
         worker = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(worker)
-    return cast("Callable[[list[str]], int]", vars(worker)["main"])
+    return worker
+
+
+def _worker(monkeypatch: pytest.MonkeyPatch, error: BaseException) -> Callable[[list[str]], int]:
+    return cast("Callable[[list[str]], int]", vars(_loaded(monkeypatch, error))["main"])
+
+
+@pytest.mark.parametrize(
+    ("mps", "cuda", "device"),
+    [(True, True, "mps"), (False, True, "cpu"), (False, False, "cpu")],
+    ids=["mps", "cuda", "cpu"],
+)
+def test_the_pipeline_runs_on_mps_when_torch_has_it_and_otherwise_on_cpu(
+    monkeypatch: pytest.MonkeyPatch, *, mps: bool, cuda: bool, device: str
+) -> None:
+    worker = _loaded(monkeypatch, LookupError(), mps=mps, cuda=cuda)
+
+    assert cast("Callable[[], str]", vars(worker)["_device"])() == device
+
+
+class _MovedError(Exception): ...
+
+
+@pytest.mark.parametrize(
+    ("mps", "cuda", "device"),
+    [(True, True, "mps"), (False, True, "cpu"), (False, False, "cpu")],
+    ids=["mps", "cuda", "cpu"],
+)
+def test_a_run_moves_the_pipeline_to_the_device_it_picked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, mps: bool, cuda: bool, device: str
+) -> None:
+    on: list[str] = []
+    worker = _loaded(monkeypatch, _MovedError(), mps=mps, cuda=cuda, on=on)
+    main = cast("Callable[[list[str]], int]", vars(worker)["main"])
+    request = tmp_path / "in.json"
+    request.write_text(
+        json.dumps({"audio": "a.wav", "model": MODEL, "revision": "abc", "intervals": []}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(_MovedError):
+        main([str(request), str(tmp_path / "out.json")])
+
+    assert on == [device]
 
 
 _TOKEN_ADVICE = (

@@ -44,17 +44,18 @@ def _decoded(*_args: object, **_kwargs: object) -> list[int]:
 class _Ear:
     """Cohere's processor and model at once: a clip is heard as its first and last samples."""
 
-    device = SimpleNamespace(type="mps")
     dtype = "bfloat16"
 
     def __init__(self) -> None:
         self.loads: list[str] = []
+        self.device = SimpleNamespace(type="unmoved")
 
     def load(self, model: str, **_kwargs: object) -> _Ear:
         self.loads.append(model)
         return self
 
-    def to(self, _device: str) -> _Ear:
+    def to(self, device: str) -> _Ear:
+        self.device = SimpleNamespace(type=device)
         return self
 
     def eval(self) -> _Ear:
@@ -145,6 +146,30 @@ def test_a_gpu_torch_cannot_use_is_one_line(
     assert code == 1
     assert err.splitlines() == [f"{FAILED}torch cannot use the Metal GPU (mps) here"]
     assert not (tmp_path / "out.json").exists()
+
+
+def test_a_mac_whose_torch_has_no_mps_is_refused_before_the_model_loads(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # A model that would load, so only the missing GPU can refuse it.
+    ear = _Ear()
+
+    code = _run(tmp_path, monkeypatch, RECOGNIZERS[0], mps=False, ear=ear)
+
+    _, err = capsys.readouterr()
+    assert code == 1
+    assert err.splitlines() == [f"{FAILED}torch cannot use the Metal GPU (mps) here"]
+    assert ear.loads == []
+    assert not (tmp_path / "out.json").exists()
+
+
+def test_the_model_runs_on_the_metal_gpu(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    ear = _Ear()
+
+    code = _run(tmp_path, monkeypatch, RECOGNIZERS[0], mps=True, ear=ear)
+
+    assert code == 0
+    assert json.loads((tmp_path / "out.json").read_text(encoding="utf-8"))["device"] == "mps"
 
 
 @pytest.mark.parametrize("name", TOKEN_NAMES)

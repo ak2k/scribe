@@ -39,9 +39,16 @@ PYTHON = "3.13"
 # Dependencies as published by then: uvx otherwise resolves them afresh, and a
 # dependency that moves can change the clusters.
 EXCLUDE_NEWER = "2026-09-24T00:00:00Z"
+# torch's default Linux wheels pull in GB of CUDA libraries the worker never uses.
+LINUX_TORCH = ("--torch-backend", "cpu")
+# The (system, machine) pairs, as `platform` names them, the worker has run on.
+HOSTS = frozenset({("Darwin", "arm64"), ("Linux", "x86_64")})
 # About 85 s per audio hour on Apple silicon once cached; a first run also
 # downloads ~960 MB of packages and weights, which a slow link stretches.
 DEFAULT_TIMEOUT_S = 3600.0
+# Worker seconds per audio second on any other host, where torch runs on the
+# CPU: published CPU timings are 20-75 min per audio hour, before load.
+CPU_S_PER_AUDIO_S = 1.5
 DIMENSION = 256
 # Where the worker's Hugging Face client looks for the token the gated model
 # needs. Only a worker loading a gated model is given these; a token saved on
@@ -50,6 +57,8 @@ TOKEN_NAMES = ("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN", "HF_TOKEN_PATH")
 # How the worker marks the one line that names its own failure.
 FAILED = "scribe-diarize: "
 _RATE = "16000"
+# ffmpeg writes WAV as 16-bit PCM unless told otherwise; the decode is mono.
+_WAV_BYTES_PER_S = int(_RATE) * 2
 # Kept from each end of a long report: uvx names the package first and ends with the cause.
 _EXCERPT_CHARS = 150
 
@@ -160,7 +169,8 @@ class PyannoteDiarizer:
             run: Process runner for ffmpeg and uvx, injectable so tests never spawn anything.
             which: PATH lookup. Default: `shutil.which`.
             host: Operating system and machine names, as `platform` reports them.
-            timeout_s: Ceiling for each of the decode and the worker, first-run downloads included.
+            timeout_s: Ceiling for each of the decode and the worker, first-run downloads
+                included; off Apple silicon the worker's grows with the audio past it.
 
         """
         self._run = run
@@ -172,15 +182,17 @@ class PyannoteDiarizer:
         """Check this machine can run the worker, before anything is spawned.
 
         Raises:
-            ExternalServiceError: this is not macOS on arm64, or `uvx` is not on PATH.
+            ExternalServiceError: this is neither macOS on arm64 nor Linux on x86_64,
+                or `uvx` is not on PATH.
             ToolMissingError: ffmpeg is not on PATH.
 
         """
         system, machine = self._host()
-        # Only Apple silicon's GPU was measured; elsewhere the clusters are untested.
-        if (system, machine) != ("Darwin", "arm64"):
+        # Elsewhere the pinned wheels and the clusters are untested.
+        if (system, machine) not in HOSTS:
             raise ExternalServiceError(
-                f"the diarizer needs Apple silicon (macOS on arm64); this is {system} {machine}"
+                "the diarizer runs on macOS on arm64 or Linux on x86_64; "
+                f"this is {system} {machine}"
             )
         # Resolved at call time, so a patched `shutil.which` is used.
         which = self._which or shutil.which
@@ -193,19 +205,27 @@ class PyannoteDiarizer:
         return Tools(uvx, ffmpeg)
 
     def _spawn(
-        self, argv: list[str], what: str, env: dict[str, str]
+        self, argv: list[str], what: str, env: dict[str, str], timeout_s: float | None = None
     ) -> subprocess.CompletedProcess[str]:
+        ceiling = self.timeout_s if timeout_s is None else timeout_s
         try:
-            completed = self._run(argv, env=env, timeout=self.timeout_s)
+            completed = self._run(argv, env=env, timeout=ceiling)
         except subprocess.TimeoutExpired as exc:
-            raise ExternalServiceError(
-                f"{what} did not finish within {self.timeout_s:g} s"
-            ) from exc
+            raise ExternalServiceError(f"{what} did not finish within {ceiling:g} s") from exc
         except OSError as exc:
             raise ExternalServiceError(f"cannot run {argv[0]}: {exc}") from exc
         if completed.returncode != 0:
             raise ExternalServiceError(f"{what} exited {completed.returncode}{_excerpt(completed)}")
         return completed
+
+    def _worker_timeout_s(self, wav: Path) -> float:
+        if self._host() == ("Darwin", "arm64"):
+            return self.timeout_s
+        try:
+            audio_s = wav.stat().st_size / _WAV_BYTES_PER_S
+        except OSError as exc:
+            raise ExternalServiceError(f"cannot read the decoded audio: {exc}") from exc
+        return max(self.timeout_s, CPU_S_PER_AUDIO_S * audio_s)
 
     def diarize(self, audio: Path, intervals: Sequence[tuple[float, float]]) -> Diarization:
         """Diarize `audio` and embed each of `intervals` of it, in seconds.
@@ -242,13 +262,16 @@ class PyannoteDiarizer:
                 request.write_text(json.dumps(body), encoding="utf-8")
             except OSError as exc:
                 raise ExternalServiceError(f"cannot write the diarizer's request: {exc}") from exc
-            pins = [tools.uvx, "--python", PYTHON, "--exclude-newer", EXCLUDE_NEWER]
+            backend = LINUX_TORCH if self._host()[0] == "Linux" else ()
+            pins = [tools.uvx, *backend, "--python", PYTHON, "--exclude-newer", EXCLUDE_NEWER]
             pins += ["--from", f"{PACKAGE}=={VERSION}"]
             pins += [option for pin in WITH for option in ("--with", pin)]
             with resources.as_file(resources.files("scribe") / "diarize_worker.py") as worker:
                 # -P keeps the worker's own directory, which holds scribe's modules, off its path.
                 argv = [*pins, "python", "-P", str(worker), str(request), str(out)]
-                completed = self._spawn(argv, "the diarizer", child_env(*TOKEN_NAMES))
+                completed = self._spawn(
+                    argv, "the diarizer", child_env(*TOKEN_NAMES), self._worker_timeout_s(wav)
+                )
             try:
                 raw = out.read_bytes()
             except OSError:
