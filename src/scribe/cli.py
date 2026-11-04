@@ -168,6 +168,9 @@ _SPEAKERS_SIDECAR = "speakers sidecar"
 # Distinct from 2 (nothing was run) and 3 (cleanup drift): the artifacts exist,
 # but no model call behind them succeeded.
 _EXIT_NO_CHUNK = 4
+# Distinct from 2 (bad input): the inputs were fine, but xAI heard none of the
+# spans, so nothing is written and a later run can try again.
+_EXIT_NO_VOTE = 5
 
 
 def _fail(exc: AppError) -> NoReturn:
@@ -2062,11 +2065,16 @@ def recheck_command(
     fill took there, and one vote per engine, xAI's words timed on the
     recording's clock; and the hashes of TRANSCRIPT and the recording.
 
+    A span starting at or past the recording's end is not sent, and every
+    engine's vote on it is out of range. The local recognizers may write up
+    to 8 tokens per second of the longest clip, and at least 256.
+
     Needs XAI_API_KEY in the environment and ffmpeg on PATH. A span whose
     clip or request fails records the failure and the run goes on. Exit 2 is
-    a bad input, a transcript of another model, audio that is not
-    TRANSCRIPT's, no key, no ffmpeg, or an --out that is an input, all found
-    before any request.
+    a bad input, a transcript of another model or with no duration, audio
+    that is not TRANSCRIPT's, no key, no ffmpeg, or an --out that is an
+    input, all found before any request. Exit 5 is a run in which xAI heard
+    none of the spans it was sent: --out is not written.
     """
     # stdout carries only the output path; unconfigured, structlog prints there.
     configure()
@@ -2089,10 +2097,14 @@ def recheck_command(
             transcript_path,
             recording,
             XaiStt(api_key, deadline_seconds=SPAN_DEADLINE_S),
-            LocalEars().hear,
+            LocalEars(),
             transcript_sha256=hashlib.sha256(raw).hexdigest(),
             source_sha256=transcript.source.sha256 or _sha256(recording),
         )
+        sent = [span.votes[0] for span in checked.spans if span.clip is not None]
+        if sent and not any(vote.status == "heard" for vote in sent):
+            _warn(f"xAI heard none of the {len(sent)} spans; first failure: {sent[0].reason}")
+            raise typer.Exit(_EXIT_NO_VOTE)
         _write_text(plan["--out"], checked.model_dump_json(indent=2) + "\n")
     except AppError as exc:
         _fail(exc)

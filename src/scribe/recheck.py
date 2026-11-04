@@ -11,12 +11,13 @@ reader to weigh.
 
 from __future__ import annotations
 
+import math
 import shutil
 import subprocess
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Json, TypeAdapter, ValidationError
 
@@ -37,12 +38,10 @@ from scribe.xai_stt import DEFAULT_MODEL, check_keyterms
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
-    from scribe.ear import Heard
+    from scribe.ear import Heard, Recognizer
     from scribe.gaps import Runner
     from scribe.schema import Transcript
     from scribe.xai_stt import XaiStt
-
-    Hear = Callable[[Path, Sequence[tuple[float, float]]], tuple[Heard, ...]]
 
 XAI = "xai-stt"
 # Bounds one span's request and its retries, so a meeting's spans finish
@@ -53,6 +52,32 @@ _KINDS: tuple[tuple[Literal["fill", "unresolved"], str], ...] = (
     ("unresolved", "fill_unresolved_ranges"),
 )
 _KEYTERMS = TypeAdapter(Json[list[str]])
+# Fast speech runs near 4 words a second at under 2 tokens a word, so a clip's
+# words fit with room to spare; the recognizers' own default of 256 was sized
+# for clips of a few seconds.
+TOKENS_PER_S = 8
+_MIN_TOKENS = 256
+Status = Literal["heard", "failed", "not run", "out of range"]
+
+
+class Ears(Protocol):
+    """The local recognizers, as `ear.LocalEars` runs them."""
+
+    def resolve(self) -> object:
+        """Raise EarError when this host cannot run them."""
+        ...
+
+    def hear(
+        self,
+        audio: Path,
+        clips: Sequence[tuple[float, float]],
+        /,
+        *,
+        max_new_tokens: int,
+        recognizers: Sequence[Recognizer],
+    ) -> tuple[Heard, ...]:
+        """Read each of `clips` of `audio` with each of `recognizers`."""
+        ...
 
 
 @dataclass(frozen=True)
@@ -62,7 +87,9 @@ class Span:
     kind: Literal["fill", "unresolved"]
     start: float
     end: float
-    clip: tuple[float, float]
+    # None for a span that starts at or past the recording's end: any clip of
+    # it would hold only audio from before it.
+    clip: tuple[float, float] | None
 
 
 class HeardWord(BaseModel):
@@ -82,7 +109,7 @@ class Vote(BaseModel):
 
     engine: str
     model: str
-    status: Literal["heard", "failed", "not run"]
+    status: Status
     text: str | None = None
     # Only an engine that times its words gives them.
     words: list[HeardWord] | None = None
@@ -97,7 +124,7 @@ class CheckedSpan(BaseModel):
     kind: Literal["fill", "unresolved"]
     start: FiniteFloat
     end: FiniteFloat
-    clip: tuple[FiniteFloat, FiniteFloat]
+    clip: tuple[FiniteFloat, FiniteFloat] | None
     proposed_by: str
     votes: list[Vote]
 
@@ -111,17 +138,19 @@ class Recheck(BaseModel):
     source_sha256: str
     model: str
     pad_s: FiniteFloat
+    local_max_new_tokens: int
     spans: list[CheckedSpan]
 
 
 def find_spans(transcript: Transcript, path: Path) -> list[Span]:
     """Return every span the fill filled or flagged, in time order, each with its clip.
 
-    A clip runs PAD_S past each end of its span, no earlier than 0 and, when
-    the transcript's duration is known, no later than it.
+    A clip runs PAD_S past each end of its span, from no earlier than 0 to no
+    later than the transcript's duration. A span starting at or past that has none.
 
     Raises:
-        InputValidationError: a range is malformed or starts before the recording.
+        InputValidationError: a range is malformed or starts before the
+            recording, or there are ranges and the transcript records no duration.
 
     """
     found: list[Span] = []
@@ -131,10 +160,15 @@ def find_spans(transcript: Transcript, path: Path) -> list[Span]:
                 raise InputValidationError(
                     f"{path} has a malformed {key}: range {index} starts before the recording"
                 )
-            high = end + PAD_S
-            if transcript.duration is not None:
-                high = min(high, transcript.duration)
-            found.append(Span(kind, start, end, (max(0.0, start - PAD_S), high)))
+            duration = transcript.duration
+            if duration is None:
+                raise InputValidationError(
+                    f"{path} records no duration, so its spans cannot be placed in the recording"
+                )
+            clip = (
+                None if start >= duration else (max(0.0, start - PAD_S), min(end + PAD_S, duration))
+            )
+            found.append(Span(kind, start, end, clip))
     return sorted(found, key=lambda span: (span.start, span.end, span.kind))
 
 
@@ -171,10 +205,8 @@ def _proposer(transcript: Transcript, path: Path) -> str:
     return named
 
 
-def _cut(audio: Path, span: Span, clip: Path, run: Runner) -> None:
-    start, end = span.clip
-    if end <= start:
-        raise InputValidationError(f"span at {span.start:g} s is past the recording's end")
+def _cut(audio: Path, window: tuple[float, float], clip: Path, run: Runner) -> None:
+    start, end = window
     timing = ["-ss", f"{start:.3f}", "-t", f"{end - start:.3f}"]
     # Absolute, so a colon in a relative name is not read as a protocol.
     argv = ["ffmpeg", "-nostdin", "-v", "error", *timing, "-i", str(audio.absolute()), "-vn"]
@@ -182,10 +214,15 @@ def _cut(audio: Path, span: Span, clip: Path, run: Runner) -> None:
 
 
 def _xai_vote(
-    client: XaiStt, audio: Path, span: Span, clip: Path, keyterms: Sequence[str], run: Runner
+    client: XaiStt,
+    audio: Path,
+    window: tuple[float, float],
+    clip: Path,
+    keyterms: Sequence[str],
+    run: Runner,
 ) -> Vote:
     try:
-        _cut(audio, span, clip, run)
+        _cut(audio, window, clip, run)
         payload = client.transcribe(clip, model=DEFAULT_MODEL, diarize=False, keyterms=keyterms)
         try:
             reply = XaiResponse.model_validate(payload)
@@ -194,7 +231,7 @@ def _xai_vote(
     except AppError as exc:
         reason = " ".join(str(exc).split())
         return Vote(engine=XAI, model=DEFAULT_MODEL, status="failed", reason=reason)
-    offset = span.clip[0]
+    offset = window[0]
     words = [
         HeardWord(text=word.text, start=word.start + offset, end=word.end + offset)
         for word in reply.words
@@ -202,23 +239,55 @@ def _xai_vote(
     return Vote(engine=XAI, model=DEFAULT_MODEL, status="heard", text=reply.text, words=words)
 
 
-def _local_votes(audio: Path, spans: Sequence[Span], hear: Hear) -> list[list[Vote]]:
+def _token_cap(clips: Sequence[tuple[float, float]]) -> int:
+    longest = max((end - start for start, end in clips), default=0.0)
+    return max(_MIN_TOKENS, math.ceil(TOKENS_PER_S * longest))
+
+
+def _local_votes(
+    audio: Path, clips: Sequence[tuple[float, float]], ears: Ears, cap: int
+) -> list[list[Vote]]:
+    """Each clip's vote from each recognizer, each run on its own so a failure is its own."""
     try:
-        heard = hear(audio, [span.clip for span in spans])
-    # OSError too: the run's temporary directory can fail to be made.
+        ears.resolve()
+    # OSError too: the cache lookup can fail on a file it cannot read.
     except (EarError, OSError) as exc:
         reason = " ".join(str(exc).split())
         missing = [
             Vote(engine=spec.name, model=spec.model, status="not run", reason=reason)
             for spec in RECOGNIZERS
         ]
-        return [missing for _ in spans]
+        return [missing for _ in clips]
+    by_engine: list[list[Vote]] = []
+    for spec in RECOGNIZERS:
+        try:
+            (heard,) = ears.hear(audio, clips, max_new_tokens=cap, recognizers=(spec,))
+        # OSError too: the run's temporary directory can fail to be made.
+        except (EarError, OSError) as exc:
+            failed = Vote(
+                engine=spec.name,
+                model=spec.model,
+                status="failed",
+                reason=" ".join(str(exc).split()),
+            )
+            by_engine.append([failed] * len(clips))
+            continue
+        by_engine.append(
+            [
+                Vote(engine=spec.name, model=spec.model, status="heard", text=text)
+                for text in heard.texts
+            ]
+        )
+    return [list(votes) for votes in zip(*by_engine, strict=True)]
+
+
+def _out_of_range(span: Span, duration: float | None) -> list[Vote]:
+    end = "" if duration is None else f" at {duration:g} s"
+    reason = f"starts at {span.start:g} s, at or past the recording's end{end}"
+    engines = [(XAI, DEFAULT_MODEL), *((spec.name, spec.model) for spec in RECOGNIZERS)]
     return [
-        [
-            Vote(engine=ear.recognizer.name, model=ear.recognizer.model, status="heard", text=text)
-            for ear, text in ((ear, ear.texts[index]) for ear in heard)
-        ]
-        for index in range(len(spans))
+        Vote(engine=engine, model=model, status="out of range", reason=reason)
+        for engine, model in engines
     ]
 
 
@@ -227,7 +296,7 @@ def recheck(
     path: Path,
     audio: Path,
     client: XaiStt,
-    hear: Hear,
+    ears: Ears,
     *,
     transcript_sha256: str,
     source_sha256: str,
@@ -237,15 +306,17 @@ def recheck(
     """Collect every engine's vote on each span `transcript`'s fill filled or flagged.
 
     A span whose clip cannot be cut or whose request fails gets a failed
-    vote, and the rest go on; local recognizers this host cannot run get a
-    vote saying so on every span.
+    vote, and the rest go on. Local recognizers this host cannot run get a
+    `not run` vote on every span, and one that fails a `failed` vote of its
+    own. Every engine's vote on a span past the recording's end is `out of
+    range`, and nothing is sent for it.
 
     Args:
         transcript: A filled transcript, read from `path`.
         path: Where it was read from, to name in an error.
         audio: The recording, already checked to be the transcript's.
         client: Sends each clip to xAI.
-        hear: Reads all the clips of `audio` with the local recognizers.
+        ears: The local recognizers.
         transcript_sha256: The transcript file's hash, recorded with the votes.
         source_sha256: The recording's hash, recorded with the votes.
         run: Runs ffmpeg.
@@ -263,8 +334,10 @@ def recheck(
     proposer = _proposer(transcript, path) if spans else ""
     if which("ffmpeg") is None:
         raise ToolMissingError("ffmpeg is not on PATH; the clips are cut with it")
-    checked: list[CheckedSpan] = []
-    if spans:
+    clips = [span.clip for span in spans if span.clip is not None]
+    cap = _token_cap(clips)
+    xai: list[Vote] = []
+    if clips:
         try:
             # A directory left behind costs disk; failing on it would discard the votes in hand.
             scratch = tempfile.TemporaryDirectory(
@@ -274,25 +347,32 @@ def recheck(
             raise InputValidationError(f"cannot make a working directory: {exc}") from exc
         with scratch as workdir:
             xai = [
-                _xai_vote(client, audio, span, Path(workdir, f"{index}.mp3"), keyterms, run)
-                for index, span in enumerate(spans)
+                _xai_vote(client, audio, clip, Path(workdir, f"{index}.mp3"), keyterms, run)
+                for index, clip in enumerate(clips)
             ]
-        local = _local_votes(audio, spans, hear)
-        checked = [
+    heard = iter(zip(xai, _local_votes(audio, clips, ears, cap) if clips else [], strict=True))
+    checked: list[CheckedSpan] = []
+    for span in spans:
+        if span.clip is None:
+            votes = _out_of_range(span, transcript.duration)
+        else:
+            grok, others = next(heard)
+            votes = [grok, *others]
+        checked.append(
             CheckedSpan(
                 kind=span.kind,
                 start=span.start,
                 end=span.end,
                 clip=span.clip,
                 proposed_by=proposer,
-                votes=[grok, *others],
+                votes=votes,
             )
-            for span, grok, others in zip(spans, xai, local, strict=True)
-        ]
+        )
     return Recheck(
         transcript_sha256=transcript_sha256,
         source_sha256=source_sha256,
         model=DEFAULT_MODEL,
         pad_s=PAD_S,
+        local_max_new_tokens=cap,
         spans=checked,
     )

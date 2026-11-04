@@ -247,14 +247,17 @@ class LocalEars:
         *,
         max_new_tokens: int = 256,
         offline: bool = True,
+        recognizers: Sequence[Recognizer] = RECOGNIZERS,
     ) -> tuple[Heard, ...]:
-        """Transcribe each of `clips` of `audio`, in seconds, by each recognizer in turn.
+        """Transcribe each of `clips` of `audio`, in seconds, by each of `recognizers` in turn.
 
         Args:
             audio: The recording.
             clips: Start and end of each stretch, each transcribed on its own.
             max_new_tokens: Ceiling on the tokens each recognizer writes for one clip.
             offline: Use only what uv and Hugging Face have cached; download nothing.
+            recognizers: Which of RECOGNIZERS run, so a caller can tell one's failure
+                from another's.
 
         Raises:
             EarError: `resolve` failed, a working file could not be written, or the
@@ -275,7 +278,7 @@ class LocalEars:
             self._spawn(decode, "ffmpeg", child_env(*TOKENLESS))
             return tuple(
                 self._worker(tools.uvx, spec, samples, clips, max_new_tokens, offline=offline)
-                for spec in RECOGNIZERS
+                for spec in recognizers
             )
 
     def _worker(
