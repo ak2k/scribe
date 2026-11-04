@@ -42,9 +42,10 @@ class FakeWorker:
         stderr: str = "",
         error: Exception | None = None,
         decode_returncode: int = 0,
+        audio_s: float = 0.0,
     ) -> None:
         self.reply, self.returncode, self.stdout, self.stderr = reply, returncode, stdout, stderr
-        self.error, self.decode_returncode = error, decode_returncode
+        self.error, self.decode_returncode, self.audio_s = error, decode_returncode, audio_s
         self.calls: list[list[str]] = []
         self.envs: list[dict[str, str]] = []
         self.timeouts: list[float] = []
@@ -58,7 +59,11 @@ class FakeWorker:
         self.envs.append(env)
         self.timeouts.append(timeout)
         if argv[0] == FFMPEG:
-            Path(argv[-1]).write_bytes(b"RIFF")
+            decoded = Path(argv[-1])
+            decoded.write_bytes(b"RIFF")
+            # Sparse: the length of `audio_s` of 16 kHz 16-bit mono without writing its bytes.
+            with decoded.open("r+b") as file:
+                file.truncate(max(4, round(self.audio_s * 16000 * 2)))
             return subprocess.CompletedProcess(argv, self.decode_returncode, "", "bad mp3")
         if self.error is not None:
             raise self.error

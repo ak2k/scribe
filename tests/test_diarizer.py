@@ -277,6 +277,31 @@ def test_a_supported_machine_runs_the_worker(tmp_path: Path, host: tuple[str, st
     assert [argv[0] for argv in fake.calls] == [FFMPEG, UVX]
 
 
+_FOUR_HOURS_S = 4 * 3600.0
+
+
+def test_the_worker_is_given_longer_than_the_audio_lasts_on_a_host_without_apple_s_gpu(
+    tmp_path: Path,
+) -> None:
+    fake = FakeWorker(audio_s=_FOUR_HOURS_S)
+
+    _backend(fake, host=("Linux", "x86_64")).diarize(_audio(tmp_path), [(0.0, 3.0)])
+
+    decode_s, worker_s = fake.timeouts
+    assert decode_s == DEFAULT_TIMEOUT_S
+    assert worker_s > _FOUR_HOURS_S
+
+
+def test_the_worker_s_ceiling_on_apple_silicon_does_not_grow_with_the_audio(
+    tmp_path: Path,
+) -> None:
+    fake = FakeWorker(audio_s=_FOUR_HOURS_S)
+
+    _backend(fake).diarize(_audio(tmp_path), [(0.0, 3.0)])
+
+    assert fake.timeouts == [DEFAULT_TIMEOUT_S, DEFAULT_TIMEOUT_S]
+
+
 def test_a_null_embedding_is_kept_as_none() -> None:
     raw = json.dumps(answer([[0.0, 1.0], [1.0, 2.0]], embeddings=[None, [0.0] * DIMENSION]))
 
