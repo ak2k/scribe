@@ -144,20 +144,39 @@ def test_a_model_that_cannot_load_is_one_line_naming_its_cause(
     assert not (tmp_path / "out.json").exists()
 
 
-@pytest.mark.parametrize(
-    ("mps", "cuda", "device"),
-    [(True, True, "mps"), (False, True, "cuda"), (False, False, "cpu")],
-    ids=["mps", "cuda", "cpu"],
-)
-def test_the_model_runs_on_the_first_device_torch_can_use_of_mps_cuda_and_cpu(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, mps: bool, cuda: bool, device: str
+def test_a_gpu_torch_cannot_use_is_one_line(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    code = _run(tmp_path, monkeypatch, RECOGNIZERS[0], mps=False)
+
+    _, err = capsys.readouterr()
+    assert code == 1
+    assert err.splitlines() == [f"{FAILED}torch cannot use the Metal GPU (mps) here"]
+    assert not (tmp_path / "out.json").exists()
+
+
+def test_a_mac_whose_torch_has_no_mps_is_refused_before_the_model_loads(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # A model that would load: the CPU would still answer, with words the vote was not measured on.
     ear = _Ear()
 
-    code = _run(tmp_path, monkeypatch, RECOGNIZERS[0], mps=mps, cuda=cuda, ear=ear)
+    code = _run(tmp_path, monkeypatch, RECOGNIZERS[0], mps=False, ear=ear)
+
+    _, err = capsys.readouterr()
+    assert code == 1
+    assert err.splitlines() == [f"{FAILED}torch cannot use the Metal GPU (mps) here"]
+    assert ear.loads == []
+    assert not (tmp_path / "out.json").exists()
+
+
+def test_the_model_runs_on_the_metal_gpu(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    ear = _Ear()
+
+    code = _run(tmp_path, monkeypatch, RECOGNIZERS[0], mps=True, ear=ear)
 
     assert code == 0
-    assert json.loads((tmp_path / "out.json").read_text(encoding="utf-8"))["device"] == device
+    assert json.loads((tmp_path / "out.json").read_text(encoding="utf-8"))["device"] == "mps"
 
 
 @pytest.mark.parametrize("name", TOKEN_NAMES)
