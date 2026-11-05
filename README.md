@@ -247,7 +247,10 @@ the wrong app. Files from one Audio Hijack session need no offset; for files
 recorded apart, `--offset SECONDS` gives how much later the microphone runs.
 It writes `call-mic.merged.json` beside the microphone's transcript, or the
 path `--out` gives, and prints a line counting the words kept and dropped. On
-a merged transcript, `turns` skips its speaker pass and its audio naming.
+a merged transcript, `turns` runs its speaker pass and its audio naming on the
+call app's words alone, the audio naming in `call-app.mp4` (read from where
+`transcribe` was run, or given as `--audio`); the microphone's words keep the
+`--me` label.
 
 On a Mac, `scribe call-watch` presses Run and Stop for you. It starts an Audio
 Hijack session, `Call` unless `--session` names another (changing the name leaves

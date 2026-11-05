@@ -15,7 +15,7 @@ from scribe.diarizer import DIMENSION, PyannoteDiarizer
 from scribe.schema import Engine, Source, Track, Transcript, Word
 from scribe.turns import turns_from_speakers
 from tests.diarizer_fakes import FakeWorker, answer, found
-from tests.speakers_fakes import FakeSpeakerBackend
+from tests.speakers_fakes import FakeSpeakerBackend, echo
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -95,13 +95,16 @@ def _swap(monkeypatch: pytest.MonkeyPatch, fake: FakeWorker) -> None:
 
 
 def _backends(
-    monkeypatch: pytest.MonkeyPatch, **kwargs: Callable[[str], str]
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    reply: Callable[[str], str] = echo,
+    trailer: Callable[[str], str] | None = None,
 ) -> list[FakeSpeakerBackend]:
     made: list[FakeSpeakerBackend] = []
 
     def factory(*, model: str, disable_tools: bool) -> FakeSpeakerBackend:
         assert disable_tools
-        made.append(FakeSpeakerBackend(model=model, **kwargs))
+        made.append(FakeSpeakerBackend(model=model, reply=reply, trailer=trailer))
         return made[-1]
 
     monkeypatch.setattr("scribe.cli.ClaudeCliBackend", factory)
@@ -151,9 +154,7 @@ def test_merged_audio_naming_names_app_words_from_the_app_recording(
     assert result.stderr.splitlines()[-1] == "scribe: the diarizer named 2 of 2 unattributed words"
     written = _written()
     expected = _expected(TALK, lambda speaker: speaker or 7)
-    assert written.turns == turns_from_speakers(
-        written.words, expected, tracks=written.tracks
-    )
+    assert written.turns == turns_from_speakers(written.words, expected, tracks=written.tracks)
     _mic_turns_are_mine(written, TALK)
     assert written.engine.params["diarizer_named"] == 2
 
@@ -285,8 +286,22 @@ def test_merged_speaker_pass_still_runs_without_the_app_recording(
     assert "the source audio app.mp3 does not exist" in result.stderr
 
 
+SKIPPED = [
+    "scribe: speaker pass skipped: call.json holds 2 call-app tracks, "
+    "and the pass reads exactly one",
+    "scribe: audio naming skipped: call.json holds 2 call-app tracks, and naming reads exactly one",
+]
+
+
+@pytest.mark.parametrize(
+    ("flags", "lines"),
+    [
+        pytest.param([], SKIPPED, id="both-asked"),
+        pytest.param(["--no-llm-speakers", "--no-audio-speakers"], [], id="neither-asked"),
+    ],
+)
 def test_a_transcript_with_two_app_tracks_skips_both_passes(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, flags: list[str], lines: list[str]
 ) -> None:
     monkeypatch.chdir(tmp_path)
     source = Source(kind="audio", ref="x.mp3")
@@ -307,13 +322,8 @@ def test_a_transcript_with_two_app_tracks_skips_both_passes(
     ).dump(tmp_path / "call.json")
     made = _backends(monkeypatch)
 
-    result = runner.invoke(app, ["turns", "call.json", "--stdout"])
+    result = runner.invoke(app, ["turns", "call.json", "--stdout", *flags])
 
     assert result.exit_code == 0, result.output
     assert made == []
-    assert result.stderr.splitlines() == [
-        "scribe: speaker pass skipped: call.json holds 2 call-app tracks, "
-        "and the pass reads exactly one",
-        "scribe: audio naming skipped: call.json holds 2 call-app tracks, "
-        "and naming reads exactly one",
-    ]
+    assert result.stderr.splitlines() == lines
