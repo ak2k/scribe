@@ -320,7 +320,7 @@ def test_a_merged_input_is_refused_where_its_tracks_would_be_lost(
     assert _snapshot(tmp_path) == before
 
 
-def test_turns_on_a_merged_transcript_skip_both_speaker_passes(tmp_path: Path) -> None:
+def test_turns_on_a_call_with_one_far_speaker_runs_neither_speaker_pass(tmp_path: Path) -> None:
     merged = _merged(tmp_path)
 
     result = runner.invoke(app, ["turns", str(merged), "--attendees", "Bruno", "--stdout"])
@@ -328,11 +328,11 @@ def test_turns_on_a_merged_transcript_skip_both_speaker_passes(tmp_path: Path) -
     assert result.exit_code == 0, result.output
     assert result.stdout.startswith("**Me**")
     assert "**Speaker 1**" in result.stdout
-    lines = result.stderr.splitlines()
-    assert len(lines) == 2
-    assert "speaker pass skipped" in lines[0]
-    assert "--attendees names nobody" in lines[0]
-    assert "audio naming skipped" in lines[1]
+    # The operator is no second speaker for the far side's passes to tell apart.
+    assert result.stderr.splitlines() == [
+        "scribe: names from the words: no speaker pass ran (fewer than two speakers), "
+        "so nobody was named"
+    ]
 
 
 def test_turns_off_flags_on_a_merged_transcript_print_nothing_to_stderr(tmp_path: Path) -> None:

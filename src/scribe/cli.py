@@ -18,7 +18,7 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from functools import partial
 from pathlib import Path
-from typing import TYPE_CHECKING, NoReturn
+from typing import TYPE_CHECKING, NamedTuple, NoReturn
 
 import typer
 from pydantic import ValidationError
@@ -833,7 +833,10 @@ def turns(
         "match agrees.",
     ),
     audio: Path | None = typer.Option(
-        None, "--audio", help="The recording, for --audio-speakers. Default: INPUT's source audio."
+        None,
+        "--audio",
+        help="The recording, for --audio-speakers. Default: INPUT's source audio, "
+        "or a merged INPUT's call app side.",
     ),
     to_stdout: bool = typer.Option(
         False, "--stdout", help="Print the markdown to stdout and write nothing."
@@ -881,6 +884,14 @@ def turns(
     numbers checked. What was named goes to the turns JSON's engine params. A
     failure is one stderr line, and the words stay unattributed.
 
+    On a transcript `merge` wrote, the microphone's words keep its label and
+    are never moved, named or given a name. The speaker pass reads them as
+    context with no speaker, and changes only the call app's words; a name
+    pointed at the microphone's turn names nobody. The audio naming hears
+    only the call app's words, in the app side's source audio, or in --audio,
+    which is then that recording. The sidecar counts the app side's words.
+    A merged transcript without exactly one app track runs neither pass.
+
     Exit 2 is a bad input, an unwritable output, or, with the pass on, no usable
     claude CLI, found before anything is written; so are --audio with
     --no-audio-speakers, an --audio that does not exist or is not a regular
@@ -900,17 +911,21 @@ def turns(
     except AppError as exc:
         _fail(exc)
 
-    llm_speakers, audio_speakers, listed = _passes(
+    llm_speakers, audio_speakers, listed, scope = _passes(
         transcript, input_path, llm=llm_speakers, audio=audio_speakers, attendees=listed
     )
 
     words = transcript.words
-    speakers = word_speakers(
+    settled = word_speakers(
         words,
         min_turn_seconds=min_turn_seconds,
         min_turn_words=min_turn_words,
         snap_words=snap_words,
     )
+    # The passes see every word, so the far side's turns keep the mic's replies between
+    # them, but a word out of scope has no speaker to them: none is moved to or from it.
+    held = frozenset(scope.held)
+    speakers = [speaker if index in held else None for index, speaker in enumerate(settled)]
     relabeling = llm_speakers and needs_relabeling(speakers)
 
     directory = input_path.parent if out_dir is None else out_dir
@@ -953,12 +968,17 @@ def turns(
     # counts would describe turns this run builds only if it names the words again.
     engine = _without_naming(transcript.engine)
     # After the pass: it leaves unattributed words alone, and could undo a name from audio.
+    # Only the words heard in the scope's recording are named from it; with that recording
+    # missing or not the one transcribed, naming is one warning and the pass above stands.
     if audio_speakers:
-        speakers, engine = _name_from_audio(transcript, speakers, audio, engine)
+        speakers, engine = _name_scope_from_audio(words, speakers, scope, audio, engine)
     # After the audio names, which can add a turn for a pointer to land on.
     names, engine, naming = _name_from_words(
         words, speakers, None if relabeled is None else relabeled[0], listed, engine
     )
+    speakers = [
+        speaker if index in held else settled[index] for index, speaker in enumerate(speakers)
+    ]
     built = (
         transcript
         if not words
@@ -973,32 +993,79 @@ def turns(
     if plan is None:
         typer.echo(to_markdown(built), nl=False)
     else:
-        _write_turn_artifacts(plan, directory, formats, built, relabeled, naming)
+        _write_turn_artifacts(
+            plan, directory, formats, built, relabeled, naming, words=len(scope.held)
+        )
     if relabeled is not None:
-        _finish_speakers(*relabeled, words=len(words), printed=plan is None)
+        _finish_speakers(*relabeled, words=len(scope.held), printed=plan is None)
+
+
+# Not a dataclass, which needs its module in sys.modules: this one also loads from its file alone.
+class _Scope(NamedTuple):
+    """The indexes of the words the speaker passes may change, and the recording they are in."""
+
+    held: tuple[int, ...]
+    source: Source
+
+
+def _pass_scope(transcript: Transcript) -> _Scope | None:
+    """Every word of one recording; a merged call's app-side words; None for other merges.
+
+    A mic side is one person, already labeled, and its voice is not in the app
+    recording, so the passes may change only the app side, and only where one
+    app track says which recording that is.
+    """
+    words = transcript.words
+    if transcript.tracks is None:
+        return _Scope(tuple(range(len(words))), transcript.source)
+    apps = [index for index, track in enumerate(transcript.tracks) if track.role == "app"]
+    if len(apps) != 1:
+        return None
+    (track,) = apps
+    held = tuple(index for index, word in enumerate(words) if word.track == track)
+    return _Scope(held, transcript.tracks[track].source)
 
 
 def _passes(
     transcript: Transcript, input_path: Path, *, llm: bool, audio: bool, attendees: tuple[str, ...]
-) -> tuple[bool, bool, tuple[str, ...]]:
-    """The speaker passes to run, and the attendees: none of them on a merged transcript.
+) -> tuple[bool, bool, tuple[str, ...], _Scope]:
+    """The speaker passes to run, the attendees, and the words the passes may change.
 
-    Neither pass keeps a merged transcript's tracks apart yet; each one asked
-    for and skipped is one stderr line.
+    Where `_pass_scope` finds none, no pass runs and no attendee is named; each
+    pass asked for and skipped is one stderr line.
     """
-    if transcript.tracks is None:
-        return llm, audio, attendees
+    scope = _pass_scope(transcript)
+    if scope is not None:
+        return llm, audio, attendees, scope
+    apps = sum(track.role == "app" for track in transcript.tracks or ())
+    held = f"{input_path} holds {apps} call-app tracks"
     if llm:
         named = "; --attendees names nobody" if attendees else ""
-        _warn(
-            f"speaker pass skipped: {input_path} merges two tracks, and the pass "
-            f"does not keep them apart yet{named}"
-        )
+        _warn(f"speaker pass skipped: {held}, and the pass reads exactly one{named}")
     if audio:
-        _warn(
-            f"audio naming skipped: {input_path} merges two tracks, and naming needs one recording"
-        )
-    return False, False, ()
+        _warn(f"audio naming skipped: {held}, and naming reads exactly one")
+    return False, False, (), _Scope((), transcript.source)
+
+
+def _name_scope_from_audio(
+    words: Sequence[Word],
+    speakers: Sequence[int | None],
+    scope: _Scope,
+    audio: Path | None,
+    engine: Engine,
+) -> tuple[list[int | None], Engine]:
+    """`_name_from_audio` on the scope's words alone, in the scope's recording."""
+    heard, engine = _name_from_audio(
+        [words[index] for index in scope.held],
+        [speakers[index] for index in scope.held],
+        scope.source,
+        audio,
+        engine,
+    )
+    named = list(speakers)
+    for index, speaker in zip(scope.held, heard, strict=True):
+        named[index] = speaker
+    return named, engine
 
 
 def _check_attendees(attendees: str | None, *, llm_speakers: bool) -> tuple[str, ...]:
@@ -1039,14 +1106,18 @@ def _source_audio(source: Source, audio: Path | None) -> Path:
 
 
 def _name_from_audio(
-    transcript: Transcript, speakers: list[int | None], audio: Path | None, engine: Engine
+    words: Sequence[Word],
+    speakers: list[int | None],
+    source: Source,
+    audio: Path | None,
+    engine: Engine,
 ) -> tuple[list[int | None], Engine]:
     """Name the unattributed words from the audio and record it in `engine`; never fail the run."""
     if not attribution.can_name(speakers):
         return speakers, engine
-    words, unattributed = transcript.words, speakers.count(None)
+    unattributed = speakers.count(None)
     try:
-        path = _source_audio(transcript.source, audio)
+        path = _source_audio(source, audio)
         backend = PyannoteDiarizer()
         backend.resolve()
         _warn(
@@ -1134,6 +1205,8 @@ def _write_turn_artifacts(
     built: Transcript,
     relabeled: tuple[Relabeling, ClaudeCliBackend] | None,
     naming: dict[str, object] | None,
+    *,
+    words: int,
 ) -> None:
     try:
         if Format.json in formats:
@@ -1146,7 +1219,7 @@ def _write_turn_artifacts(
             plan[Format.vtt].write_text(to_vtt(built), encoding="utf-8")
         if relabeled is not None:
             plan[_SPEAKERS_SIDECAR].write_text(
-                _speakers_metadata(*relabeled, words=len(built.words), naming=naming),
+                _speakers_metadata(*relabeled, words=words, naming=naming),
                 encoding="utf-8",
             )
     except OSError as exc:
