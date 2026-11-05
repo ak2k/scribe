@@ -11,10 +11,8 @@ import ctypes
 import hashlib
 import json
 import struct
-import subprocess
 import time
-from collections import deque
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from enum import Enum
 from functools import cache
 from typing import TYPE_CHECKING, Literal, NoReturn, Protocol
@@ -37,10 +35,8 @@ GRACE_SECONDS = 30.0
 READBACK_SECONDS = 5.0
 RESEND_SECONDS = 30.0
 OUTAGE_SECONDS = 30.0
-REMINDER_SECONDS = 1800.0
 POLL_SECONDS = 1.0
 HOOK_TIMEOUT_SECONDS = 10.0
-NOTIFY_WAITING_MAX = 10
 
 DEFAULT_SESSION = "Call"
 # Plain prefixes: Chrome's microphone sits on helpers that carry its ID, and Teams ships
@@ -52,13 +48,6 @@ DEFAULT_APPS = (
     "com.apple.avconferenced",
     "com.apple.TelephonyUtilities",
 )
-_APP_NAMES = {
-    "com.google.Chrome": "Google Chrome",
-    "us.zoom.": "Zoom",
-    "com.microsoft.teams": "Microsoft Teams",
-    "com.apple.avconferenced": "FaceTime",
-    "com.apple.TelephonyUtilities": "Phone",
-}
 HIJACK_BUNDLE_ID = "com.rogueamoeba.audiohijack"
 
 _NOTIFY_ARGV = (
@@ -100,7 +89,6 @@ class Timings:
     readback_seconds: float = READBACK_SECONDS
     resend_seconds: float = RESEND_SECONDS
     outage_seconds: float = OUTAGE_SECONDS
-    reminder_seconds: float = REMINDER_SECONDS
 
 
 TIMINGS = Timings()
@@ -108,14 +96,7 @@ TIMINGS = Timings()
 
 @dataclass(frozen=True)
 class Idle:
-    """No session of this watcher's is believed to be running.
-
-    `hijack_since` is when Audio Hijack began holding input with no call app holding
-    it, and `reminded` whether that stretch has been reminded about.
-    """
-
-    hijack_since: float | None = None
-    reminded: bool = False
+    """No session of this watcher's is believed to be running."""
 
 
 @dataclass(frozen=True)
@@ -133,14 +114,9 @@ class Starting:
 
 @dataclass(frozen=True)
 class Recording:
-    """A start is read back. `holding` is False once a release during the call was noted.
-
-    `hold_read` is True once a read of this process held Audio Hijack's bundle, which a
-    session restored from the marker has not had.
-    """
+    """A start is read back. `holding` is False once a release during the call was noted."""
 
     holding: bool = True
-    hold_read: bool = False
 
 
 @dataclass(frozen=True)
@@ -149,15 +125,12 @@ class Stopping:
 
     `marker` is "stopping" once a stop has gone out. `sent_at` is None until then, and
     after a restart, until the first good read starts the read-back again.
-    `was_recording` is True when the stop ends a recording during which a read of this
-    process held Audio Hijack's bundle.
     """
 
     marker: Marker
     sent_at: float | None = None
     last_sent_at: float = 0.0
     warned: bool = False
-    was_recording: bool = False
 
 
 type Session = Idle | Starting | Recording | Stopping
@@ -232,35 +205,6 @@ _READS_FAILING = Note(
     "error",
     "Cannot read which apps hold the microphone, so calls are not being watched.",
 )
-_STOP_DONE = Note("call_watch.stop_done", notify="The call ended, and recording stopped.")
-
-
-def _app_name(bundle: str) -> str:
-    lowered = bundle.lower()
-    for prefix, name in _APP_NAMES.items():
-        if lowered.startswith(prefix.lower()):
-            return name
-    return bundle
-
-
-def _start_confirmed(call_apps: tuple[str, ...]) -> Note:
-    names = list(dict.fromkeys(_app_name(bundle) for bundle in call_apps))
-    text = "Recording started."
-    if names:
-        listed = names[0] if len(names) == 1 else f"{', '.join(names[:-1])} and {names[-1]}"
-        text = f"Recording started for the call in {listed}."
-    return Note("call_watch.start_confirmed", notify=text, apps=call_apps)
-
-
-def _reminder(seconds: float) -> Note:
-    minutes = seconds / 60
-    length = f"{minutes:g} minute{'' if minutes == 1 else 's'}"
-    return Note(
-        "call_watch.recording_without_call",
-        "warning",
-        f"Audio Hijack has held the microphone for {length} with no call detected. "
-        "Press Stop in Audio Hijack if you do not need this recording.",
-    )
 
 
 def _is_hijack(bundle: str) -> bool:
@@ -341,20 +285,12 @@ class _Tick:
 
 
 def _idle(tick: _Tick, session: Idle) -> Step:
-    if tick.call_confirmed:
-        return tick.start()
-    # A session this watcher did not start is never stopped by it, only reminded about.
-    if tick.call_held or not tick.hijack:
-        return tick.step(Idle())
-    since = tick.clock if session.hijack_since is None else session.hijack_since
-    if session.reminded or tick.clock - since < tick.timings.reminder_seconds:
-        return tick.step(Idle(since, session.reminded))
-    return tick.step(Idle(since, reminded=True), notes=(_reminder(tick.timings.reminder_seconds),))
+    return tick.start() if tick.call_confirmed else tick.step(session)
 
 
 def _starting(tick: _Tick, session: Starting) -> Step:
     if tick.hijack:
-        return tick.step(Recording(hold_read=True), notes=(_start_confirmed(tick.call_apps),))
+        return tick.step(Recording(), notes=(Note("call_watch.start_confirmed"),))
     if tick.call_ended:
         return tick.step(Stopping("sent"))
     window = session.window_from
@@ -373,41 +309,35 @@ def _starting(tick: _Tick, session: Starting) -> Step:
 
 
 def _recording(tick: _Tick, session: Recording) -> Step:
-    if tick.hijack:
-        session = replace(session, hold_read=True)
     if tick.call_ended:
-        return tick.step(Stopping("confirmed", was_recording=session.hold_read))
+        return tick.step(Stopping("confirmed"))
     # Only while the call holds input: a person's Stop as a call ends loses nothing.
     if tick.call_held and session.holding != tick.hijack:
         note = Note("call_watch.recording_resumed") if tick.hijack else _RELEASED
-        return tick.step(replace(session, holding=tick.hijack), notes=(note,))
+        return tick.step(Recording(tick.hijack), notes=(note,))
     return tick.step(session)
 
 
-def _first_stop(tick: _Tick, session: Stopping) -> Step:
+def _first_stop(tick: _Tick, marker: Marker) -> Step:
     # A stop now would end a session that is capturing the call that came back.
     if tick.call_held:
-        if session.marker == "sent":
+        if marker == "sent":
             return _starting(tick, Starting())
-        return _recording(tick, Recording(hold_read=session.was_recording))
+        return _recording(tick, Recording())
     if tick.hijack or tick.running:
-        was_recording = session.marker == "confirmed" and (session.was_recording or tick.hijack)
-        stopping = Stopping("stopping", tick.clock, tick.clock, was_recording=was_recording)
-        return tick.step(stopping, "stop")
+        return tick.step(Stopping("stopping", tick.clock, tick.clock), "stop")
     return tick.step(Idle(), notes=(Note("call_watch.stop_not_needed"),))
 
 
 def _stopping(tick: _Tick, session: Stopping) -> Step:
     if session.marker != "stopping":
-        return _first_stop(tick, session)
+        return _first_stop(tick, session.marker)
     sent_at = session.sent_at
     if sent_at is None:
         sent_at = tick.clock
-        session = replace(session, sent_at=sent_at, last_sent_at=sent_at)
+        session = Stopping("stopping", sent_at, sent_at)
     if not tick.hijack:
-        # A stop that follows no read-back start may have ended a recording of nothing.
-        done = _STOP_DONE if session.was_recording else Note("call_watch.stop_done")
-        return tick.step(Idle(), notes=(done,))
+        return tick.step(Idle(), notes=(Note("call_watch.stop_done"),))
     # A start sent before the stop takes effect does nothing, and the release that follows
     # would count as a person's Stop. Past the window the hold may be another session's,
     # which never ends.
@@ -718,37 +648,6 @@ def require_macos(platform: str) -> None:
         raise UnsupportedPlatformError("call-watch runs only on macOS")
 
 
-class Child(Protocol):
-    """A started process that is not waited on."""
-
-    pid: int
-
-    def poll(self) -> int | None:
-        """Return the exit status once it has exited, reaping it, else None."""
-        ...
-
-    def kill(self) -> None:
-        """Kill this process, and no other."""
-        ...
-
-
-def start_detached(argv: Sequence[str]) -> Child:  # pragma: no cover
-    """Start `argv` with no pipes and return without waiting for it."""
-    return subprocess.Popen(  # noqa: S603  # a fixed macOS program, the text as an argument
-        list(argv),
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-
-
-@dataclass
-class _Notifying:
-    child: Child
-    started: float
-    killed: bool = False
-
-
 @dataclass
 class _Edges:
     """The watcher's side effects. None of them may end the loop."""
@@ -756,11 +655,8 @@ class _Edges:
     directory: Path
     session: str
     runner: Runner
-    spawn: Callable[[Sequence[str]], Child] = start_detached
     saved: Marker | None = None
     marker_failing: bool = False
-    notifying: _Notifying | None = None
-    waiting: deque[str] = field(default_factory=deque[str])
 
     @property
     def _marker_path(self) -> Path:
@@ -820,7 +716,7 @@ class _Edges:
             return
         _logger().info("call_watch.sent", session=self.session, action=action)
 
-    def report(self, note: Note, error: str | None, now: float) -> None:
+    def report(self, note: Note, error: str | None) -> None:
         log = _logger().bind(session=self.session)
         if note.apps:
             log = log.bind(apps=list(note.apps))
@@ -835,49 +731,10 @@ class _Edges:
                 log.error(note.event)
         if note.notify is None:
             return
-        self.waiting.append(note.notify)
-        if len(self.waiting) > NOTIFY_WAITING_MAX:
-            self.waiting.popleft()
-            self._notify_failed(f"more than {NOTIFY_WAITING_MAX} notifications waiting")
-        self._notify_next(now)
-
-    def reap(self, now: float) -> None:
-        """Collect the notification that has exited, kill one past the timeout, start the next."""
-        notifying = self.notifying
-        if notifying is not None:
-            code = notifying.child.poll()
-            if code is None:
-                if not notifying.killed and now - notifying.started >= HOOK_TIMEOUT_SECONDS:
-                    notifying.killed = True
-                    self._kill(notifying.child)
-                return
-            if code != 0 and not notifying.killed:
-                self._notify_failed(f"exit {code}")
-            self.notifying = None
-        self._notify_next(now)
-
-    def _notify_next(self, now: float) -> None:
-        # One at a time, so banners appear in the order their changes happened. Not waited
-        # on: a slow notification would delay the next poll and could miss a call.
-        while self.notifying is None and self.waiting:
-            text = self.waiting.popleft()
-            try:
-                child = self.spawn([*_NOTIFY_ARGV, text])
-            except Exception as exc:  # noqa: BLE001  # a failure to notify changes nothing else
-                self._notify_failed(str(exc))
-                continue
-            self.notifying = _Notifying(child, now)
-
-    def _kill(self, child: Child) -> None:
         try:
-            child.kill()
+            self.runner([*_NOTIFY_ARGV, note.notify], HOOK_TIMEOUT_SECONDS)
         except Exception as exc:  # noqa: BLE001  # a failure to notify changes nothing else
-            self._notify_failed(f"no answer within {HOOK_TIMEOUT_SECONDS:g} s: {exc}")
-            return
-        self._notify_failed(f"no answer within {HOOK_TIMEOUT_SECONDS:g} s")
-
-    def _notify_failed(self, error: str) -> None:
-        _logger().error("call_watch.notify_failed", session=self.session, error=error)
+            _logger().error("call_watch.notify_failed", session=self.session, error=str(exc))
 
     def hijack_running(self) -> bool:
         try:
@@ -909,10 +766,9 @@ def _poll(
     # restart that forgets the session, and a failed write is retried on every poll.
     edges.save_marker(step.state.marker)
     for note in step.notes:
-        edges.report(note, error, now)
+        edges.report(note, error)
     if step.action is not None:
         edges.send(step.action)
-    edges.reap(now)
     return step.state
 
 
@@ -924,7 +780,6 @@ def watch(
     timings: Timings = TIMINGS,
     reader: Callable[[], frozenset[str]] = read_input_holders,
     runner: Runner = run_program,
-    spawn: Callable[[Sequence[str]], Child] = start_detached,
     clock: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], None] = time.sleep,
     poll_seconds: float = POLL_SECONDS,
@@ -938,7 +793,6 @@ def watch(
         timings: The waits.
         reader: Returns the bundle IDs holding input, or raises when it cannot.
         runner: Runs an argv with a timeout and returns its standard output.
-        spawn: Starts a notification's argv and returns without waiting for it.
         clock: The monotonic time.
         sleep: Waits between polls.
         poll_seconds: The time between polls.
@@ -947,7 +801,7 @@ def watch(
         ExternalServiceError: the state directory cannot be used.
 
     """
-    edges = _Edges(directory, session, runner, spawn)
+    edges = _Edges(directory, session, runner)
     edges.load_marker()
     state = restored_state(edges.saved)
     while True:
