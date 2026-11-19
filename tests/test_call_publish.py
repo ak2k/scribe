@@ -7,6 +7,7 @@ import os
 import socket
 import subprocess
 import sys
+import threading
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
@@ -26,6 +27,7 @@ cli = CliRunner()
 
 MIC = "Call 20261118 0958 mic.mp4"
 APP = "Call 20261118 0958 app.mp4"
+RECEIPT = "Call 20261118 0958.published.json"
 SECONDS = 12.3456
 # Fixed and well apart, so the sidecar's start and end can be told apart.
 BIRTH = 1_795_000_000
@@ -54,11 +56,14 @@ def _stem(folder: Path, name: str, body: bytes, mtime_ns: int) -> Path:
     return path
 
 
-def recorded(folder: Path, mic: str = MIC, far: str = APP) -> tuple[Path, Path]:
+def recorded(
+    folder: Path, mic: str = MIC, far: str = APP, *, call: bytes = b"mic side "
+) -> tuple[Path, Path]:
+    # `call` tells two recordings of the same sizes apart.
     folder.mkdir(parents=True, exist_ok=True)
     return (
-        _stem(folder, mic, b"mic side " * 1000, MIC_MTIME_NS),
-        _stem(folder, far, b"app side " * 1500, APP_MTIME_NS),
+        _stem(folder, mic, call * 1000, MIC_MTIME_NS),
+        _stem(folder, far, call.replace(b"mic", b"app") * 1500, APP_MTIME_NS),
     )
 
 
@@ -158,7 +163,7 @@ def test_the_stems_move_whole_with_their_sidecar(tmp_path: Path) -> None:
     paths = publish(mic, far, out, run=ffprobe())
 
     assert paths == (out.resolve() / mic_name, out.resolve() / far_name)
-    assert listing(tmp_path / "rec") == []
+    assert listing(tmp_path / "rec") == ["Call 20261118 0958 2.published.json"]
     assert listing(out) == sorted([mic_name, far_name, "Call 20261118 0958 2.json"])
     assert paths[0].read_bytes() == want["mic"][0]
     assert paths[1].read_bytes() == want["app"][0]
@@ -309,7 +314,7 @@ def test_a_different_file_at_a_final_name_sends_the_pair_to_the_next_number(
         "md5": md5(paths[0]),
         "duration_ms": 12346,
     }
-    assert listing(tmp_path / "rec") == []
+    assert listing(tmp_path / "rec") == [RECEIPT]
 
 
 def test_a_same_size_file_of_other_content_is_not_taken_for_the_published_stem(
@@ -377,13 +382,13 @@ def test_a_rerun_after_a_numbered_publish_recovers_onto_its_number(
     with monkeypatch.context() as patched:
         patched.setattr(Path, "unlink", stuck)
         first = publish(mic, far, out, run=ffprobe())
-    assert listing(tmp_path / "rec") == sorted([MIC, APP])
+    assert listing(tmp_path / "rec") == sorted([MIC, APP, RECEIPT])
     (out / "Call 20261118 0958 2.json").unlink()
 
     again = publish(mic, far, out, run=ffprobe())
 
     assert again == first == _published_as(out, " 2")
-    assert listing(tmp_path / "rec") == []
+    assert listing(tmp_path / "rec") == [RECEIPT]
     assert (out / "Call 20261118 0958 2.json").exists()
     assert not (out / "Call 20261118 0958 mic 3.mp4").exists()
 
@@ -402,7 +407,7 @@ def test_a_published_pair_is_left_as_it_is_and_gets_a_missing_sidecar(tmp_path: 
     assert again == first
     assert car.read_bytes() == written
     assert listing(out) == sorted([MIC, APP, car.name])
-    assert listing(tmp_path / "rec") == []
+    assert listing(tmp_path / "rec") == [RECEIPT]
 
 
 def test_a_published_pair_keeps_the_sidecar_it_has(tmp_path: Path) -> None:
@@ -428,7 +433,7 @@ def test_a_source_already_copied_whole_is_deleted_and_the_sidecar_written(tmp_pa
     paths = publish(mic, far, out, run=ffprobe())
 
     assert paths == (out.resolve() / MIC, out.resolve() / APP)
-    assert listing(tmp_path / "rec") == []
+    assert listing(tmp_path / "rec") == [RECEIPT]
     assert listing(out) == sorted([MIC, APP, "Call 20261118 0958.json"])
     stems = sidecar(out / "Call 20261118 0958.json")["stems"]
     assert isinstance(stems, dict)
@@ -441,7 +446,7 @@ def test_a_missing_stem_is_refused(tmp_path: Path) -> None:
     out = tmp_path / "out"
     out.mkdir()
 
-    with pytest.raises(AppError, match="no app recording"):
+    with pytest.raises(AppError, match="published copy not found"):
         publish(mic, far, out, run=ffprobe())
 
     assert listing(out) == []
@@ -461,7 +466,7 @@ def test_cli_expands_the_folder_and_prints_the_two_paths(
     assert result.exit_code == 0, result.output
     out = (tmp_path / "Calls").resolve()
     assert result.stdout == f"{out / MIC}\n{out / APP}\n"
-    assert listing(tmp_path / "rec") == []
+    assert listing(tmp_path / "rec") == [RECEIPT]
 
 
 def test_cli_exits_2_on_a_failure_and_prints_no_paths(
@@ -536,14 +541,14 @@ def test_a_source_that_cannot_be_deleted_still_publishes_and_a_rerun_removes_it(
     assert result.exit_code == 0, result.output
     assert result.stdout == f"{out.resolve() / MIC}\n{out.resolve() / APP}\n"
     assert "cannot delete a published source" in result.stderr
-    assert listing(tmp_path / "rec") == [APP]
+    assert listing(tmp_path / "rec") == sorted([APP, RECEIPT])
     assert listing(out) == sorted([MIC, APP, "Call 20261118 0958.json"])
 
     again = cli.invoke(app, ["call-publish", str(mic), str(far), "--to", str(out)])
 
     assert again.exit_code == 0, again.output
     assert again.stdout == result.stdout
-    assert listing(tmp_path / "rec") == []
+    assert listing(tmp_path / "rec") == [RECEIPT]
 
 
 def test_a_copy_of_the_right_size_but_other_bytes_leaves_nothing(
@@ -594,7 +599,7 @@ def test_a_failed_sidecar_write_keeps_both_sources_and_a_rerun_finishes(
 
     publish(mic, far, out, run=ffprobe())
 
-    assert listing(tmp_path / "rec") == []
+    assert listing(tmp_path / "rec") == [RECEIPT]
     assert listing(out) == sorted([MIC, APP, "Call 20261118 0958.json"])
 
 
@@ -615,7 +620,7 @@ def test_a_final_that_changes_before_the_delete_keeps_both_sources(
 
     monkeypatch.setattr(Path, "replace", replace)
 
-    with pytest.raises(AppError, match="not their sources' size"):
+    with pytest.raises(AppError, match="not this call's"):
         publish(mic, far, out, run=ffprobe())
 
     assert listing(tmp_path / "rec") == sorted([MIC, APP])
@@ -631,7 +636,7 @@ def test_a_pair_stopped_between_its_renames_is_finished(tmp_path: Path) -> None:
 
     assert paths == _published_as(out, "")
     assert paths[1].read_bytes() == b"app side " * 1500
-    assert listing(tmp_path / "rec") == []
+    assert listing(tmp_path / "rec") == [RECEIPT]
     assert listing(out) == sorted([MIC, APP, "Call 20261118 0958.json"])
 
 
@@ -659,3 +664,123 @@ def test_a_duration_under_a_millisecond_is_refused_before_anything_moves(tmp_pat
         publish(mic, far, out, run=ffprobe(0.0004))
 
     _refused_whole(tmp_path, (mic, far), out)
+
+
+def test_two_publishers_of_one_name_install_one_pair_and_the_loser_keeps_its_sources(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first = recorded(tmp_path / "a")
+    second = recorded(tmp_path / "b", call=b"MIC SIDE ")
+    assert [path.stat().st_size for path in first] == [path.stat().st_size for path in second]
+    bodies = {
+        "a": tuple(path.read_bytes() for path in first),
+        "b": tuple(path.read_bytes() for path in second),
+    }
+    out = tmp_path / "out"
+    out.mkdir()
+    a_verified, b_verified, a_done = threading.Event(), threading.Event(), threading.Event()
+    real = os.utime
+
+    # The first time stamp a run makes falls after it verified its copies and
+    # before its renames: A waits there while B stages and verifies, and B
+    # waits there until A has finished.
+    def utime(path: Path, *, ns: tuple[int, int]) -> None:
+        name = threading.current_thread().name
+        if name == "a" and not a_verified.is_set():
+            a_verified.set()
+            assert b_verified.wait(5)
+        elif name == "b" and not b_verified.is_set():
+            b_verified.set()
+            assert a_done.wait(5)
+        real(path, ns=ns)
+
+    monkeypatch.setattr(os, "utime", utime)
+    outcome: dict[str, tuple[Path, Path] | BaseException] = {}
+
+    def run(name: str, stems: tuple[Path, Path]) -> None:
+        try:
+            outcome[name] = publish(*stems, out, run=ffprobe())
+        except BaseException as exc:  # noqa: BLE001  # handed to the test thread to assert on
+            outcome[name] = exc
+        finally:
+            if name == "a":
+                a_done.set()
+
+    a = threading.Thread(target=run, args=("a", first), name="a")
+    b = threading.Thread(target=run, args=("b", second), name="b")
+    a.start()
+    assert a_verified.wait(5)
+    b.start()
+    a.join(10)
+    b.join(10)
+
+    assert outcome["a"] == _published_as(out, "")
+    assert ((out / MIC).read_bytes(), (out / APP).read_bytes()) == bodies["a"]
+    assert isinstance(outcome["b"], AppError)
+    assert "appeared while publishing" in str(outcome["b"])
+    assert listing(out) == sorted([MIC, APP, "Call 20261118 0958.json"])
+    assert listing(tmp_path / "a") == [RECEIPT]
+    assert listing(tmp_path / "b") == sorted([MIC, APP])
+
+    monkeypatch.setattr(os, "utime", real)
+    again = publish(*second, out, run=ffprobe())
+
+    assert again == _published_as(out, " 2")
+    assert (again[0].read_bytes(), again[1].read_bytes()) == bodies["b"]
+    assert listing(tmp_path / "b") == [RECEIPT]
+
+
+def test_a_repeat_after_a_renumbered_publish_returns_the_renumbered_pair(tmp_path: Path) -> None:
+    out = tmp_path / "out"
+    out.mkdir()
+    older = publish(*recorded(tmp_path / "rec"), out, run=ffprobe())
+    newer = recorded(tmp_path / "rec", call=b"MIC SIDE ")
+    bodies = tuple(path.read_bytes() for path in newer)
+
+    published = publish(*newer, out, run=ffprobe())
+    again = publish(*newer, out, run=ffprobe())
+
+    assert older == _published_as(out, "")
+    assert published == again == _published_as(out, " 2")
+    assert (again[0].read_bytes(), again[1].read_bytes()) == bodies
+    receipt = sidecar(tmp_path / "rec" / RECEIPT)
+    assert receipt == {
+        "mic": {"path": str(published[0]), "md5": md5(published[0])},
+        "app": {"path": str(published[1]), "md5": md5(published[1])},
+    }
+
+
+def test_published_copies_without_a_receipt_are_not_taken_for_the_sources(tmp_path: Path) -> None:
+    mic, far = recorded(tmp_path / "rec")
+    out = tmp_path / "out"
+    out.mkdir()
+    for path in (mic, far):
+        (out / path.name).write_bytes(path.read_bytes())
+        path.unlink()
+
+    with pytest.raises(AppError, match="published copy not found"):
+        publish(mic, far, out, run=ffprobe())
+
+    assert listing(out) == sorted([MIC, APP])
+
+
+def test_a_published_copy_that_changed_since_its_receipt_is_not_taken(tmp_path: Path) -> None:
+    mic, far = recorded(tmp_path / "rec")
+    out = tmp_path / "out"
+    out.mkdir()
+    publish(mic, far, out, run=ffprobe())
+    (out / APP).write_bytes(b"app side " * 1499 + b"APP SIDE ")
+
+    with pytest.raises(AppError, match="published copy not found"):
+        publish(mic, far, out, run=ffprobe())
+
+
+def test_an_unreadable_receipt_is_not_taken(tmp_path: Path) -> None:
+    mic, far = recorded(tmp_path / "rec")
+    out = tmp_path / "out"
+    out.mkdir()
+    publish(mic, far, out, run=ffprobe())
+    (tmp_path / "rec" / RECEIPT).write_text('{"mic": {}}', encoding="utf-8")
+
+    with pytest.raises(AppError, match="published copy not found: unreadable"):
+        publish(mic, far, out, run=ffprobe())

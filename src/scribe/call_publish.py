@@ -13,23 +13,24 @@ import fcntl
 import hashlib
 import os
 import re
+import secrets
 import shutil
 import socket
 import subprocess
 import sys
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 import structlog
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from scribe.errors import AppError, InputValidationError, NotFoundError, PublishError
 from scribe.gemini_stt import probe_duration
 
 if TYPE_CHECKING:
     from collections.abc import Generator, Mapping
-    from pathlib import Path
 
     from structlog.stdlib import BoundLogger
 
@@ -85,6 +86,24 @@ class Sidecar(BaseModel):
     end: str
     host: str
     stems: Stems
+
+
+class ReceiptStem(BaseModel):
+    """Where one stem was published, and the md5 it had there."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    path: str
+    md5: str = Field(pattern=r"^[0-9a-f]{32}$")
+
+
+class Receipt(BaseModel):
+    """Left in the recorder folder before a publish deletes its sources."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    mic: ReceiptStem
+    app: ReceiptStem
 
 
 @dataclass(frozen=True)
@@ -167,6 +186,29 @@ def _measure(path: Path, run: Runner) -> _Measured:
     )
 
 
+def _staging(final: Path) -> Path:
+    # Per run and created exclusively, so no other run's staged bytes can be
+    # verified, overwritten or installed as this run's.
+    part = final.with_name(f"{final.name}.{os.getpid()}-{secrets.token_hex(4)}{PART}")
+    os.close(os.open(part, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644))
+    return part
+
+
+def _write_json(path: Path, text: str) -> None:
+    part: Path | None = None
+    try:
+        part = _staging(path)
+        with part.open("w", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        part.replace(path)
+    except OSError as exc:
+        if part is not None:
+            part.unlink(missing_ok=True)
+        raise PublishError(f"cannot write {path}: {exc.strerror or exc}") from exc
+
+
 def copy_stem(source: Path, part: Path) -> None:
     """Copy a stem's bytes to its .part name in the publish folder."""
     shutil.copyfile(source, part)
@@ -196,16 +238,7 @@ def _write_sidecar(path: Path, measured: Mapping[Side, _Measured], host: str) ->
         host=host,
         stems=Stems(mic=mic.record, app=far.record),
     )
-    part = path.with_name(path.name + PART)
-    try:
-        with part.open("w", encoding="utf-8") as handle:
-            handle.write(car.model_dump_json(by_alias=True, indent=2) + "\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        part.replace(path)
-    except OSError as exc:
-        part.unlink(missing_ok=True)
-        raise PublishError(f"cannot write {path}: {exc.strerror or exc}") from exc
+    _write_json(path, car.model_dump_json(by_alias=True, indent=2) + "\n")
 
 
 def _sync_folder(folder: Path) -> None:
@@ -287,7 +320,8 @@ def publish(
             _write_sidecar(folder / f"{base}{_suffix(number)}.json", measured, machine)
             _logger().info("call sidecar written", call=base, folder=str(folder), moved=False)
             return folder / mic.name, folder / far.name
-        return _publish_into(target, base, number, sources, probe, machine)
+        receipt = folder / f"{base}{_suffix(number)}.published.json"
+        return _publish_into(target, base, number, sources, receipt, probe, machine)
 
 
 def _publish_into(
@@ -295,6 +329,7 @@ def _publish_into(
     base: str,
     number: int,
     sources: Mapping[Side, Path],
+    receipt: Path,
     probe: Runner,
     machine: str,
 ) -> tuple[Path, Path]:
@@ -303,7 +338,11 @@ def _publish_into(
     measured: dict[Side, _Measured] = {
         side: _measure(sources[side], probe) for side in SIDES if sources[side].exists()
     }
-    slot = _choose_slot(target, base, number, {s: m.record for s, m in measured.items()})
+    present: dict[Side, StemRecord] = {side: found.record for side, found in measured.items()}
+    if len(present) == len(SIDES):
+        slot = _choose_slot(target, base, number, present)
+    else:
+        slot = _receipt_slot(receipt, target, base, present)
     finals = slot.finals
     log = _logger().bind(call=slot.sidecar.stem, folder=str(target))
     if all(step == "done" for step in slot.steps.values()) and slot.sidecar.exists():
@@ -321,16 +360,23 @@ def _publish_into(
     _write_sidecar(slot.sidecar, measured, machine)
     _sync_folder(target)
     leaving: list[Side] = [side for side in SIDES if slot.steps[side] != "done"]
-    try:
-        whole = all(finals[side].stat().st_size == measured[side].record.size for side in leaving)
-        whole = whole and slot.sidecar.exists()
-    except OSError as exc:
-        raise PublishError(f"cannot check the published stems: {exc.strerror or exc}") from exc
-    if not whole:
-        raise PublishError(f"the stems in {target} are not their sources' size; kept the sources")
+    if not leaving:
+        log.info("call sidecar written", moved=False)
+        return finals["mic"], finals["app"]
+    # Another run can install its own pair between this run's check and rename,
+    # so a source goes only while its own bytes sit at the final it names.
+    ours = all(_md5_of(finals[side]) == measured[side].record.md5 for side in leaving)
+    if not (ours and slot.sidecar.exists()):
+        raise PublishError(f"the stems in {target} are not this call's; kept the sources")
+    ticket = Receipt(
+        mic=ReceiptStem(path=str(finals["mic"]), md5=measured["mic"].record.md5),
+        app=ReceiptStem(path=str(finals["app"]), md5=measured["app"].record.md5),
+    )
+    _write_json(receipt, ticket.model_dump_json(indent=2) + "\n")
+    _sync_folder(receipt.parent)
     for side in leaving:
-        # Both copies and the sidecar are in place, so a source left here is
-        # only a leftover, which the next run's equal-content step removes.
+        # Both copies, the sidecar and the receipt are in place, so a source
+        # left here is a leftover, which the next run's equal-content step removes.
         try:
             sources[side].unlink()
         except OSError as exc:
@@ -347,24 +393,65 @@ def _choose_slot(target: Path, base: str, number: int, present: Mapping[Side, St
         suffix = _suffix(number)
         finals: dict[Side, Path] = {side: target / f"{base} {side}{suffix}.mp4" for side in SIDES}
         steps: dict[Side, Step] = {}
-        free = True
         for side in SIDES:
-            exists = finals[side].exists()
-            free = free and not exists
-            want = present.get(side)
-            if want is None:
-                if exists:
-                    steps[side] = "done"
-            elif not exists:
+            if not finals[side].exists():
                 steps[side] = "copy"
-            elif _same_content(finals[side], want):
+            elif _same_content(finals[side], present[side]):
                 steps[side] = "drop"
         if len(steps) == len(SIDES):
             return _Slot(finals=finals, sidecar=target / f"{base}{suffix}.json", steps=steps)
-        if free:
-            missing = next(side for side in SIDES if side not in present)
-            raise NotFoundError(f"no {missing} recording of {base} to publish, and none published")
         number += 1
+
+
+def _receipt_slot(
+    receipt: Path, target: Path, base: str, present: Mapping[Side, StemRecord]
+) -> _Slot:
+    # A missing source was published only where its receipt says, with the md5
+    # it had: a file that merely carries its name may be another call's.
+    ticket = _read_receipt(receipt)
+    finals: dict[Side, Path] = {"mic": Path(ticket.mic.path), "app": Path(ticket.app.path)}
+    md5s: dict[Side, str] = {"mic": ticket.mic.md5, "app": ticket.app.md5}
+    try:
+        published, number = _split(finals["mic"], finals["app"])
+    except InputValidationError as exc:
+        raise PublishError(f"published copy not found: {receipt} names no pair") from exc
+    if published != base or not all(_same_folder(f.parent, target) for f in finals.values()):
+        raise PublishError(f"published copy not found: {receipt} names no pair in {target}")
+    steps: dict[Side, Step] = {}
+    for side in SIDES:
+        want = present.get(side)
+        if want is None:
+            if _md5_of(finals[side]) != md5s[side]:
+                raise PublishError(f"published copy not found: {finals[side]} is gone or changed")
+            steps[side] = "done"
+        elif want.md5 != md5s[side]:
+            raise PublishError(f"{receipt} names another recording than {want.name}")
+        elif not finals[side].exists():
+            steps[side] = "copy"
+        elif _same_content(finals[side], want):
+            steps[side] = "drop"
+        else:
+            raise PublishError(f"{finals[side]} differs from its source")
+    return _Slot(finals=finals, sidecar=target / f"{base}{_suffix(number)}.json", steps=steps)
+
+
+def _read_receipt(receipt: Path) -> Receipt:
+    try:
+        return Receipt.model_validate_json(receipt.read_bytes())
+    except FileNotFoundError as exc:
+        raise PublishError(f"published copy not found: no receipt at {receipt}") from exc
+    except (OSError, ValidationError) as exc:
+        reason = " ".join(str(exc).split())
+        raise PublishError(f"published copy not found: unreadable {receipt}: {reason}") from exc
+
+
+def _md5_of(final: Path) -> str | None:
+    try:
+        return _digest(final)[1]
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise PublishError(f"cannot read {final}: {exc.strerror or exc}") from exc
 
 
 def _same_content(final: Path, source: StemRecord) -> bool:
@@ -382,10 +469,11 @@ def _move(
     finals: Mapping[Side, Path],
     measured: Mapping[Side, _Measured],
 ) -> None:
-    parts = {side: finals[side].with_name(finals[side].name + PART) for side in copying}
+    parts: dict[Side, Path] = {}
     renamed: list[Side] = []
     try:
         for side in copying:
+            parts[side] = _staging(finals[side])
             copy_stem(sources[side], parts[side])
             if _digest(parts[side]) != (measured[side].record.size, measured[side].record.md5):
                 raise PublishError(f"the copy of {sources[side]} does not match it")
@@ -403,6 +491,7 @@ def _move(
                 finals[side].rename(parts[side])
             except OSError as undo:
                 _logger().error("cannot take a stem back", path=str(finals[side]), error=str(undo))
+        # Only this run's own staged files; another run's are not ours to remove.
         for part in parts.values():
             with contextlib.suppress(OSError):
                 part.unlink(missing_ok=True)
