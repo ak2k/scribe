@@ -316,16 +316,20 @@ def test_a_same_size_file_of_other_content_is_not_taken_for_the_published_stem(
     tmp_path: Path,
 ) -> None:
     mic, far = recorded(tmp_path / "rec")
-    want = far.read_bytes()
+    want = (mic.read_bytes(), far.read_bytes())
     out = tmp_path / "out"
     out.mkdir()
-    others = _other_call(out, MIC, APP, size=len(want))
-    assert others[APP] != want
+    # Each side's name holds other bytes of exactly that side's size.
+    others = {
+        **_other_call(out, MIC, size=len(want[0])),
+        **_other_call(out, APP, size=len(want[1])),
+    }
+    assert (others[MIC], others[APP]) != want
 
     paths = publish(mic, far, out, run=ffprobe())
 
     assert paths == _published_as(out, " 2")
-    assert paths[1].read_bytes() == want
+    assert (paths[0].read_bytes(), paths[1].read_bytes()) == want
     assert (out / MIC).read_bytes() == others[MIC]
     assert (out / APP).read_bytes() == others[APP]
 
