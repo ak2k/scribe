@@ -277,9 +277,12 @@ whole: each is copied to a `.part` name and checked, given the source's
 creation and modification times, and renamed, and the sources are deleted
 last. It never overwrites a file: when DIR already holds another recording
 under a name, the pair goes under the next free number (`... mic 2.mp4`,
-`... app 2.mp4`), as a second run in the same minute is named. A rerun
-finishes what a failed run left, and a second run on the same pair at once
-exits with nothing done. With `PUBLISH_TO` empty the files stay where they
+`... app 2.mp4`), as a second run in the same minute is named. Before deleting
+the sources it leaves a receipt in the recorder folder (`Call 20261118
+0958.published.json`) naming the published paths and their md5s, and a later
+run whose sources are gone prints those paths only while the files there still
+match it. A rerun finishes what a failed run left, and a second run on the
+same pair at once exits with nothing done. With `PUBLISH_TO` empty the files stay where they
 were recorded. Either way `call-publish` writes a sidecar beside them, named
 for the pair (`Call 20261118 0958.json` for `Call 20261118 0958 mic.mp4` and
 `... app.mp4`, the names the shipped session gives, or `Call 20261118 0958

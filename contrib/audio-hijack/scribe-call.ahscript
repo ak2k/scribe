@@ -46,15 +46,16 @@ const MIC = / mic( \d+)?$/;
     // XAI_API_KEY itself, such as a wrapper script that reads the key from a file and runs scribe.
     // call-publish writes the call's sidecar, moves the pair when PUBLISH_TO names a folder, and
     // prints the mic and app paths it leaves, one per line; its log goes to stderr. When it fails,
-    // the work goes on with the recordings where they are. The skip also looks beside the
-    // recorder's path, where a stop whose publish failed merged the call.
+    // the work goes on with the recordings where they are. The skip looks only beside the path
+    // the work runs on: a merged file left in the recorder folder may be an earlier call's under a
+    // reused name. The cost is that a publish that fails and later succeeds transcribes again.
     const publish =
       "scribe call-publish \"$1\" \"$2\"" + (PUBLISH_TO ? " --to " + q(PUBLISH_TO) : "");
     const work =
-      "o=\"$1\"; if p=$(" + publish + "); then " +
+      "if p=$(" + publish + "); then " +
       "set -- \"$(printf '%s\\n' \"$p\" | sed -n 1p)\" \"$(printf '%s\\n' \"$p\" | sed -n 2p)\"; " +
       "else printf '%s publish failed: %s\\n' \"$(date)\" \"$1\"; fi; " +
-      "{ [ -e \"${1%.*}.merged.json\" ] || [ -e \"${o%.*}.merged.json\" ]; } && { printf '%s skip: %s is already merged\\n' \"$(date)\" \"$1\"; exit 0; }; " +
+      "[ -e \"${1%.*}.merged.json\" ] && { printf '%s skip: %s is already merged\\n' \"$(date)\" \"$1\"; exit 0; }; " +
       "scribe transcribe \"$1\" --no-diarize && scribe transcribe \"$2\" && " +
       "scribe merge \"${1%.*}.transcript.json\" \"${2%.*}.transcript.json\" && " +
       "scribe turns \"${1%.*}.merged.json\"; " +
