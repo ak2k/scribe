@@ -9,6 +9,7 @@ synced folder compares with the copies it sees.
 from __future__ import annotations
 
 import contextlib
+import fcntl
 import hashlib
 import os
 import re
@@ -16,7 +17,7 @@ import shutil
 import socket
 import subprocess
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Literal
 
@@ -27,7 +28,7 @@ from scribe.errors import AppError, InputValidationError, NotFoundError, Publish
 from scribe.gemini_stt import probe_duration
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Generator, Mapping
     from pathlib import Path
 
     from structlog.stdlib import BoundLogger
@@ -94,8 +95,16 @@ class _Measured:
     mtime_ns: int
 
 
-def pair_name(mic: Path, far: Path) -> str:
-    """Return the name a mic and app stem of one call share, as the sidecar is named."""
+@dataclass(frozen=True)
+class _Slot:
+    """Where a pair is published: its numbered names in the folder, and what each side needs."""
+
+    finals: Mapping[Side, Path]
+    sidecar: Path
+    steps: Mapping[Side, Step]
+
+
+def _split(mic: Path, far: Path) -> tuple[str, int]:
     mine, theirs = STEM.fullmatch(mic.name), STEM.fullmatch(far.name)
     if (
         mine is None
@@ -106,7 +115,17 @@ def pair_name(mic: Path, far: Path) -> str:
         raise InputValidationError(
             f"not the mic and app pair of one call: {mic.name!r} and {far.name!r}"
         )
-    return mine[1] + (mine[3] or "")
+    return mine[1], int(mine[3]) if mine[3] else 1
+
+
+def _suffix(number: int) -> str:
+    return "" if number == 1 else f" {number}"
+
+
+def pair_name(mic: Path, far: Path) -> str:
+    """Return the name a mic and app stem of one call share, as the sidecar is named."""
+    base, number = _split(mic, far)
+    return base + _suffix(number)
 
 
 def birth_time(info: os.stat_result) -> float | None:
@@ -137,9 +156,11 @@ def _measure(path: Path, run: Runner) -> _Measured:
         raise PublishError(f"cannot read {path}: {exc.strerror or exc}") from exc
     if size != info.st_size:
         raise PublishError(f"{path} changed while it was read")
-    seconds = probe_duration(path, run)
+    duration_ms = round(probe_duration(path, run) * 1000)
+    if duration_ms < 1:
+        raise PublishError(f"{path} lasts under a millisecond")
     return _Measured(
-        record=StemRecord(name=path.name, size=size, md5=md5, duration_ms=round(seconds * 1000)),
+        record=StemRecord(name=path.name, size=size, md5=md5, duration_ms=duration_ms),
         birth=birth_time(info),
         atime_ns=info.st_atime_ns,
         mtime_ns=info.st_mtime_ns,
@@ -204,6 +225,33 @@ def _same_folder(first: Path, second: Path) -> bool:
     return first == second
 
 
+@contextlib.contextmanager
+def _locked(path: Path) -> Generator[None]:
+    try:
+        descriptor = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    except OSError as exc:
+        raise PublishError(f"cannot open {path}: {exc.strerror or exc}") from exc
+    try:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise PublishError(f"another publish of this call holds {path}") from exc
+        # A run that locked a file another run then deleted holds nothing.
+        try:
+            held = path.stat().st_ino == os.fstat(descriptor).st_ino
+        except FileNotFoundError:
+            held = False
+        if not held:
+            raise PublishError(f"another publish of this call holds {path}")
+        try:
+            yield
+        finally:
+            with contextlib.suppress(OSError):
+                path.unlink()
+    finally:
+        os.close(descriptor)
+
+
 def short_host() -> str:
     """Return this machine's host name up to its first dot."""
     return socket.gethostname().split(".")[0]
@@ -221,10 +269,11 @@ def publish(
 
     Without `to`, or with the stems' own folder, nothing moves and the sidecar
     is written beside them. Otherwise both stems arrive whole or neither does,
-    and a source is deleted only once its copy and the sidecar are in place.
+    under the first number from the stems' own that holds no other recording,
+    and a source is deleted only once both copies and the sidecar are in place.
     A run after one that stopped partway finishes its work.
     """
-    name = pair_name(mic, far)
+    base, number = _split(mic, far)
     sources: dict[Side, Path] = {"mic": mic.absolute(), "app": far.absolute()}
     folder = sources["mic"].parent.resolve()
     if not _same_folder(sources["app"].parent.resolve(), folder):
@@ -232,64 +281,99 @@ def publish(
     probe = run if run is not None else default_run
     machine = host if host is not None else short_host()
     target = folder if to is None else to.expanduser().resolve()
-    log = _logger().bind(call=name, folder=str(target))
+    with _locked(folder / f"{base}{_suffix(number)}.lock"):
+        if _same_folder(target, folder):
+            measured: dict[Side, _Measured] = {s: _measure(sources[s], probe) for s in SIDES}
+            _write_sidecar(folder / f"{base}{_suffix(number)}.json", measured, machine)
+            _logger().info("call sidecar written", call=base, folder=str(folder), moved=False)
+            return folder / mic.name, folder / far.name
+        return _publish_into(target, base, number, sources, probe, machine)
 
-    if _same_folder(target, folder):
-        finals = (folder / mic.name, folder / far.name)
-        measured = {side: _measure(sources[side], probe) for side in SIDES}
-        _write_sidecar(folder / f"{name}.json", measured, machine)
-        log.info("call sidecar written", moved=False)
-        return finals
 
+def _publish_into(
+    target: Path,
+    base: str,
+    number: int,
+    sources: Mapping[Side, Path],
+    probe: Runner,
+    machine: str,
+) -> tuple[Path, Path]:
     if not target.is_dir():
         raise NotFoundError(f"no folder {target} to publish into")
-    finals_by: dict[Side, Path] = {side: target / sources[side].name for side in SIDES}
-    car = target / f"{name}.json"
-    steps = {side: _plan(sources[side], finals_by[side]) for side in SIDES}
-    if all(step == "done" for step in steps.values()) and car.exists():
+    measured: dict[Side, _Measured] = {
+        side: _measure(sources[side], probe) for side in SIDES if sources[side].exists()
+    }
+    slot = _choose_slot(target, base, number, {s: m.record for s, m in measured.items()})
+    finals = slot.finals
+    log = _logger().bind(call=slot.sidecar.stem, folder=str(target))
+    if all(step == "done" for step in slot.steps.values()) and slot.sidecar.exists():
         log.info("call already published")
-        return finals_by["mic"], finals_by["app"]
-
-    measured: dict[Side, _Measured] = {}
+        return finals["mic"], finals["app"]
     for side in SIDES:
-        held = finals_by[side] if steps[side] == "done" else sources[side]
-        measured[side] = _measure(held, probe)
-        if steps[side] == "drop":
-            _refuse_different(finals_by[side], measured[side].record)
+        if slot.steps[side] == "done":
+            measured[side] = _measure(finals[side], probe)
+        # The sidecar names the published file, which a taken name renumbers.
+        named = measured[side].record.model_copy(update={"name": finals[side].name})
+        measured[side] = replace(measured[side], record=named)
 
-    copying: list[Side] = [side for side in SIDES if steps[side] == "copy"]
-    _move(copying, sources, finals_by, measured)
-    _write_sidecar(car, measured, machine)
+    copying: list[Side] = [side for side in SIDES if slot.steps[side] == "copy"]
+    _move(copying, sources, finals, measured)
+    _write_sidecar(slot.sidecar, measured, machine)
     _sync_folder(target)
-    for side in SIDES:
-        if steps[side] == "done":
-            continue
+    leaving: list[Side] = [side for side in SIDES if slot.steps[side] != "done"]
+    try:
+        whole = all(finals[side].stat().st_size == measured[side].record.size for side in leaving)
+        whole = whole and slot.sidecar.exists()
+    except OSError as exc:
+        raise PublishError(f"cannot check the published stems: {exc.strerror or exc}") from exc
+    if not whole:
+        raise PublishError(f"the stems in {target} are not their sources' size; kept the sources")
+    for side in leaving:
+        # Both copies and the sidecar are in place, so a source left here is
+        # only a leftover, which the next run's equal-content step removes.
         try:
-            if finals_by[side].stat().st_size != measured[side].record.size:
-                raise PublishError(f"{finals_by[side]} is not its source's size; kept the source")
             sources[side].unlink()
         except OSError as exc:
-            raise PublishError(f"cannot delete {sources[side]}: {exc.strerror or exc}") from exc
+            # TRY400: an expected, recovered failure; a traceback would add nothing.
+            log.error("cannot delete a published source", path=str(sources[side]), error=str(exc))  # noqa: TRY400
     log.info("call published", copied=copying)
-    return finals_by["mic"], finals_by["app"]
+    return finals["mic"], finals["app"]
 
 
-def _plan(source: Path, final: Path) -> Step:
-    if source.exists():
-        return "drop" if final.exists() else "copy"
-    if final.exists():
-        return "done"
-    raise NotFoundError(f"no recording at {source}, and none published at {final}")
+def _choose_slot(target: Path, base: str, number: int, present: Mapping[Side, StemRecord]) -> _Slot:
+    # A final name is never overwritten: a pair whose names are taken by other
+    # recordings goes under the next number, as Audio Hijack would name it.
+    while True:
+        suffix = _suffix(number)
+        finals: dict[Side, Path] = {side: target / f"{base} {side}{suffix}.mp4" for side in SIDES}
+        steps: dict[Side, Step] = {}
+        free = True
+        for side in SIDES:
+            exists = finals[side].exists()
+            free = free and not exists
+            want = present.get(side)
+            if want is None:
+                if exists:
+                    steps[side] = "done"
+            elif not exists:
+                steps[side] = "copy"
+            elif _same_content(finals[side], want):
+                steps[side] = "drop"
+        if len(steps) == len(SIDES):
+            return _Slot(finals=finals, sidecar=target / f"{base}{suffix}.json", steps=steps)
+        if free:
+            missing = next(side for side in SIDES if side not in present)
+            raise NotFoundError(f"no {missing} recording of {base} to publish, and none published")
+        number += 1
 
 
-def _refuse_different(final: Path, source: StemRecord) -> None:
+def _same_content(final: Path, source: StemRecord) -> bool:
     try:
-        size = final.stat().st_size
-        same = size == source.size and _digest(final) == (source.size, source.md5)
+        if final.stat().st_size != source.size:
+            return False
+        return _digest(final) == (source.size, source.md5)
     except OSError as exc:
         raise PublishError(f"cannot read {final}: {exc.strerror or exc}") from exc
-    if not same:
-        raise InputValidationError(f"{final} already exists and differs from its source")
 
 
 def _move(

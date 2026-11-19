@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import os
@@ -269,18 +270,118 @@ def test_a_failed_probe_moves_nothing(tmp_path: Path) -> None:
     _refused_whole(tmp_path, (mic, far), out)
 
 
-def test_a_different_file_at_a_final_name_is_never_overwritten(tmp_path: Path) -> None:
+def _other_call(out: Path, *names: str, size: int | None = None) -> dict[str, bytes]:
+    # Another recording under a pair's names: the given size, else its own.
+    body = b"another call" if size is None else b"x" * size
+    for name in names:
+        (out / name).write_bytes(body)
+    return {name: body for name in names}
+
+
+def _published_as(out: Path, suffix: str) -> tuple[Path, Path]:
+    return (
+        out.resolve() / f"Call 20261118 0958 mic{suffix}.mp4",
+        out.resolve() / f"Call 20261118 0958 app{suffix}.mp4",
+    )
+
+
+def test_a_different_file_at_a_final_name_sends_the_pair_to_the_next_number(
+    tmp_path: Path,
+) -> None:
+    mic, far = recorded(tmp_path / "rec")
+    want = (mic.read_bytes(), far.read_bytes())
+    out = tmp_path / "out"
+    out.mkdir()
+    others = _other_call(out, APP)
+
+    paths = publish(mic, far, out, run=ffprobe())
+
+    assert paths == _published_as(out, " 2")
+    assert (paths[0].read_bytes(), paths[1].read_bytes()) == want
+    assert (out / APP).read_bytes() == others[APP]
+    assert not (out / MIC).exists()
+    assert listing(out) == sorted([APP, paths[0].name, paths[1].name, "Call 20261118 0958 2.json"])
+    stems = sidecar(out / "Call 20261118 0958 2.json")["stems"]
+    assert isinstance(stems, dict)
+    assert stems["mic"] == {
+        "name": paths[0].name,
+        "size": 9000,
+        "md5": md5(paths[0]),
+        "duration_ms": 12346,
+    }
+    assert listing(tmp_path / "rec") == []
+
+
+def test_a_same_size_file_of_other_content_is_not_taken_for_the_published_stem(
+    tmp_path: Path,
+) -> None:
+    mic, far = recorded(tmp_path / "rec")
+    want = far.read_bytes()
+    out = tmp_path / "out"
+    out.mkdir()
+    others = _other_call(out, MIC, APP, size=len(want))
+    assert others[APP] != want
+
+    paths = publish(mic, far, out, run=ffprobe())
+
+    assert paths == _published_as(out, " 2")
+    assert paths[1].read_bytes() == want
+    assert (out / MIC).read_bytes() == others[MIC]
+    assert (out / APP).read_bytes() == others[APP]
+
+
+def test_taken_numbers_are_skipped(tmp_path: Path) -> None:
     mic, far = recorded(tmp_path / "rec")
     out = tmp_path / "out"
     out.mkdir()
-    (out / APP).write_bytes(b"another call")
+    _other_call(out, MIC, APP, "Call 20261118 0958 mic 2.mp4", "Call 20261118 0958 app 3.mp4")
 
-    with pytest.raises(InputValidationError, match="differs"):
-        publish(mic, far, out, run=ffprobe())
+    paths = publish(mic, far, out, run=ffprobe())
 
+    assert paths == _published_as(out, " 4")
+    assert (out / "Call 20261118 0958 4.json").exists()
+
+
+def test_a_numbered_source_counts_from_its_own_number(tmp_path: Path) -> None:
+    mic_name, far_name = "Call 20261118 0958 mic 2.mp4", "Call 20261118 0958 app 2.mp4"
+    mic, far = recorded(tmp_path / "rec", mic_name, far_name)
+    out = tmp_path / "out"
+    out.mkdir()
+    _other_call(out, far_name)
+
+    paths = publish(mic, far, out, run=ffprobe())
+
+    assert paths == _published_as(out, " 3")
+    assert not (out / MIC).exists()
+    assert (out / "Call 20261118 0958 3.json").exists()
+
+
+def test_a_rerun_after_a_numbered_publish_recovers_onto_its_number(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    mic, far = recorded(tmp_path / "rec")
+    out = tmp_path / "out"
+    out.mkdir()
+    _other_call(out, MIC, APP)
+    real = Path.unlink
+
+    def stuck(self: Path, *, missing_ok: bool = False) -> None:
+        if self.parent.name == "rec" and self.suffix == ".mp4":
+            raise PermissionError(1, "Operation not permitted")
+        real(self, missing_ok=missing_ok)
+
+    with monkeypatch.context() as patched:
+        patched.setattr(Path, "unlink", stuck)
+        first = publish(mic, far, out, run=ffprobe())
     assert listing(tmp_path / "rec") == sorted([MIC, APP])
-    assert listing(out) == [APP]
-    assert (out / APP).read_bytes() == b"another call"
+    (out / "Call 20261118 0958 2.json").unlink()
+
+    again = publish(mic, far, out, run=ffprobe())
+
+    assert again == first == _published_as(out, " 2")
+    assert listing(tmp_path / "rec") == []
+    assert (out / "Call 20261118 0958 2.json").exists()
+    assert not (out / "Call 20261118 0958 mic 3.mp4").exists()
 
 
 def test_a_published_pair_is_left_as_it_is_and_gets_a_missing_sidecar(tmp_path: Path) -> None:
@@ -336,7 +437,7 @@ def test_a_missing_stem_is_refused(tmp_path: Path) -> None:
     out = tmp_path / "out"
     out.mkdir()
 
-    with pytest.raises(AppError, match="no recording"):
+    with pytest.raises(AppError, match="no app recording"):
         publish(mic, far, out, run=ffprobe())
 
     assert listing(out) == []
@@ -408,3 +509,149 @@ def test_a_missing_publish_folder_is_refused(tmp_path: Path) -> None:
 
     assert listing(tmp_path / "rec") == sorted([MIC, APP])
     assert not (tmp_path / "absent").exists()
+
+
+def test_a_source_that_cannot_be_deleted_still_publishes_and_a_rerun_removes_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("scribe.call_publish.default_run", ffprobe())
+    mic, far = recorded(tmp_path / "rec")
+    out = tmp_path / "out"
+    out.mkdir()
+    real = Path.unlink
+
+    def stuck(self: Path, *, missing_ok: bool = False) -> None:
+        if self == far:
+            raise PermissionError(1, "Operation not permitted")
+        real(self, missing_ok=missing_ok)
+
+    with monkeypatch.context() as patched:
+        patched.setattr(Path, "unlink", stuck)
+        result = cli.invoke(app, ["call-publish", str(mic), str(far), "--to", str(out)])
+
+    assert result.exit_code == 0, result.output
+    assert result.stdout == f"{out.resolve() / MIC}\n{out.resolve() / APP}\n"
+    assert "cannot delete a published source" in result.stderr
+    assert listing(tmp_path / "rec") == [APP]
+    assert listing(out) == sorted([MIC, APP, "Call 20261118 0958.json"])
+
+    again = cli.invoke(app, ["call-publish", str(mic), str(far), "--to", str(out)])
+
+    assert again.exit_code == 0, again.output
+    assert again.stdout == result.stdout
+    assert listing(tmp_path / "rec") == []
+
+
+def test_a_copy_of_the_right_size_but_other_bytes_leaves_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    mic, far = recorded(tmp_path / "rec")
+    out = tmp_path / "out"
+    out.mkdir()
+
+    def flipped(source: Path, part: Path) -> None:
+        body = bytearray(source.read_bytes())
+        body[len(body) // 2] ^= 0xFF
+        part.write_bytes(bytes(body))
+
+    monkeypatch.setattr("scribe.call_publish.copy_stem", flipped)
+
+    with pytest.raises(AppError, match="does not match"):
+        publish(mic, far, out, run=ffprobe())
+
+    _refused_whole(tmp_path, (mic, far), out)
+
+
+def _failing_sidecar_write(monkeypatch: pytest.MonkeyPatch) -> None:
+    real = Path.replace
+
+    def replace(self: Path, target: Path) -> Path:
+        if Path(target).suffix == ".json":
+            raise OSError(28, "No space left on device")
+        return real(self, target)
+
+    monkeypatch.setattr(Path, "replace", replace)
+
+
+def test_a_failed_sidecar_write_keeps_both_sources_and_a_rerun_finishes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    mic, far = recorded(tmp_path / "rec")
+    out = tmp_path / "out"
+    out.mkdir()
+
+    with monkeypatch.context() as patched:
+        _failing_sidecar_write(patched)
+        with pytest.raises(AppError, match="No space left"):
+            publish(mic, far, out, run=ffprobe())
+
+    assert listing(tmp_path / "rec") == sorted([MIC, APP])
+    assert listing(out) == sorted([MIC, APP])
+
+    publish(mic, far, out, run=ffprobe())
+
+    assert listing(tmp_path / "rec") == []
+    assert listing(out) == sorted([MIC, APP, "Call 20261118 0958.json"])
+
+
+def test_a_final_that_changes_before_the_delete_keeps_both_sources(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    mic, far = recorded(tmp_path / "rec")
+    out = tmp_path / "out"
+    out.mkdir()
+    real = Path.replace
+
+    def replace(self: Path, target: Path) -> Path:
+        done = real(self, target)
+        if Path(target).suffix == ".json":
+            with (out / APP).open("r+b") as handle:
+                handle.truncate(10)
+        return done
+
+    monkeypatch.setattr(Path, "replace", replace)
+
+    with pytest.raises(AppError, match="not their sources' size"):
+        publish(mic, far, out, run=ffprobe())
+
+    assert listing(tmp_path / "rec") == sorted([MIC, APP])
+
+
+def test_a_pair_stopped_between_its_renames_is_finished(tmp_path: Path) -> None:
+    mic, far = recorded(tmp_path / "rec")
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / MIC).write_bytes(mic.read_bytes())
+
+    paths = publish(mic, far, out, run=ffprobe())
+
+    assert paths == _published_as(out, "")
+    assert paths[1].read_bytes() == b"app side " * 1500
+    assert listing(tmp_path / "rec") == []
+    assert listing(out) == sorted([MIC, APP, "Call 20261118 0958.json"])
+
+
+def test_a_publish_already_running_for_the_pair_stops_this_one(tmp_path: Path) -> None:
+    mic, far = recorded(tmp_path / "rec")
+    out = tmp_path / "out"
+    out.mkdir()
+    lock = tmp_path / "rec" / "Call 20261118 0958.lock"
+
+    with lock.open("w") as held:
+        fcntl.flock(held.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        with pytest.raises(AppError, match="another publish"):
+            publish(mic, far, out, run=ffprobe())
+
+    assert listing(tmp_path / "rec") == sorted([MIC, APP, lock.name])
+    assert listing(out) == []
+
+
+def test_a_duration_under_a_millisecond_is_refused_before_anything_moves(tmp_path: Path) -> None:
+    mic, far = recorded(tmp_path / "rec")
+    out = tmp_path / "out"
+    out.mkdir()
+
+    with pytest.raises(AppError, match="under a millisecond"):
+        publish(mic, far, out, run=ffprobe(0.0004))
+
+    _refused_whole(tmp_path, (mic, far), out)

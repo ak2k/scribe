@@ -2434,7 +2434,9 @@ def call_publish_command(
 
     MIC and APP are Audio Hijack's "Call YYYYMMDD HHMM mic.mp4" and "... app.mp4".
     With --to, both stems arrive in DIR whole or not at all, keeping their times,
-    and each source is deleted once its copy is in place. The sidecar, "Call
+    and each source is deleted once both copies are in place. A name in DIR that
+    holds another recording is never overwritten: the pair takes the next free
+    number, as in "... mic 2.mp4". The sidecar, "Call
     YYYYMMDD HHMM.json" beside the stems, gives each stem's size, md5 and length.
     Prints the mic path and then the app path, one per line. Run again after a
     failure, it finishes what the failed run left.
