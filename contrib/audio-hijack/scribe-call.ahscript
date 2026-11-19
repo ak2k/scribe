@@ -2,6 +2,11 @@
 // Transcribes the newest "mic" recording of this session and its "app" partner, merges them and
 // writes the merged transcript as speaker turns.
 // #needsSession
+// Where the two finished recordings go. Empty processes them where Audio Hijack wrote them. A
+// folder path, which may start with ~, moves both there whole first, through scribe call-publish:
+// record into a local folder and name the synced one here, since a sync client watching the
+// recorder's folder uploads partial copies while the call runs.
+const PUBLISH_TO = "";
 const log = '"$HOME/Library/Logs/scribe-call.log"';
 const q = (s) => app.shellEscapeArgument(s);
 const stem = (r) => r.fileName.replace(/\.[^.]*$/, "");
@@ -39,7 +44,15 @@ const MIC = / mic( \d+)?$/;
     // priority. It skips a pair already merged: a stop that made no new mic recording picks the
     // previous call again. No shell profile is read, so the scribe found on PATH must supply
     // XAI_API_KEY itself, such as a wrapper script that reads the key from a file and runs scribe.
+    // call-publish writes the call's sidecar, moves the pair when PUBLISH_TO names a folder, and
+    // prints the mic and app paths it leaves, one per line; its log goes to stderr. When it fails,
+    // the work goes on with the recordings where they are.
+    const publish =
+      "scribe call-publish \"$1\" \"$2\"" + (PUBLISH_TO ? " --to " + q(PUBLISH_TO) : "");
     const work =
+      "if p=$(" + publish + "); then " +
+      "set -- \"$(printf '%s\\n' \"$p\" | sed -n 1p)\" \"$(printf '%s\\n' \"$p\" | sed -n 2p)\"; " +
+      "else printf '%s publish failed: %s\\n' \"$(date)\" \"$1\"; fi; " +
       "[ -e \"${1%.*}.merged.json\" ] && { printf '%s skip: %s is already merged\\n' \"$(date)\" \"$1\"; exit 0; }; " +
       "scribe transcribe \"$1\" --no-diarize && scribe transcribe \"$2\" && " +
       "scribe merge \"${1%.*}.transcript.json\" \"${2%.*}.transcript.json\" && " +
