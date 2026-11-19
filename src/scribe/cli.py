@@ -2419,6 +2419,38 @@ def call_watch_command(
         _fail(exc)
 
 
+@app.command(name="call-publish")
+def call_publish_command(
+    mic_path: Path = typer.Argument(..., metavar="MIC", help="The call's microphone stem."),
+    app_path: Path = typer.Argument(..., metavar="APP", help="The call's app stem."),
+    to: Path | None = typer.Option(
+        None,
+        "--to",
+        metavar="DIR",
+        help="The folder to move both stems into. Default: leave them where they are.",
+    ),
+) -> None:
+    """Publish a finished call's two stems with a sidecar, and print their two paths.
+
+    MIC and APP are Audio Hijack's "Call YYYYMMDD HHMM mic.mp4" and "... app.mp4".
+    With --to, both stems arrive in DIR whole or not at all, keeping their times,
+    and each source is deleted once its copy is in place. The sidecar, "Call
+    YYYYMMDD HHMM.json" beside the stems, gives each stem's size, md5 and length.
+    Prints the mic path and then the app path, one per line. Run again after a
+    failure, it finishes what the failed run left.
+    """
+    # Imported here so no other command pays for what it loads.
+    from scribe import call_publish  # noqa: PLC0415  # see above
+
+    configure()
+    try:
+        paths = call_publish.publish(mic_path, app_path, to)
+    except AppError as exc:
+        _fail(exc)
+    for path in paths:
+        typer.echo(str(path))
+
+
 @app.command(name="serve")
 def serve_command(
     host: str = typer.Option("127.0.0.1", "--host", help="Loopback address to listen on."),
