@@ -187,6 +187,8 @@ def test_the_opening_that_confirms_nothing_starts_within_the_next_holds_confirma
         "com.microsoft.teams2",
         "com.apple.avconferenced",
         "com.apple.TelephonyUtilities",
+        "org.ferdium.ferdium-app",
+        "org.ferdium.ferdium-app.helper",
         # A plain prefix, because a boundary rule would lose the real com.microsoft.teams2.
         "com.google.ChromeX",
     ],
