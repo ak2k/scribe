@@ -275,11 +275,15 @@ recording grows in uploads partial copies of it over and over during the call.
 At Stop, `scribe call-publish MIC APP --to DIR` moves both files into DIR
 whole: each is copied to a `.part` name and checked, given the source's
 creation and modification times, and renamed, and the sources are deleted
-last. It never overwrites a different file, and a rerun finishes what a failed
-run left. With `PUBLISH_TO` empty the files stay where they were recorded.
-Either way `call-publish` writes a sidecar beside them, named for the pair
-(`Call 20261118 0958.json` for `Call 20261118 0958 mic.mp4` and `... app.mp4`,
-the names the shipped session gives), and prints the two paths:
+last. It never overwrites a file: when DIR already holds another recording
+under a name, the pair goes under the next free number (`... mic 2.mp4`,
+`... app 2.mp4`), as a second run in the same minute is named. A rerun
+finishes what a failed run left, and a second run on the same pair at once
+exits with nothing done. With `PUBLISH_TO` empty the files stay where they
+were recorded. Either way `call-publish` writes a sidecar beside them, named
+for the pair (`Call 20261118 0958.json` for `Call 20261118 0958 mic.mp4` and
+`... app.mp4`, the names the shipped session gives, or `Call 20261118 0958
+2.json` under a number), and prints the two paths it left them at:
 
 ```json
 {"schema": "scribe.call/1", "start": "2026-11-18T09:58:02-05:00",
