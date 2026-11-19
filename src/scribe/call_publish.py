@@ -254,9 +254,19 @@ def _write_sidecar(path: Path, measured: Mapping[Side, _Measured], host: str) ->
     _write_json(path, car.model_dump_json(by_alias=True, indent=2) + "\n")
 
 
+# On macOS, opening a folder that a File Provider manages can wait on a consent
+# dialog with no time limit. A folder fsync adds nothing there: APFS orders
+# metadata within a volume, so on the same APFS volume a source's unlink cannot
+# persist ahead of the rename that installed its copy, and macOS fsync does not
+# flush the drive's cache anyway.
+_SYNCS_FOLDERS = sys.platform != "darwin"
+
+
 def _sync_folder(folder: Path) -> None:
     # Makes the renames durable before a source is deleted; a platform that
     # cannot sync a folder this way leaves only the files' own sync.
+    if not _SYNCS_FOLDERS:
+        return
     with contextlib.suppress(OSError):
         descriptor = os.open(folder, os.O_RDONLY)
         try:

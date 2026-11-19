@@ -26,7 +26,7 @@ from scribe.errors import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterator
 
 cli = CliRunner()
 
@@ -186,6 +186,86 @@ def test_the_stems_move_whole_with_their_sidecar(tmp_path: Path) -> None:
         "mic": {"name": mic_name, "size": 9000, "md5": want["mic"][1], "duration_ms": 12346},
         "app": {"name": far_name, "size": 13500, "md5": want["app"][1], "duration_ms": 12346},
     }
+
+
+def _watch_folders(
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[list[Path], list[Path], list[Path]]:
+    """Record each folder opened, synced and listed while a publish runs."""
+    opened: list[Path] = []
+    synced: list[Path] = []
+    listed: list[Path] = []
+    folders: dict[int, Path] = {}
+    real_open, real_fsync, real_close = os.open, os.fsync, os.close
+    real_scandir, real_listdir = os.scandir, os.listdir
+
+    def watched_open(path: str | os.PathLike[str], flags: int, *rest: int) -> int:
+        descriptor = real_open(path, flags, *rest)
+        if Path(path).is_dir():
+            opened.append(Path(path).resolve())
+            folders[descriptor] = Path(path).resolve()
+        return descriptor
+
+    def watched_fsync(descriptor: int) -> None:
+        if descriptor in folders:
+            synced.append(folders[descriptor])
+        real_fsync(descriptor)
+
+    def watched_close(descriptor: int) -> None:
+        # A closed descriptor's number is reused, often for a file's own fsync.
+        folders.pop(descriptor, None)
+        real_close(descriptor)
+
+    def watched_scandir(path: str | os.PathLike[str] = ".") -> Iterator[os.DirEntry[str]]:
+        listed.append(Path(path).resolve())
+        return real_scandir(path)
+
+    def watched_listdir(path: str | os.PathLike[str] = ".") -> list[str]:
+        listed.append(Path(path).resolve())
+        return real_listdir(path)
+
+    monkeypatch.setattr(os, "open", watched_open)
+    monkeypatch.setattr(os, "fsync", watched_fsync)
+    monkeypatch.setattr(os, "close", watched_close)
+    monkeypatch.setattr(os, "scandir", watched_scandir)
+    monkeypatch.setattr(os, "listdir", watched_listdir)
+    return opened, synced, listed
+
+
+def test_on_macos_a_publish_opens_and_lists_no_folder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    mic, far = recorded(tmp_path / "rec")
+    out = tmp_path / "out"
+    out.mkdir()
+    monkeypatch.setattr("scribe.call_publish._SYNCS_FOLDERS", False, raising=False)
+
+    with monkeypatch.context() as patched:
+        opened, _synced, listed = _watch_folders(patched)
+        publish(mic, far, out, run=ffprobe())
+
+    assert opened == []
+    assert out.resolve() not in listed
+    assert listing(tmp_path / "rec") == [RECEIPT]
+    assert listing(out) == sorted([MIC, APP, "Call 20261118 0958.json"])
+
+
+def test_elsewhere_a_publish_syncs_both_folders(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    mic, far = recorded(tmp_path / "rec")
+    out = tmp_path / "out"
+    out.mkdir()
+    monkeypatch.setattr("scribe.call_publish._SYNCS_FOLDERS", True, raising=False)
+
+    with monkeypatch.context() as patched:
+        opened, synced, _listed = _watch_folders(patched)
+        publish(mic, far, out, run=ffprobe())
+
+    assert out.resolve() in opened
+    assert (tmp_path / "rec").resolve() in opened
+    assert out.resolve() in synced
+    assert (tmp_path / "rec").resolve() in synced
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="only macOS records a settable birth time")
