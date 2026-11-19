@@ -18,12 +18,24 @@ from typer.testing import CliRunner
 from scribe import call_publish
 from scribe.call_publish import pair_name, publish
 from scribe.cli import app
-from scribe.errors import AppError, ExternalServiceError, InputValidationError
+from scribe.errors import (
+    AppError,
+    ExternalServiceError,
+    InputValidationError,
+    PublishBusyError,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
 cli = CliRunner()
+
+
+@pytest.fixture(autouse=True)
+def own_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep every run's publish lock under the test's own folder."""
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+
 
 MIC = "Call 20261118 0958 mic.mp4"
 APP = "Call 20261118 0958 app.mp4"
@@ -243,20 +255,20 @@ def test_a_failed_second_copy_leaves_nothing_in_the_folder(
     _refused_whole(tmp_path, (mic, far), out)
 
 
-def test_a_failed_second_rename_takes_the_first_back(
+def test_a_failed_second_install_takes_the_first_back(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     mic, far = recorded(tmp_path / "rec")
     out = tmp_path / "out"
     out.mkdir()
-    real = Path.rename
+    real = call_publish.install_final
 
-    def rename(self: Path, target: Path) -> Path:
-        if Path(target).name == APP:
+    def install(part: Path, final: Path) -> None:
+        if final.name == APP:
             raise OSError(5, "Input/output error")
-        return real(self, target)
+        real(part, final)
 
-    monkeypatch.setattr(Path, "rename", rename)
+    monkeypatch.setattr("scribe.call_publish.install_final", install)
 
     with pytest.raises(AppError, match="Input/output error"):
         publish(mic, far, out, run=ffprobe())
@@ -640,18 +652,46 @@ def test_a_pair_stopped_between_its_renames_is_finished(tmp_path: Path) -> None:
     assert listing(out) == sorted([MIC, APP, "Call 20261118 0958.json"])
 
 
-def test_a_publish_already_running_for_the_pair_stops_this_one(tmp_path: Path) -> None:
+def _hold_lock(tmp_path: Path) -> int:
+    lock = tmp_path / "state" / "scribe" / "call-publish.lock"
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    descriptor = os.open(lock, os.O_RDWR | os.O_CREAT, 0o600)
+    fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    return descriptor
+
+
+def test_a_publish_that_waits_out_the_lock_does_nothing(tmp_path: Path) -> None:
     mic, far = recorded(tmp_path / "rec")
     out = tmp_path / "out"
     out.mkdir()
-    lock = tmp_path / "rec" / "Call 20261118 0958.lock"
+    held = _hold_lock(tmp_path)
+    try:
+        with pytest.raises(PublishBusyError, match="another publish held"):
+            publish(mic, far, out, run=ffprobe(), lock_timeout=0.2)
+    finally:
+        os.close(held)
 
-    with lock.open("w") as held:
-        fcntl.flock(held.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        with pytest.raises(AppError, match="another publish"):
-            publish(mic, far, out, run=ffprobe())
+    assert listing(tmp_path / "rec") == sorted([MIC, APP])
+    assert listing(out) == []
 
-    assert listing(tmp_path / "rec") == sorted([MIC, APP, lock.name])
+
+def test_cli_exits_3_when_the_lock_stays_busy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("scribe.call_publish.default_run", ffprobe())
+    monkeypatch.setattr("scribe.call_publish.LOCK_SECONDS", 0.2)
+    mic, far = recorded(tmp_path / "rec")
+    out = tmp_path / "out"
+    out.mkdir()
+    held = _hold_lock(tmp_path)
+    try:
+        result = cli.invoke(app, ["call-publish", str(mic), str(far), "--to", str(out)])
+    finally:
+        os.close(held)
+
+    assert result.exit_code == 3
+    assert result.stdout == ""
+    assert listing(tmp_path / "rec") == sorted([MIC, APP])
     assert listing(out) == []
 
 
@@ -699,7 +739,8 @@ def test_two_publishers_of_one_name_install_one_pair_and_the_loser_keeps_its_sou
 
     def run(name: str, stems: tuple[Path, Path]) -> None:
         try:
-            outcome[name] = publish(*stems, out, run=ffprobe())
+            # Two users' runs: each holds only its own lock.
+            outcome[name] = publish(*stems, out, run=ffprobe(), state=tmp_path / f"state-{name}")
         except BaseException as exc:  # noqa: BLE001  # handed to the test thread to assert on
             outcome[name] = exc
         finally:
@@ -784,3 +825,94 @@ def test_an_unreadable_receipt_is_not_taken(tmp_path: Path) -> None:
 
     with pytest.raises(AppError, match="published copy not found: unreadable"):
         publish(mic, far, out, run=ffprobe())
+
+
+def test_a_run_paused_before_its_install_never_replaces_the_winners_pair(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    winner = recorded(tmp_path / "a")
+    loser = recorded(tmp_path / "b", call=b"MIC SIDE ")
+    bodies = tuple(path.read_bytes() for path in winner)
+    out = tmp_path / "out"
+    out.mkdir()
+    paused, finished = threading.Event(), threading.Event()
+    real = call_publish.install_final
+
+    # The loser has checked that its finals are free and stops before its
+    # first install until the winner has published and deleted its sources.
+    def install(part: Path, final: Path) -> None:
+        if threading.current_thread().name == "b" and not paused.is_set():
+            paused.set()
+            assert finished.wait(5)
+        real(part, final)
+
+    monkeypatch.setattr("scribe.call_publish.install_final", install)
+    outcome: dict[str, tuple[Path, Path] | BaseException] = {}
+
+    def run() -> None:
+        try:
+            outcome["b"] = publish(*loser, out, run=ffprobe(), state=tmp_path / "state-b")
+        except BaseException as exc:  # noqa: BLE001  # handed to the test thread to assert on
+            outcome["b"] = exc
+
+    b = threading.Thread(target=run, name="b")
+    b.start()
+    assert paused.wait(5)
+    won = publish(*winner, out, run=ffprobe(), state=tmp_path / "state-a")
+    finished.set()
+    b.join(10)
+
+    assert won == _published_as(out, "")
+    assert listing(tmp_path / "a") == [RECEIPT]
+    assert (won[0].read_bytes(), won[1].read_bytes()) == bodies
+    assert isinstance(outcome["b"], AppError)
+    assert listing(tmp_path / "b") == sorted([MIC, APP])
+    assert listing(out) == sorted([MIC, APP, "Call 20261118 0958.json"])
+
+
+@pytest.mark.parametrize(
+    "platform",
+    [
+        pytest.param(
+            "darwin",
+            marks=pytest.mark.skipif(sys.platform != "darwin", reason="renamex_np is macOS's"),
+        ),
+        "linux",
+    ],
+)
+def test_an_install_never_replaces_a_final(tmp_path: Path, platform: str) -> None:
+    part, final, taken = tmp_path / "a.part", tmp_path / "a.mp4", tmp_path / "b.mp4"
+    part.write_bytes(b"ours")
+    taken.write_bytes(b"theirs")
+
+    with pytest.raises(FileExistsError):
+        call_publish.install_final(part, taken, platform)
+    assert (part.read_bytes(), taken.read_bytes()) == (b"ours", b"theirs")
+
+    call_publish.install_final(part, final, platform)
+    assert final.read_bytes() == b"ours"
+    assert not part.exists()
+
+
+def test_a_final_swapped_for_same_size_bytes_before_the_delete_keeps_both_sources(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    mic, far = recorded(tmp_path / "rec")
+    out = tmp_path / "out"
+    out.mkdir()
+    real = Path.replace
+
+    def replace(self: Path, target: Path) -> Path:
+        done = real(self, target)
+        if Path(target).name == "Call 20261118 0958.json":
+            swapped = bytearray((out / APP).read_bytes())
+            swapped[0] ^= 0xFF
+            (out / APP).write_bytes(bytes(swapped))
+        return done
+
+    monkeypatch.setattr(Path, "replace", replace)
+
+    with pytest.raises(AppError, match="not this call's"):
+        publish(mic, far, out, run=ffprobe())
+
+    assert listing(tmp_path / "rec") == sorted([MIC, APP])

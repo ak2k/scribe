@@ -9,6 +9,8 @@ synced folder compares with the copies it sees.
 from __future__ import annotations
 
 import contextlib
+import ctypes
+import errno
 import fcntl
 import hashlib
 import os
@@ -18,19 +20,28 @@ import shutil
 import socket
 import subprocess
 import sys
+import time
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
+from functools import cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 import structlog
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from scribe.errors import AppError, InputValidationError, NotFoundError, PublishError
+from scribe.errors import (
+    AppError,
+    InputValidationError,
+    NotFoundError,
+    PublishBusyError,
+    PublishError,
+)
 from scribe.gemini_stt import probe_duration
+from scribe.session_terms import state_dir
 
 if TYPE_CHECKING:
-    from collections.abc import Generator, Mapping
+    from collections.abc import Callable, Generator, Mapping
 
     from structlog.stdlib import BoundLogger
 
@@ -40,6 +51,8 @@ SCHEMA = "scribe.call/1"
 # Audio Hijack names a second run in the same minute "... mic 2" and "... app 2".
 STEM = re.compile(r"(Call [0-9]{8} [0-9]{4}) (mic|app)( [0-9]+)?\.mp4")
 PART = ".part"
+LOCK_SECONDS = 300.0
+_RENAME_EXCL = 0x4
 
 Side = Literal["mic", "app"]
 SIDES: tuple[Side, Side] = ("mic", "app")
@@ -259,30 +272,54 @@ def _same_folder(first: Path, second: Path) -> bool:
 
 
 @contextlib.contextmanager
-def _locked(path: Path) -> Generator[None]:
+def _locked(path: Path, timeout: float) -> Generator[None]:
+    # One lock for every publish this user runs, so two of them never choose a
+    # slot or install into one at once.
     try:
+        path.parent.mkdir(parents=True, exist_ok=True)
         descriptor = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
     except OSError as exc:
         raise PublishError(f"cannot open {path}: {exc.strerror or exc}") from exc
     try:
-        try:
-            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError as exc:
-            raise PublishError(f"another publish of this call holds {path}") from exc
-        # A run that locked a file another run then deleted holds nothing.
-        try:
-            held = path.stat().st_ino == os.fstat(descriptor).st_ino
-        except FileNotFoundError:
-            held = False
-        if not held:
-            raise PublishError(f"another publish of this call holds {path}")
-        try:
-            yield
-        finally:
-            with contextlib.suppress(OSError):
-                path.unlink()
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise PublishBusyError(
+                        f"another publish held {path} for {timeout:g} s"
+                    ) from None
+                time.sleep(0.1)
+        yield
     finally:
         os.close(descriptor)
+
+
+@cache
+def _renamex_np() -> Callable[[bytes, bytes, int], int]:
+    function = ctypes.CDLL(None, use_errno=True).renamex_np
+    function.argtypes = (ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint)
+    function.restype = ctypes.c_int
+    renamex: Callable[[bytes, bytes, int], int] = function
+    return renamex
+
+
+def install_final(part: Path, final: Path, platform: str = sys.platform) -> None:
+    """Give a staged file its final name, failing with FileExistsError if the name is taken.
+
+    A rename would replace a final another run installed after this run checked.
+    """
+    if platform == "darwin":
+        if _renamex_np()(os.fsencode(part), os.fsencode(final), _RENAME_EXCL) != 0:
+            code = ctypes.get_errno()
+            if code == errno.EEXIST:
+                raise FileExistsError(code, os.strerror(code), str(final))
+            raise OSError(code, os.strerror(code), str(final))
+        return
+    os.link(part, final)
+    part.unlink()
 
 
 def short_host() -> str:
@@ -297,6 +334,8 @@ def publish(
     *,
     run: Runner | None = None,
     host: str | None = None,
+    state: Path | None = None,
+    lock_timeout: float | None = None,
 ) -> tuple[Path, Path]:
     """Put a call's mic and app stems in `to` with their sidecar; return the two final paths.
 
@@ -304,7 +343,8 @@ def publish(
     is written beside them. Otherwise both stems arrive whole or neither does,
     under the first number from the stems' own that holds no other recording,
     and a source is deleted only once both copies and the sidecar are in place.
-    A run after one that stopped partway finishes its work.
+    A run after one that stopped partway finishes its work. Runs wait on one
+    lock in `state` (scribe's state directory) and give up after `lock_timeout`.
     """
     base, number = _split(mic, far)
     sources: dict[Side, Path] = {"mic": mic.absolute(), "app": far.absolute()}
@@ -314,7 +354,9 @@ def publish(
     probe = run if run is not None else default_run
     machine = host if host is not None else short_host()
     target = folder if to is None else to.expanduser().resolve()
-    with _locked(folder / f"{base}{_suffix(number)}.lock"):
+    home = state if state is not None else state_dir(os.environ, home=Path.home())
+    wait = lock_timeout if lock_timeout is not None else LOCK_SECONDS
+    with _locked(home / "call-publish.lock", wait):
         if _same_folder(target, folder):
             measured: dict[Side, _Measured] = {s: _measure(sources[s], probe) for s in SIDES}
             _write_sidecar(folder / f"{base}{_suffix(number)}.json", measured, machine)
@@ -470,7 +512,7 @@ def _move(
     measured: Mapping[Side, _Measured],
 ) -> None:
     parts: dict[Side, Path] = {}
-    renamed: list[Side] = []
+    installed: dict[Side, int] = {}
     try:
         for side in copying:
             parts[side] = _staging(finals[side])
@@ -482,13 +524,21 @@ def _move(
         for side in copying:
             if finals[side].exists():
                 raise InputValidationError(f"{finals[side]} appeared while publishing")
-            parts[side].rename(finals[side])
-            renamed.append(side)
-    except (OSError, AppError) as exc:
-        # A final name is never left for one side only.
-        for side in reversed(renamed):
+            # Both ways of installing keep the staged file's inode.
+            inode = parts[side].stat().st_ino
             try:
-                finals[side].rename(parts[side])
+                install_final(parts[side], finals[side])
+            except FileExistsError as exc:
+                raise InputValidationError(f"{finals[side]} appeared while publishing") from exc
+            installed[side] = inode
+    except (OSError, AppError) as exc:
+        # A final name is never left for one side only. Only a final this run
+        # installed goes, and only while it is still that file; its source is
+        # still in place.
+        for side, inode in installed.items():
+            try:
+                if finals[side].stat().st_ino == inode:
+                    finals[side].unlink()
             except OSError as undo:
                 _logger().error("cannot take a stem back", path=str(finals[side]), error=str(undo))
         # Only this run's own staged files; another run's are not ours to remove.

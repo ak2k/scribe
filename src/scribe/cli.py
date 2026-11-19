@@ -51,7 +51,13 @@ from scribe.disputes import (
     summarize,
 )
 from scribe.ear import LocalEars
-from scribe.errors import AppError, EarError, ExternalServiceError, InputValidationError
+from scribe.errors import (
+    AppError,
+    EarError,
+    ExternalServiceError,
+    InputValidationError,
+    PublishBusyError,
+)
 from scribe.fidelity import check_fidelity
 from scribe.gaps import check_gaps, clock, format_gap
 from scribe.log import configure
@@ -171,6 +177,9 @@ _EXIT_NO_CHUNK = 4
 # Distinct from 2 (bad input): the inputs were fine, but xAI heard none of the
 # spans, so nothing is written and a later run can try again.
 _EXIT_NO_VOTE = 5
+# Distinct from 2: another publish held the lock, so this run did nothing and
+# its caller must not touch the recordings either.
+_EXIT_BUSY = 3
 
 
 def _fail(exc: AppError) -> NoReturn:
@@ -2439,7 +2448,8 @@ def call_publish_command(
     number, as in "... mic 2.mp4". The sidecar, "Call
     YYYYMMDD HHMM.json" beside the stems, gives each stem's size, md5 and length.
     Prints the mic path and then the app path, one per line. Run again after a
-    failure, it finishes what the failed run left.
+    failure, it finishes what the failed run left. Exits 3, with nothing done,
+    when another publish holds the lock for 300 s.
     """
     # Imported here so no other command pays for what it loads.
     from scribe import call_publish  # noqa: PLC0415  # see above
@@ -2447,6 +2457,9 @@ def call_publish_command(
     configure()
     try:
         paths = call_publish.publish(mic_path, app_path, to)
+    except PublishBusyError as exc:
+        typer.echo(f"scribe: {' '.join(str(exc).split())}", err=True)
+        raise typer.Exit(_EXIT_BUSY) from exc
     except AppError as exc:
         _fail(exc)
     for path in paths:
