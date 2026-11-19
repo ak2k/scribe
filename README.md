@@ -281,8 +281,9 @@ under a name, the pair goes under the next free number (`... mic 2.mp4`,
 the sources it leaves a receipt in the recorder folder (`Call 20261118
 0958.published.json`) naming the published paths and their md5s, and a later
 run whose sources are gone prints those paths only while the files there still
-match it. A rerun finishes what a failed run left, and a second run on the
-same pair at once exits with nothing done. With `PUBLISH_TO` empty the files stay where they
+match it. A rerun finishes what a failed run left. Runs take turns on one lock
+in scribe's state folder; a run still waiting after 300 s exits 3 with nothing
+done, and the Stop script then leaves the recordings alone. With `PUBLISH_TO` empty the files stay where they
 were recorded. Either way `call-publish` writes a sidecar beside them, named
 for the pair (`Call 20261118 0958.json` for `Call 20261118 0958 mic.mp4` and
 `... app.mp4`, the names the shipped session gives, or `Call 20261118 0958

@@ -45,17 +45,21 @@ const MIC = / mic( \d+)?$/;
     // previous call again. No shell profile is read, so the scribe found on PATH must supply
     // XAI_API_KEY itself, such as a wrapper script that reads the key from a file and runs scribe.
     // call-publish writes the call's sidecar, moves the pair when PUBLISH_TO names a folder, and
-    // prints the mic and app paths it leaves, one per line; its log goes to stderr. When it fails,
-    // the work goes on with the recordings where they are. The skip looks only beside the path
-    // the work runs on: a merged file left in the recorder folder may be an earlier call's under a
-    // reused name. The cost is that a publish that fails and later succeeds transcribes again.
+    // prints the mic and app paths it leaves, one per line; its log goes to stderr. Exit 3 means
+    // another publish held the lock, so this work stops and leaves the recordings to that one. On
+    // any other failure the work goes on with the recordings where they are. The skip needs a
+    // merged file beside the path the work runs on that is newer than its recording: one under a
+    // reused name from an earlier call is older. A publish that fails and later succeeds
+    // transcribes again.
     const publish =
       "scribe call-publish \"$1\" \"$2\"" + (PUBLISH_TO ? " --to " + q(PUBLISH_TO) : "");
     const work =
-      "if p=$(" + publish + "); then " +
+      "p=$(" + publish + "); r=$?; " +
+      "if [ \"$r\" -eq 0 ]; then " +
       "set -- \"$(printf '%s\\n' \"$p\" | sed -n 1p)\" \"$(printf '%s\\n' \"$p\" | sed -n 2p)\"; " +
+      "elif [ \"$r\" -eq 3 ]; then printf '%s publish busy: %s\\n' \"$(date)\" \"$1\"; exit 3; " +
       "else printf '%s publish failed: %s\\n' \"$(date)\" \"$1\"; fi; " +
-      "[ -e \"${1%.*}.merged.json\" ] && { printf '%s skip: %s is already merged\\n' \"$(date)\" \"$1\"; exit 0; }; " +
+      "[ \"${1%.*}.merged.json\" -nt \"$1\" ] && { printf '%s skip: %s is already merged\\n' \"$(date)\" \"$1\"; exit 0; }; " +
       "scribe transcribe \"$1\" --no-diarize && scribe transcribe \"$2\" && " +
       "scribe merge \"${1%.*}.transcript.json\" \"${2%.*}.transcript.json\" && " +
       "scribe turns \"${1%.*}.merged.json\"; " +
