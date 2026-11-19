@@ -256,9 +256,9 @@ def _write_sidecar(path: Path, measured: Mapping[Side, _Measured], host: str) ->
 
 # On macOS, opening a folder that a File Provider manages can wait on a consent
 # dialog with no time limit. A folder fsync adds nothing there: APFS orders
-# metadata within a volume, so a source's unlink cannot persist ahead of the
-# rename that installed its copy, and macOS fsync does not flush the drive's
-# cache anyway.
+# metadata within a volume, so on the same APFS volume a source's unlink cannot
+# persist ahead of the rename that installed its copy, and macOS fsync does not
+# flush the drive's cache anyway.
 _SYNCS_FOLDERS = sys.platform != "darwin"
 
 

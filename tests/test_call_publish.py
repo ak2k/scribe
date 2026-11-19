@@ -188,16 +188,33 @@ def test_the_stems_move_whole_with_their_sidecar(tmp_path: Path) -> None:
     }
 
 
-def _watch_folders(monkeypatch: pytest.MonkeyPatch) -> tuple[list[Path], list[Path]]:
-    """Record each folder opened and each folder listed while a publish runs."""
+def _watch_folders(
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[list[Path], list[Path], list[Path]]:
+    """Record each folder opened, synced and listed while a publish runs."""
     opened: list[Path] = []
+    synced: list[Path] = []
     listed: list[Path] = []
-    real_open, real_scandir, real_listdir = os.open, os.scandir, os.listdir
+    folders: dict[int, Path] = {}
+    real_open, real_fsync, real_close = os.open, os.fsync, os.close
+    real_scandir, real_listdir = os.scandir, os.listdir
 
     def watched_open(path: str | os.PathLike[str], flags: int, *rest: int) -> int:
+        descriptor = real_open(path, flags, *rest)
         if Path(path).is_dir():
             opened.append(Path(path).resolve())
-        return real_open(path, flags, *rest)
+            folders[descriptor] = Path(path).resolve()
+        return descriptor
+
+    def watched_fsync(descriptor: int) -> None:
+        if descriptor in folders:
+            synced.append(folders[descriptor])
+        real_fsync(descriptor)
+
+    def watched_close(descriptor: int) -> None:
+        # A closed descriptor's number is reused, often for a file's own fsync.
+        folders.pop(descriptor, None)
+        real_close(descriptor)
 
     def watched_scandir(path: str | os.PathLike[str] = ".") -> Iterator[os.DirEntry[str]]:
         listed.append(Path(path).resolve())
@@ -208,9 +225,11 @@ def _watch_folders(monkeypatch: pytest.MonkeyPatch) -> tuple[list[Path], list[Pa
         return real_listdir(path)
 
     monkeypatch.setattr(os, "open", watched_open)
+    monkeypatch.setattr(os, "fsync", watched_fsync)
+    monkeypatch.setattr(os, "close", watched_close)
     monkeypatch.setattr(os, "scandir", watched_scandir)
     monkeypatch.setattr(os, "listdir", watched_listdir)
-    return opened, listed
+    return opened, synced, listed
 
 
 def test_on_macos_a_publish_opens_and_lists_no_folder(
@@ -222,7 +241,7 @@ def test_on_macos_a_publish_opens_and_lists_no_folder(
     monkeypatch.setattr("scribe.call_publish._SYNCS_FOLDERS", False, raising=False)
 
     with monkeypatch.context() as patched:
-        opened, listed = _watch_folders(patched)
+        opened, _synced, listed = _watch_folders(patched)
         publish(mic, far, out, run=ffprobe())
 
     assert opened == []
@@ -240,11 +259,13 @@ def test_elsewhere_a_publish_syncs_both_folders(
     monkeypatch.setattr("scribe.call_publish._SYNCS_FOLDERS", True, raising=False)
 
     with monkeypatch.context() as patched:
-        opened, _listed = _watch_folders(patched)
+        opened, synced, _listed = _watch_folders(patched)
         publish(mic, far, out, run=ffprobe())
 
     assert out.resolve() in opened
     assert (tmp_path / "rec").resolve() in opened
+    assert out.resolve() in synced
+    assert (tmp_path / "rec").resolve() in synced
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="only macOS records a settable birth time")
