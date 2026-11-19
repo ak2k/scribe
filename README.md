@@ -208,7 +208,7 @@ already matched to another, starts within 0.25 s of it (rule `bleed-1`).
 
 Audio Hijack, a paid macOS app from Rogue Amoeba for macOS 14.4 or later,
 records the two files. Make one session per call app (Zoom, Microsoft Teams,
-or Google Chrome for Google Meet), with two chains:
+Ferdium, or Google Chrome for Google Meet), with two chains:
 
 - an Application block set to the call app, with Include audio input and Split
   between channels off, into a Recorder block and then an Output Device block,
@@ -258,13 +258,50 @@ a run of the old session going), 3 s after a call app
 takes the microphone, and stops it 30 s after the last one lets go. If the
 session does not start or stop, you get a notification and it tries again. This
 needs Audio Hijack's "Allow execution of external scripts" setting (Settings,
-Advanced). Recording runs whenever a listed app holds the microphone, so a
+Advanced). The listed apps are Chrome, Zoom, Microsoft Teams, Ferdium,
+FaceTime and phone calls. Recording runs whenever a listed app holds the microphone, so a
 browser's use of the microphone for anything else also records; `--app` replaces
 the list. One session serves every call app, so that session captures
 system-wide audio, as `contrib/audio-hijack/Call.ah4session` does. The session
 must record a microphone, which is how the watcher sees that it runs. While
 another Audio Hijack session holds the microphone, the watcher cannot see a
 start or stop take effect, so it may warn and resend.
+
+`contrib/audio-hijack/scribe-call.ahscript`, the session's Session Stop
+script, transcribes and merges the call's two files and writes its turns.
+Point the Recorders at a local folder and name the synced one (Google Drive,
+say) in the script's `PUBLISH_TO`: a sync client watching the folder a
+recording grows in uploads partial copies of it over and over during the call.
+At Stop, `scribe call-publish MIC APP --to DIR` moves both files into DIR
+whole: each is copied to a `.part` name and checked, given the source's
+creation and modification times, and renamed, and the sources are deleted
+last. It never overwrites a file: when DIR already holds another recording
+under a name, the pair goes under the next free number (`... mic 2.mp4`,
+`... app 2.mp4`), as a second run in the same minute is named. Before deleting
+the sources it leaves a receipt in the recorder folder (`Call 20261118
+0958.published.json`) naming the published paths and their md5s, and a later
+run whose sources are gone prints those paths only while the files there still
+match it. A rerun finishes what a failed run left. Runs take turns on one lock
+in scribe's state folder; a run still waiting after 300 s exits 3 with nothing
+done, and the Stop script then leaves the recordings alone. With `PUBLISH_TO` empty the files stay where they
+were recorded. Either way `call-publish` writes a sidecar beside them, named
+for the pair (`Call 20261118 0958.json` for `Call 20261118 0958 mic.mp4` and
+`... app.mp4`, the names the shipped session gives, or `Call 20261118 0958
+2.json` under a number), and prints the two paths it left them at:
+
+```json
+{"schema": "scribe.call/1", "start": "2026-11-18T09:58:02-05:00",
+ "end": "2026-11-18T10:41:17-05:00", "host": "studio",
+ "stems": {"mic": {"name": "Call 20261118 0958 mic.mp4", "size": 41210533,
+                   "md5": "9e107d9d372bb6826bd81d3542a419d6", "duration_ms": 2595012},
+           "app": {"name": "Call 20261118 0958 app.mp4", "size": 41377020,
+                   "md5": "e4d909c290d0fb1ca068ffaddf22cbd0", "duration_ms": 2595034}}}
+```
+
+`start` is the mic file's creation time (on Linux, its modification time less
+its length), `end` the later of the two modification times. A reader of the
+synced folder knows it holds the whole pair when both files' size and md5
+match the sidecar's.
 
 ## Dictate with scribe serve
 

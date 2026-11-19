@@ -47,6 +47,7 @@ DEFAULT_APPS = (
     "com.microsoft.teams",
     "com.apple.avconferenced",
     "com.apple.TelephonyUtilities",
+    "org.ferdium.ferdium-app",
 )
 HIJACK_BUNDLE_ID = "com.rogueamoeba.audiohijack"
 

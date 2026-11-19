@@ -48,3 +48,11 @@ class UnsupportedPlatformError(AppError):
 
 class SpendCapError(AppError):
     """Raised when a paid call could take a run's spending past its cap."""
+
+
+class PublishError(AppError):
+    """Raised when a call's recordings cannot be put in their publish folder."""
+
+
+class PublishBusyError(PublishError):
+    """Raised when another publish holds the publish lock for longer than a run waits."""
